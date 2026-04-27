@@ -50,6 +50,9 @@ EIDE/bin/
 EIDE/obj/
 EIDE/out/
 
+# syscfg.bat
+EIDE/syscfg.bat
+
 # EIDE 模板包
 *.ept
 *.eide-template
