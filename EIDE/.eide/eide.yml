@@ -1,0 +1,173 @@
+version: "4.1"
+name: empty_LP_MSPM0G3507_nortos_keil
+type: ARM
+deviceName: null
+packDir: null
+srcDirs: []
+virtualFolder:
+  name: <virtual_root>
+  files: []
+  folders:
+    - name: Source
+      files:
+        - path: ../template/empty.c
+        - path: ../template/empty.syscfg
+        - path: ../template/keil/startup_mspm0g350x_uvision.s
+        - path: ../template/ti_msp_dl_config.h
+        - path: ../template/ti_msp_dl_config.c
+      folders: []
+    - name: hardware
+      files: []
+      folders: []
+    - name: middle
+      files: []
+      folders: []
+    - name: app
+      files: []
+      folders: []
+dependenceList: []
+outDir: build
+miscInfo:
+  uid: 23eace12a8d7d1a542edbc45d0264067
+targets:
+  empty_LP_MSPM0G3507_nortos_keil:
+    cppPreprocessAttrs:
+      defineList:
+        - __MSPM0G3507__
+      incList:
+        - ../source
+        - ../empty
+        - ../source/third_party/CMSIS/Core/Include
+        - ../template/hardware
+        - ../template/middle
+        - ../template/app
+        - ../template/keil/RTE/_empty_LP_MSPM0G3507_nortos_keil
+      libList: []
+    excludeList: []
+    settings:
+      debugger: cortex-debug
+    toolchain: AC6
+    toolchainConfigMap:
+      AC6:
+        archExtensions: ""
+        cpuType: Cortex-M0+
+        floatingPointHardware: none
+        options:
+          version: 3
+          afterBuildTasks: []
+          asm-compiler:
+            $use: asm-auto
+          beforeBuildTasks:
+            - name: check working directory
+              abortAfterFailed: false
+              command: 'cmd /c "echo Working directory: %CD%"'
+              disable: false
+              stopBuildAfterFailed: false
+            - name: linking syscfg
+              abortAfterFailed: true
+              command: '"${projectRoot}/syscfg.bat" "${projectRoot}" empty.syscfg'
+              disable: false
+              stopBuildAfterFailed: true
+          c/cpp-compiler:
+            language-c: c99
+            language-cpp: c++11
+            link-time-optimization: false
+            one-elf-section-per-function: true
+            optimization: level-2
+            short-enums#wchar: true
+            warnings: misra-compatible
+          global:
+            output-debug-info: enable
+            use-microLIB: false
+          linker:
+            misc-controls: ./libs/driverlib.a
+            output-format: elf
+            ro-base: ""
+            rw-base: ""
+            xo-base: ""
+        scatterFilePath: ../template/keil/mspm0g3507.sct
+        storageLayout:
+          RAM:
+            - id: 1
+              isChecked: false
+              mem:
+                size: "0x8000"
+                startAddr: "0x20200000"
+              noInit: false
+              tag: RAM
+            - id: 2
+              isChecked: false
+              mem:
+                size: "0x8000"
+                startAddr: "0x20300000"
+              noInit: false
+              tag: RAM
+            - id: 3
+              isChecked: false
+              mem:
+                size: "0x0"
+                startAddr: "0x0"
+              noInit: false
+              tag: RAM
+            - id: 1
+              isChecked: false
+              mem:
+                size: "0x8000"
+                startAddr: "0x20000000"
+              noInit: false
+              tag: IRAM
+            - id: 2
+              isChecked: false
+              mem:
+                size: "0x8000"
+                startAddr: "0x20100000"
+              noInit: false
+              tag: IRAM
+          ROM:
+            - id: 1
+              isChecked: false
+              isStartup: true
+              mem:
+                size: "0x0"
+                startAddr: "0x0"
+              tag: ROM
+            - id: 2
+              isChecked: false
+              isStartup: false
+              mem:
+                size: "0x0"
+                startAddr: "0x0"
+              tag: ROM
+            - id: 3
+              isChecked: false
+              isStartup: false
+              mem:
+                size: "0x0"
+                startAddr: "0x0"
+              tag: ROM
+            - id: 1
+              isChecked: false
+              isStartup: false
+              mem:
+                size: "0x20000"
+                startAddr: "0x0"
+              tag: IROM
+            - id: 2
+              isChecked: false
+              isStartup: false
+              mem:
+                size: "0x20000"
+                startAddr: "0x400000"
+              tag: IROM
+        useCustomScatterFile: true
+    uploadConfigMap:
+      JLink:
+        baseAddr: ""
+        bin: ""
+        cpuInfo:
+          cpuName: "null"
+          vendor: "null"
+        otherCmds: ""
+        proType: 1
+        speed: 8000
+    uploader: JLink
