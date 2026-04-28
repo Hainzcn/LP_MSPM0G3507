@@ -385,9 +385,9 @@
           <GroupName>Source</GroupName>
           <Files>
             <File>
-              <FileName>empty.c</FileName>
+              <FileName>main.c</FileName>
               <FileType>1</FileType>
-              <FilePath>../empty.c</FilePath>
+              <FilePath>../main.c</FilePath>
             </File>
             <File>
               <FileName>empty.syscfg</FileName>

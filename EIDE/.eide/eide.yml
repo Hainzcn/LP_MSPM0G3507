@@ -10,7 +10,7 @@ virtualFolder:
   folders:
     - name: Source
       files:
-        - path: ../template/empty.c
+        - path: ../template/main.c
         - path: ../template/empty.syscfg
         - path: ../template/keil/startup_mspm0g350x_uvision.s
         - path: ../template/ti_msp_dl_config.h
