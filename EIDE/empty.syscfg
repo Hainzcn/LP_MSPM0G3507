@@ -1,4 +1,16 @@
 /**
+ * MSPM0G3507 自平衡瞄准小车 —— 阶段 0 引脚定义
+ *
+ * 本文件由 docs/TaskLog/Stage0-PinAllocation.md 中的"引脚分配总表"派生而来，
+ * 任何引脚改动必须先改文档再改本文件，保持双向一致。
+ *
+ * 重要硬件约束（来自 SDK QEIMSPM0.syscfg.js + Common.js getTimerInstances）：
+ *   MSPM0G3507 上能配置硬件 QEI 的定时器只有 TIMG8（TIMG9/10/11 在本器件不存在）。
+ *   因此只有左编码器走硬件 QEI（TIMG8 + J12），右编码器在阶段 0 暂以 GPIO + 双边沿
+ *   中断方式落到 PA12/PA13；阶段 2 再决定是否升级为 CAPTURE 模式。
+ */
+
+/**
  * These arguments were used when this file was generated. They will be automatically applied on subsequent loads
  * via the GUI or CLI. Run CLI with '--help' for additional information on how to override these arguments.
  */
@@ -6,15 +18,233 @@
 //@v2CliArgs --device "MSPM0G3507" --package "LQFP-64(PM)"
 // @cliArgs --board /ti/boards/LP_MSPM0G3507 --rtos nortos
 
-/**
- * Import the modules used in this configuration.
- */
+/* ========================================================================== */
+/* 模块导入                                                                    */
+/* ========================================================================== */
 const SYSCTL = scripting.addModule("/ti/driverlib/SYSCTL");
+const GPIO   = scripting.addModule("/ti/driverlib/GPIO", {}, false);
+const PWM    = scripting.addModule("/ti/driverlib/PWM",  {}, false);
+const QEI    = scripting.addModule("/ti/driverlib/QEI",  {}, false);
+const I2C    = scripting.addModule("/ti/driverlib/I2C",  {}, false);
+const UART   = scripting.addModule("/ti/driverlib/UART", {}, false);
+const ADC12  = scripting.addModule("/ti/driverlib/ADC12", {}, false);
 
-/**
- * Write custom configuration values to the imported modules.
- */
+const Board  = scripting.addModule("/ti/driverlib/Board", {}, false);
 
-const Board = scripting.addModule("/ti/driverlib/Board", {}, false);
-
+/* ========================================================================== */
+/* 时钟                                                                        */
+/* ========================================================================== */
 SYSCTL.forceDefaultClkConfig = true;
+
+/* ========================================================================== */
+/* GPIO 输出组：电机方向 / STBY / 蜂鸣器 / 激光使能 / 状态 LED                  */
+/*   AIN1     = PA15  (TB6612 左电机方向 1)                                    */
+/*   AIN2     = PA16  (TB6612 左电机方向 2)                                    */
+/*   BIN1     = PA26  (TB6612 右电机方向 1)                                    */
+/*   BIN2     = PA27  (TB6612 右电机方向 2)                                    */
+/*   STBY     = PB0   (TB6612 使能，默认低)                                    */
+/*   BUZZER   = PA0   (有源蜂鸣器)                                             */
+/*   LASER_EN = PA1   (激光器使能)                                             */
+/*   LED_R    = PB26  (状态 LED 红，默认亮)                                    */
+/*   LED_G    = PB27  (状态 LED 绿)                                            */
+/*   LED_B    = PB22  (状态 LED 蓝)                                            */
+/* ========================================================================== */
+const GPIO_OUT = GPIO.addInstance();
+GPIO_OUT.$name = "GPIO_OUT";
+GPIO_OUT.associatedPins.create(10);
+
+GPIO_OUT.associatedPins[0].$name             = "GPIO_AIN1";
+GPIO_OUT.associatedPins[0].assignedPin       = "15";
+GPIO_OUT.associatedPins[0].assignedPort      = "PORTA";
+GPIO_OUT.associatedPins[0].direction         = "OUTPUT";
+GPIO_OUT.associatedPins[0].initialValue      = "CLEARED";
+
+GPIO_OUT.associatedPins[1].$name             = "GPIO_AIN2";
+GPIO_OUT.associatedPins[1].assignedPin       = "16";
+GPIO_OUT.associatedPins[1].assignedPort      = "PORTA";
+GPIO_OUT.associatedPins[1].direction         = "OUTPUT";
+GPIO_OUT.associatedPins[1].initialValue      = "CLEARED";
+
+GPIO_OUT.associatedPins[2].$name             = "GPIO_BIN1";
+GPIO_OUT.associatedPins[2].assignedPin       = "26";
+GPIO_OUT.associatedPins[2].assignedPort      = "PORTA";
+GPIO_OUT.associatedPins[2].direction         = "OUTPUT";
+GPIO_OUT.associatedPins[2].initialValue      = "CLEARED";
+
+GPIO_OUT.associatedPins[3].$name             = "GPIO_BIN2";
+GPIO_OUT.associatedPins[3].assignedPin       = "27";
+GPIO_OUT.associatedPins[3].assignedPort      = "PORTA";
+GPIO_OUT.associatedPins[3].direction         = "OUTPUT";
+GPIO_OUT.associatedPins[3].initialValue      = "CLEARED";
+
+GPIO_OUT.associatedPins[4].$name             = "GPIO_STBY";
+GPIO_OUT.associatedPins[4].assignedPin       = "0";
+GPIO_OUT.associatedPins[4].assignedPort      = "PORTB";
+GPIO_OUT.associatedPins[4].direction         = "OUTPUT";
+GPIO_OUT.associatedPins[4].initialValue      = "CLEARED";
+
+GPIO_OUT.associatedPins[5].$name             = "GPIO_BUZZER";
+GPIO_OUT.associatedPins[5].assignedPin       = "0";
+GPIO_OUT.associatedPins[5].assignedPort      = "PORTA";
+GPIO_OUT.associatedPins[5].direction         = "OUTPUT";
+GPIO_OUT.associatedPins[5].initialValue      = "CLEARED";
+
+GPIO_OUT.associatedPins[6].$name             = "GPIO_LASER_EN";
+GPIO_OUT.associatedPins[6].assignedPin       = "1";
+GPIO_OUT.associatedPins[6].assignedPort      = "PORTA";
+GPIO_OUT.associatedPins[6].direction         = "OUTPUT";
+GPIO_OUT.associatedPins[6].initialValue      = "CLEARED";
+
+GPIO_OUT.associatedPins[7].$name             = "GPIO_LED_R";
+GPIO_OUT.associatedPins[7].assignedPin       = "26";
+GPIO_OUT.associatedPins[7].assignedPort      = "PORTB";
+GPIO_OUT.associatedPins[7].direction         = "OUTPUT";
+GPIO_OUT.associatedPins[7].initialValue      = "SET";
+
+GPIO_OUT.associatedPins[8].$name             = "GPIO_LED_G";
+GPIO_OUT.associatedPins[8].assignedPin       = "27";
+GPIO_OUT.associatedPins[8].assignedPort      = "PORTB";
+GPIO_OUT.associatedPins[8].direction         = "OUTPUT";
+GPIO_OUT.associatedPins[8].initialValue      = "CLEARED";
+
+GPIO_OUT.associatedPins[9].$name             = "GPIO_LED_B";
+GPIO_OUT.associatedPins[9].assignedPin       = "22";
+GPIO_OUT.associatedPins[9].assignedPort      = "PORTB";
+GPIO_OUT.associatedPins[9].direction         = "OUTPUT";
+GPIO_OUT.associatedPins[9].initialValue      = "CLEARED";
+
+/* ========================================================================== */
+/* GPIO 输入组：一键启动按键 (S1) + IMU DataReady 中断 + 右编码器 A/B          */
+/*   START_BTN = PA18  (板载 S1，下降沿触发，内部上拉)                         */
+/*   IMU_INT   = PB4   (MPU6050 INT，上升沿触发)                               */
+/*   ENC_R_A   = PA12  (右编码器 A 相，双边沿中断 — 阶段 2 拟升级为 CAPTURE)   */
+/*   ENC_R_B   = PA13  (右编码器 B 相，无中断，仅在 ISR 内读电平判方向)         */
+/* ========================================================================== */
+const GPIO_IN = GPIO.addInstance();
+GPIO_IN.$name = "GPIO_IN";
+GPIO_IN.associatedPins.create(4);
+
+GPIO_IN.associatedPins[0].$name             = "GPIO_START_BTN";
+GPIO_IN.associatedPins[0].assignedPin       = "18";
+GPIO_IN.associatedPins[0].assignedPort      = "PORTA";
+GPIO_IN.associatedPins[0].direction         = "INPUT";
+GPIO_IN.associatedPins[0].interruptEn       = true;
+GPIO_IN.associatedPins[0].polarity          = "FALL";
+GPIO_IN.associatedPins[0].internalResistor  = "PULL_UP";
+
+GPIO_IN.associatedPins[1].$name             = "GPIO_IMU_INT";
+GPIO_IN.associatedPins[1].assignedPin       = "4";
+GPIO_IN.associatedPins[1].assignedPort      = "PORTB";
+GPIO_IN.associatedPins[1].direction         = "INPUT";
+GPIO_IN.associatedPins[1].interruptEn       = true;
+GPIO_IN.associatedPins[1].polarity          = "RISE";
+GPIO_IN.associatedPins[1].internalResistor  = "NONE";
+
+GPIO_IN.associatedPins[2].$name             = "GPIO_ENC_R_A";
+GPIO_IN.associatedPins[2].assignedPin       = "12";
+GPIO_IN.associatedPins[2].assignedPort      = "PORTA";
+GPIO_IN.associatedPins[2].direction         = "INPUT";
+GPIO_IN.associatedPins[2].interruptEn       = true;
+GPIO_IN.associatedPins[2].polarity          = "RISE_FALL";
+GPIO_IN.associatedPins[2].internalResistor  = "NONE";
+
+GPIO_IN.associatedPins[3].$name             = "GPIO_ENC_R_B";
+GPIO_IN.associatedPins[3].assignedPin       = "13";
+GPIO_IN.associatedPins[3].assignedPort      = "PORTA";
+GPIO_IN.associatedPins[3].direction         = "INPUT";
+GPIO_IN.associatedPins[3].interruptEn       = false;
+GPIO_IN.associatedPins[3].internalResistor  = "NONE";
+
+/* ========================================================================== */
+/* TIMA0 PWM —— TB6612 双电机驱动                                              */
+/*   PWMA (Left)  = PA8 = TIMA0_C0                                             */
+/*   PWMB (Right) = PA9 = TIMA0_C1                                             */
+/*   频率 20 kHz @ MCLK 32 MHz (默认 SYSOSC)                                   */
+/*     LOAD = 32e6 / 20e3 - 1 = 1599                                           */
+/*   若日后切换到 80 MHz HFXT，请把 timerCount 改为 3999 并同步更新本文档      */
+/* ========================================================================== */
+const PWM_MOTOR = PWM.addInstance();
+PWM_MOTOR.$name                            = "PWM_MOTOR";
+PWM_MOTOR.timerCount                       = 1599;
+PWM_MOTOR.timerStartTimer                  = true;
+PWM_MOTOR.peripheral.$assign               = "TIMA0";
+PWM_MOTOR.peripheral.ccp0Pin.$assign       = "PA8";
+PWM_MOTOR.peripheral.ccp1Pin.$assign       = "PA9";
+PWM_MOTOR.PWM_CHANNEL_0.$name              = "PWM_MOTOR_LEFT";
+PWM_MOTOR.PWM_CHANNEL_1.$name              = "PWM_MOTOR_RIGHT";
+PWM_MOTOR.PWM_CHANNEL_0.dutyCycle          = 0;
+PWM_MOTOR.PWM_CHANNEL_1.dutyCycle          = 0;
+
+/* ========================================================================== */
+/* TIMG8 QEI —— 左编码器 (复用 LaunchPad J12)                                  */
+/*   PHA   = PA29 = TIMG8_CCP0                                                 */
+/*   PHB   = PA30 = TIMG8_CCP1                                                 */
+/*   IDX   = PB14 = TIMG8_IDX  (3 Pin Mode 已开启，预留 Z 相)                  */
+/*   注：MSPM0G3507 上仅 TIMG8 支持硬件 QEI；右编码器只能软件模拟。            */
+/* ========================================================================== */
+const QEI_LEFT = QEI.addInstance();
+QEI_LEFT.$name                             = "QEI_LEFT";
+QEI_LEFT.enableIndexInput                  = true;
+QEI_LEFT.loadValue                         = 0xFFFF;
+QEI_LEFT.timerStartTimer                   = true;
+QEI_LEFT.peripheral.$assign                = "TIMG8";
+QEI_LEFT.peripheral.ccp0Pin.$assign        = "PA29";
+QEI_LEFT.peripheral.ccp1Pin.$assign        = "PA30";
+QEI_LEFT.peripheral.idxPin.$assign         = "PB14";
+
+/* ========================================================================== */
+/* I2C1 —— MPU6050                                                             */
+/*   SCL = PB2, SDA = PB3, 400 kHz (Fast mode)                                 */
+/*   外部需 4.7 kΩ 上拉到 3V3 (LaunchPad 板载未提供，请在小车主板上加)         */
+/* ========================================================================== */
+const IMU_I2C = I2C.addInstance();
+IMU_I2C.$name                              = "I2C_IMU";
+IMU_I2C.basicEnableController              = true;
+IMU_I2C.basicControllerStandardBusSpeed    = "Fast";
+IMU_I2C.peripheral.$assign                 = "I2C1";
+IMU_I2C.peripheral.sdaPin.$assign          = "PB3";
+IMU_I2C.peripheral.sclPin.$assign          = "PB2";
+
+/* ========================================================================== */
+/* UART0 —— 开发期日志 (XDS-UART 桥)                                           */
+/*   TX = PA10, RX = PA11, 115200 8N1                                          */
+/* ========================================================================== */
+const LOG_UART = UART.addInstance();
+LOG_UART.$name                             = "UART_LOG";
+LOG_UART.targetBaudRate                    = 115200;
+LOG_UART.peripheral.$assign                = "UART0";
+LOG_UART.peripheral.txPin.$assign          = "PA10";
+LOG_UART.peripheral.rxPin.$assign          = "PA11";
+
+/* ========================================================================== */
+/* UART1 —— K230 通讯 (DMA TX/RX)                                              */
+/*   TX = PB6, RX = PB7, 921600 8N1                                            */
+/*   注：PB6/PB7 在 MSPM0G3507 LQFP-64 上是 UART1 引脚（不是 UART3）。         */
+/*       UART3 在本器件上的合法 TX/RX 组合是 PA26/PA25 或 PB12/PA13 等，       */
+/*       与本项目的 TB6612 BIN1/BIN2 / 右编码器 B 相冲突，因此用 UART1。       */
+/*   DMA 子模块由 SDK 在 enabledDMA*Triggers != "None" 时自动实例化            */
+/* ========================================================================== */
+const K230_UART = UART.addInstance();
+K230_UART.$name                            = "UART_K230";
+K230_UART.targetBaudRate                   = 921600;
+K230_UART.enableFIFO                       = true;
+K230_UART.enabledDMARXTriggers             = "DL_UART_DMA_INTERRUPT_RX";
+K230_UART.enableDMARX                      = true;
+K230_UART.enabledDMATXTriggers             = "DL_UART_DMA_INTERRUPT_TX";
+K230_UART.enableDMATX                      = true;
+K230_UART.peripheral.$assign               = "UART1";
+K230_UART.peripheral.txPin.$assign         = "PB6";
+K230_UART.peripheral.rxPin.$assign         = "PB7";
+
+/* ========================================================================== */
+/* ADC0 —— 电池电压分压采样                                                    */
+/*   BAT_VSENSE = PB24 = ADC0_5                                                */
+/*   12-bit, 软件触发, 内部 VREF (2.5 V 默认)                                  */
+/* ========================================================================== */
+const BAT_ADC = ADC12.addInstance();
+BAT_ADC.$name                              = "ADC_BAT";
+BAT_ADC.sampClkSrc                         = "DL_ADC12_CLOCK_ULPCLK";
+BAT_ADC.resolution                         = "DL_ADC12_SAMP_CONV_RES_12_BIT";
+BAT_ADC.adcMem0chansel                     = "DL_ADC12_INPUT_CHAN_5";
+BAT_ADC.peripheral.$assign                 = "ADC0";
+BAT_ADC.peripheral.adcPin5.$assign         = "PB24";
