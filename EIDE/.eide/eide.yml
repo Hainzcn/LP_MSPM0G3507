@@ -11,19 +11,40 @@ virtualFolder:
     - name: Source
       files:
         - path: ../template/main.c
-        - path: ../template/empty.syscfg
+        - path: ./empty.syscfg
         - path: ../template/keil/startup_mspm0g350x_uvision.s
-        - path: ../template/ti_msp_dl_config.h
-        - path: ../template/ti_msp_dl_config.c
+        - path: ./ti_msp_dl_config.h
+        - path: ./ti_msp_dl_config.c
       folders: []
     - name: hardware
-      files: []
+      files:
+        - path: ../template/hardware/bsp_systick.h
+        - path: ../template/hardware/bsp_systick.c
+        - path: ../template/hardware/bsp_log_uart.h
+        - path: ../template/hardware/bsp_log_uart.c
+        - path: ../template/hardware/bsp_bt_uart.h
+        - path: ../template/hardware/bsp_bt_uart.c
+        - path: ../template/hardware/bsp_imu_i2c.h
+        - path: ../template/hardware/bsp_imu_i2c.c
+        - path: ../template/hardware/bsp_k230_uart.h
+        - path: ../template/hardware/bsp_k230_uart.c
+        - path: ../template/hardware/bsp_gpio.c
+        - path: ../template/hardware/bsp_gpio.h
+        - path: ../template/hardware/bsp_flash_pad.c
       folders: []
     - name: middle
-      files: []
+      files:
+        - path: ../template/middle/mpu6050.h
+        - path: ../template/middle/mpu6050.c
+        - path: ../template/middle/att_filter.h
+        - path: ../template/middle/att_filter.c
+        - path: ../template/middle/vofa.h
+        - path: ../template/middle/vofa.c
       folders: []
     - name: app
-      files: []
+      files:
+        - path: ../template/app/app_telemetry.h
+        - path: ../template/app/app_telemetry.c
       folders: []
 dependenceList: []
 outDir: build
@@ -72,20 +93,15 @@ targets:
           c/cpp-compiler:
             language-c: c99
             language-cpp: c++11
-            link-time-optimization: false
             one-elf-section-per-function: true
             optimization: level-2
             short-enums#wchar: true
             warnings: misra-compatible
           global:
             output-debug-info: enable
-            use-microLIB: false
           linker:
             misc-controls: ./libs/driverlib.a
             output-format: elf
-            ro-base: ""
-            rw-base: ""
-            xo-base: ""
         scatterFilePath: ../template/keil/mspm0g3507.sct
         storageLayout:
           RAM:
@@ -164,7 +180,7 @@ targets:
     uploadConfigMap:
       Custom:
         bin: ""
-        commandLine: '"A:/ti/uniflash_9.5.0/dslite.bat" --config="A:/ti/uniflash_9.5.0/user_files/configs/MSPM0G3507.ccxml" -e -f -v "${ExecutableName}.hex"'
+        commandLine: '"A:/ti/uniflash_9.5.0/dslite.bat" --config="A:/ti/uniflash_9.5.0/user_files/configs/MSPM0G3507.ccxml" -e -f -v "${ExecutableName}.axf"'
         eraseChipCommand: '"A:/ti/uniflash_9.5.0/dslite.bat" --config="A:/ti/uniflash_9.5.0/user_files/configs/MSPM0G3507.ccxml" -e'
       JLink:
         baseAddr: ""

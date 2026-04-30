@@ -28,7 +28,7 @@
 |--------|------|------|
 | IMU 接口 | I²C（MPU6050 仅支持 I²C） | 占用 I2C1（PB2/PB3）+ 一根 INT |
 | 蜂鸣器类型 | 有源（GPIO 高低电平直驱） | 不占 PWM 通道 |
-| 蓝牙串口 | 当前阶段仅"引脚预留"，UART2 不实例化 | PB16/PB17 暂不分配给其它功能 |
+| 蓝牙串口 | **阶段 1 已实例化 UART3 (PB12 TX / PB13 RX, 115200 8N1, RX 中断)** | 用于 MPU6050 姿态数据 VOFA+ 可视化；外设由 UART2 改为 UART3 是为绕开 SDK multi-pad pin 模板生成 bug，详见 [Stage1-IMU-BT-Telemetry.md §8](Stage1-IMU-BT-Telemetry.md) |
 | 编码器 Z 相 | PB14 配为 TIMG8 IDX 输入（3 Pin Mode） | 编码器无 Z 相也不冲突，留作扩展 |
 | **左/右编码器解码方式** | **左 = 硬件 QEI（TIMG8）；右 = GPIO 双边沿中断（阶段 2 评估升级 CAPTURE）** | MSPM0G3507 仅 TIMG8 支持 SysConfig QEI 模块 |
 | TB6612 控制方式 | 2 PWM + 4 方向 + 1 STBY | 共 7 根线 |
@@ -109,6 +109,8 @@
 | IMU_INT        | PB4  | 52         | IN   | GPIO + EXTI                  | MPU6050 DataReady，上升沿触发 |
 | K230_TX        | PB6  | 58         | OUT  | **UART1_TX**                 | DMA TX 通道 |
 | K230_RX        | PB7  | 59         | IN   | **UART1_RX**                 | DMA RX 通道 |
+| BT_TX          | PB12 | 64         | OUT  | **UART3_TX**                 | 蓝牙 HC-04，115200 8N1，遥测口（PINCM29，单 pad） |
+| BT_RX          | PB13 | 1          | IN   | **UART3_RX**                 | 蓝牙 HC-04，RX 中断进环缓冲（PINCM30，单 pad） |
 | BUZZER         | PA0  | 33         | OUT  | GPIO                         | 有源蜂鸣器，J4 OFF, J19 OFF |
 | START_BTN      | PA18 | 11         | IN   | GPIO + EXTI                  | 板载 S1，J8 ON，下降沿触发 |
 | LASER_EN       | PA1  | 34         | OUT  | GPIO                         | J20 OFF，默认低 |
@@ -121,8 +123,7 @@
 
 | 信号        | 引脚 | LQFP 引脚号 | 用途                       | 启用条件 |
 |-------------|------|------------|---------------------------|----------|
-| BT_TX (rsv) | PB17 | 14         | 蓝牙模块 TX (UART2_TX 候选) | 后期蓝牙模块到位时再实例化 UART2 |
-| BT_RX (rsv) | PB16 | 4          | 蓝牙模块 RX (UART2_RX 候选) | 同上 |
+| —           | —    | —          | 当前无预留项                 | 阶段 1 蓝牙引脚已实例化（见 3.2 BT_TX/BT_RX） |
 
 ### 3.4 禁用（硬件不可作通用 IO）
 
@@ -184,7 +185,7 @@
 
 | 项目 | 配置 |
 |------|------|
-| 外设 | **UART1**（不是 UART3） |
+| 外设 | **UART1**（不是 UART3，UART3 让给蓝牙串口） |
 | 引脚 | TX = PB6，RX = PB7 |
 | 电平 | 3.3 V（K230 GPIO 也是 3.3 V，可直连，注意共地） |
 | 波特率 | 921600 8N1 |
@@ -193,9 +194,24 @@
 | 帧格式 | `0xAA 0x55 \| LEN \| CMD \| PAYLOAD \| CRC16 \| 0x55 0xAA`（详见阶段 1 协议） |
 | 心跳 | 双向 50 Hz，超时 200 ms 触发降级 |
 
-> **外设选择依据**：MSPM0G3507 LQFP-64 上 PB6/PB7 是 **UART1** 的 TX/RX 引脚（参 [bsl_host_mcu_uart.syscfg](file:///A:/Program%20Files/ti/mspm0_sdk_2_10_00_04/examples/nortos/LP_MSPM0G3507/bsl/bsl_host_mcu_to_mspm0g1x0x_g3x0x_target_uart/bsl_host_mcu_uart.syscfg) 第 55-57 行）；UART3 在该器件的合法引脚组合是 PA26/PA25 或 PB12/PA13 等，与本项目 TB6612 BIN1（PA26）/BIN2（PA27）/右编码器 ENC_R_B（PA13）冲突，所以 K230 通讯固定用 UART1。
+> **外设选择依据**：MSPM0G3507 LQFP-64 上 PB6/PB7 是 **UART1** 的 TX/RX 引脚（PINCM23/PINCM24，参 [mspm0g350x.h:707/718](file:///A:/Program%20Files/ti/mspm0_sdk_2_10_00_04/source/ti/devices/msp/m0p/mspm0g350x.h)）。
 
-### 4.5 ADC 电池分压
+### 4.5 蓝牙串口 UART
+
+| 项目 | 配置 |
+|------|------|
+| 外设 | **UART3** |
+| 引脚 | TX = PB12 (PINCM29)，RX = PB13 (PINCM30) |
+| 模块 | HC-04（BC417 经典蓝牙 SPP，需用 USB-TTL AT 配 115200 一次） |
+| 电平 | HC-04 Vcc 5V，TXD/RXD 3.3 V LVTTL 可直连 MSPM0 |
+| 波特率 | 115200 8N1 |
+| FIFO | 启用，深度 4×8 |
+| 中断 | RX FIFO 半满中断（用作上位机控制位接收，本阶段进环缓冲不解析） |
+| DMA | 不开（VOFA+ JustFloat 帧仅 20 B，阻塞 TX 1.74 ms 可接受） |
+
+> **外设选择依据 + 踩坑记录**：原计划走 UART2 + PB17/PB16（PINCM43/PINCM33），但 SDK 2.10.00.04 在 LQFP-64(PM) 上对该 multi-pad 引脚组生成 `ti_msp_dl_config.h` 时 `getGPIONumberMultiPad → identifyPadIndex` 落到越界索引，崩在 `Common.js:sliceNumber` 上。改用 UART3 + PB12/PB13（单 pad，PINCM29/PINCM30）规避。详细诊断与修复过程见 [Stage1-IMU-BT-Telemetry.md §8](Stage1-IMU-BT-Telemetry.md)。
+
+### 4.6 ADC 电池分压
 
 | 项目 | 配置 |
 |------|------|
@@ -207,24 +223,26 @@
 | 分压 | 外部分压电阻把电池电压（3S Li-ion ≈ 12.6 V）分到 ≤ 3 V 范围（推荐 R1 = 100k，R2 = 22k，比值 ≈ 1/5.5） |
 | 软件保护 | 实测 < 9.5 V 触发"低电压告警"，< 9.0 V 触发"安全停车" |
 
-### 4.6 GPIO（汇总）
+### 4.7 GPIO（汇总）
 
-| 信号 | 引脚 | 方向 | 上电初值 | 中断 | 备注 |
-|------|------|------|----------|------|------|
-| AIN1 | PA15 | OUT | 0 | — | TB6612 |
-| AIN2 | PA16 | OUT | 0 | — | TB6612 |
-| BIN1 | PA26 | OUT | 0 | — | TB6612 |
-| BIN2 | PA27 | OUT | 0 | — | TB6612 |
-| STBY | PB0  | OUT | 0 | — | 默认禁用电机 |
-| BUZZER | PA0 | OUT | 0 | — | 默认静音 |
-| LASER_EN | PA1 | OUT | 0 | — | 默认关闭激光 |
-| LED_STATUS_R | PB26 | OUT | 1（起播红灯，提示未就绪）| — | |
-| LED_STATUS_G | PB27 | OUT | 0 | — | |
-| LED_STATUS_B | PB22 | OUT | 0 | — | |
-| IMU_INT | PB4 | IN  | — | 上升沿 | DataReady |
-| START_BTN | PA18 | IN | — | 下降沿 | S1 按下时拉低，需要内部上拉 |
-| ENC_R_A | PA12 | IN | — | 双边沿 | 右编码器 A 相，软件 X4 解码 |
-| ENC_R_B | PA13 | IN | — | 无中断 | 右编码器 B 相，仅在 ENC_R_A 中断 ISR 内读电平判方向 |
+> **重要**：14 个业务 GPIO 全部由 [`template/hardware/bsp_gpio.{h,c}`](../../template/hardware/bsp_gpio.h) 统一初始化，**不再走 SysConfig**。原因是 SDK 2.10.00.04 GPIO module 在 multi-pad 引脚上有 codegen 体系性 bug（详见 [Stage1-IMU-BT-Telemetry.md §8.5](Stage1-IMU-BT-Telemetry.md)）。改引脚流程：先改本表 → 改 `bsp_gpio.h` 对应宏（`BSP_<NAME>_PORT/PIN/IOMUX`） → 改 `bsp_gpio.c` init 语句。**禁止**在 syscfg GUI 里再 addInstance() GPIO 模块。
+
+| 信号 | 引脚 | 方向 | 上电初值 | 中断 | BSP 宏前缀 | 备注 |
+|------|------|------|----------|------|------------|------|
+| AIN1 | PA15 | OUT | 0 | — | `BSP_AIN1_*` | TB6612 |
+| AIN2 | PA16 | OUT | 0 | — | `BSP_AIN2_*` | TB6612 |
+| BIN1 | PA26 | OUT | 0 | — | `BSP_BIN1_*` | TB6612 |
+| BIN2 | PA27 | OUT | 0 | — | `BSP_BIN2_*` | TB6612 |
+| STBY | PB0  | OUT | 0 | — | `BSP_STBY_*` | 默认禁用电机 |
+| BUZZER | PA0 | OUT | 0 | — | `BSP_BUZZER_*` | 默认静音 |
+| LASER_EN | PA1 | OUT | 0 | — | `BSP_LASER_EN_*` | 默认关闭激光 |
+| LED_STATUS_R | PB26 | OUT | 1（起播红灯，提示未就绪）| — | `BSP_LED_R_*` | bsp_gpio_init 设 SET，IMU init 完成后由 main.c 拉低 |
+| LED_STATUS_G | PB27 | OUT | 0 | — | `BSP_LED_G_*` | 5 Hz 心跳由 app_telemetry 翻转 |
+| LED_STATUS_B | PB22 | OUT | 0 | — | `BSP_LED_B_*` | 留作业务状态指示 |
+| IMU_INT | PB4 | IN  | — | 上升沿（**阶段 1 不开 NVIC**） | `BSP_IMU_INT_*` | DataReady；阶段 1 用 SysTick 1 kHz 轮询 |
+| START_BTN | PA18 | IN | — | 下降沿（**阶段 1 不开 NVIC**） | `BSP_START_BTN_*` | S1 按下时拉低，bsp_gpio_init 已配内部上拉 |
+| ENC_R_A | PA12 | IN | — | 双边沿（**阶段 1 不开 NVIC**） | `BSP_ENC_R_A_*` | 右编码器 A 相，阶段 2 拟开中断或升 CAPTURE |
+| ENC_R_B | PA13 | IN | — | 无中断 | `BSP_ENC_R_B_*` | 右编码器 B 相，ISR 内读电平判方向 |
 
 ---
 
@@ -281,7 +299,9 @@
 
 ## 6. 后续维护规则
 
-1. **本表是唯一真源**：任何引脚改动必须先改本表，再改 [EIDE/empty.syscfg](../../EIDE/empty.syscfg)，再改驱动代码，再更新阶段验收文档。三者不一致以本表为准。
+1. **本表是唯一真源**：任何引脚改动必须先改本表，再按引脚类型走对应路径，最后更新阶段验收文档。
+   - **业务 GPIO**（§4.7 表中所有引脚）：改 [`template/hardware/bsp_gpio.h`](../../template/hardware/bsp_gpio.h) 对应 `BSP_<NAME>_PORT/PIN/IOMUX` + 必要时改 [`bsp_gpio.c`](../../template/hardware/bsp_gpio.c) init 语句。**不进 SysConfig**（理由见 §4.7 提示与 [Stage1-IMU-BT-Telemetry.md §8.5](Stage1-IMU-BT-Telemetry.md)）。
+   - **Peripheral 引脚**（PWM/QEI/I2C/UART/ADC 的 ccp/sda/scl/tx/rx/adcPin 等）：改 [`EIDE/empty.syscfg`](../../EIDE/empty.syscfg)，触发 `syscfg.bat` 重生 `ti_msp_dl_config.{c,h}`；这条路径走 SDK `getDualBondedPadFunction`，不踩 multi-pad bug。
 2. **改动需走 PR / 提交说明**：在 commit message 标 `[pin]` 标签，并在 [docs/Overview/Overview.md](../Overview/Overview.md) 引用。
 3. **跳线变化记入本文第 2 节**：不要散落在驱动文件注释里。
 4. **预留引脚不允许"借用"**：3.3 节预留的 PB16/PB17 在蓝牙到位前不得被其他模块占用；如确需占用，必须升级本表。
@@ -296,3 +316,6 @@
 | 2026-04-29 | v0.1 | 阶段 0 初版，确立全部业务引脚、跳线决策与上电验证清单 | 主控团队 |
 | 2026-04-29 | v0.2 | 经 SDK 源码核对，MSPM0G3507 仅 TIMG8 支持 SysConfig 硬件 QEI；左轮 QEI 由 TIMA1 改为 TIMG8（J12 引脚不变），右轮改用 GPIO 双边沿中断软件 X4 解码（PA12/PA13），阶段 2 评估升级为 CAPTURE | 主控团队 |
 | 2026-04-29 | v0.3 | 经 SDK 例程核对，PB6/PB7 在 LQFP-64 是 UART1（不是 UART3）；K230 通讯外设由 UART3 改为 UART1，引脚不变 | 主控团队 |
+| 2026-04-29 | v0.4 | 阶段 1 实例化 UART2 蓝牙串口（HC-04，PB17/PB16，115200 8N1，RX 中断），PB16/PB17 由「预留」迁入「业务模块」，详见 [Stage1-IMU-BT-Telemetry.md](Stage1-IMU-BT-Telemetry.md) | 主控团队 |
+| 2026-04-29 | v0.5 | **撤销 v0.4** 的 UART2/PB17/PB16 决定（命中 SDK 2.10.00.04 multi-pad 引脚 codegen bug），改用 **UART3 / PB12 (TX) / PB13 (RX)**（PINCM29/PINCM30 单 pad），新增 §4.5 蓝牙串口外设详表，K230 §4.4 → §4.4，ADC §4.5 → §4.6，GPIO §4.6 → §4.7 | 主控团队 |
+| 2026-04-30 | v0.6 | 第五轮编译彻底确认 SDK 2.10 GPIO module 在所有 multi-pad 引脚上 codegen 不可用（无 syntax workaround；详见 [Stage1-IMU-BT-Telemetry.md §8.5](Stage1-IMU-BT-Telemetry.md) 根因复盘）。**14 个业务 GPIO 由 [`template/hardware/bsp_gpio.{h,c}`](../../template/hardware/bsp_gpio.h) 接管**，syscfg 不再 addInstance() GPIO 模块。§4.7 表头补充 `BSP_<NAME>_*` 宏前缀列与中断说明（阶段 1 输入引脚均不开 NVIC，留给阶段 2）；§6 维护规则把"修引脚"流程拆成"业务 GPIO 走 BSP / Peripheral 引脚走 SysConfig"两条独立路径 | 主控团队 |

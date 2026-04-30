@@ -37,123 +37,35 @@ const Board  = scripting.addModule("/ti/driverlib/Board", {}, false);
 SYSCTL.forceDefaultClkConfig = true;
 
 /* ========================================================================== */
-/* GPIO 输出组：电机方向 / STBY / 蜂鸣器 / 激光使能 / 状态 LED                  */
-/*   AIN1     = PA15  (TB6612 左电机方向 1)                                    */
-/*   AIN2     = PA16  (TB6612 左电机方向 2)                                    */
-/*   BIN1     = PA26  (TB6612 右电机方向 1)                                    */
-/*   BIN2     = PA27  (TB6612 右电机方向 2)                                    */
-/*   STBY     = PB0   (TB6612 使能，默认低)                                    */
-/*   BUZZER   = PA0   (有源蜂鸣器)                                             */
-/*   LASER_EN = PA1   (激光器使能)                                             */
-/*   LED_R    = PB26  (状态 LED 红，默认亮)                                    */
-/*   LED_G    = PB27  (状态 LED 绿)                                            */
-/*   LED_B    = PB22  (状态 LED 蓝)                                            */
+/* GPIO 由 BSP 接管，不再走 SysConfig                                          */
+/*                                                                              */
+/* 历史背景（详见 docs/TaskLog/Stage1-IMU-BT-Telemetry.md §8.5）：              */
+/*   SDK 2.10 (sysconfig 1.27.0) 在 GPIO module 的 codegen 路径上，对          */
+/*   "multi-pad / dual-bonded" 引脚（LQFP-64 上 PA13/15/16/18/26/27、         */
+/*   PB22/26/27 等高 PINCM 引脚）存在体系性 bug：                              */
+/*     · Common.js getGPIOPortMultiPad()/getGPINumberMultiPad() 走             */
+/*       identifyPadIndex() 分支；                                             */
+/*     · 该函数在 GPIO 路径下 (peripheralName === undefined) 用                */
+/*       `peripheralName + "." + pinInterfaceName` 去 indexOf，常量化为        */
+/*       "undefined.undefined"，永远 -1，结果 modeMiddleIndex 后回退到         */
+/*       padIndex = 0，再被 `find(item => item.mode === "1")` 第一项命中       */
+/*       到 alternate pad（如 PB26 → PC1，PA15 → PA1），生成出来的 .h 里      */
+/*       PIN 与 .c 里 portName 全部错位（典型症状：DL_GPIO_clearPins(GPIOC,   */
+/*       ...) 编译失败 / LED_R 与 LED_G 撞同一个 PIN_1）。                    */
+/*     · 试过 `pin.$assign="PB26"`、`assignedPin="26"` + instance.port、       */
+/*       拆 GPIO_OUT_A/B 等 4 种写法，**都救不回来**——bug 在 codegen，       */
+/*       不在 syntax。peripheral 引脚（UART/I2C/PWM/QEI/ADC）走                */
+/*       getDualBondedPadFunction，那条路径正常，故 syscfg 仅留 peripheral。  */
+/*                                                                              */
+/* 因此本工程：                                                                 */
+/*   · syscfg 不再 addInstance() GPIO 模块，全部 14 个业务 GPIO 引脚由         */
+/*     `template/hardware/bsp_gpio.[ch]` 用 IOMUX_PINCMxx + DL_GPIO_PIN_<bit> */
+/*     直接初始化；                                                            */
+/*   · 业务代码用 BSP_LED_R_PORT/PIN、BSP_BUZZER_PORT/PIN 等宏访问，名字与    */
+/*     pin 分配文档（Stage0-PinAllocation.md）一一对应；                      */
+/*   · GPIO power 启用由 SDK 在 SYSCFG_DL_initPower() 内自动包含（peripheral  */
+/*     pin 占用了 PORTA/PORTB，触发 DL_GPIO_enablePower(GPIOA/B)）。           */
 /* ========================================================================== */
-const GPIO_OUT = GPIO.addInstance();
-GPIO_OUT.$name = "GPIO_OUT";
-GPIO_OUT.associatedPins.create(10);
-
-GPIO_OUT.associatedPins[0].$name             = "GPIO_AIN1";
-GPIO_OUT.associatedPins[0].assignedPin       = "15";
-GPIO_OUT.associatedPins[0].assignedPort      = "PORTA";
-GPIO_OUT.associatedPins[0].direction         = "OUTPUT";
-GPIO_OUT.associatedPins[0].initialValue      = "CLEARED";
-
-GPIO_OUT.associatedPins[1].$name             = "GPIO_AIN2";
-GPIO_OUT.associatedPins[1].assignedPin       = "16";
-GPIO_OUT.associatedPins[1].assignedPort      = "PORTA";
-GPIO_OUT.associatedPins[1].direction         = "OUTPUT";
-GPIO_OUT.associatedPins[1].initialValue      = "CLEARED";
-
-GPIO_OUT.associatedPins[2].$name             = "GPIO_BIN1";
-GPIO_OUT.associatedPins[2].assignedPin       = "26";
-GPIO_OUT.associatedPins[2].assignedPort      = "PORTA";
-GPIO_OUT.associatedPins[2].direction         = "OUTPUT";
-GPIO_OUT.associatedPins[2].initialValue      = "CLEARED";
-
-GPIO_OUT.associatedPins[3].$name             = "GPIO_BIN2";
-GPIO_OUT.associatedPins[3].assignedPin       = "27";
-GPIO_OUT.associatedPins[3].assignedPort      = "PORTA";
-GPIO_OUT.associatedPins[3].direction         = "OUTPUT";
-GPIO_OUT.associatedPins[3].initialValue      = "CLEARED";
-
-GPIO_OUT.associatedPins[4].$name             = "GPIO_STBY";
-GPIO_OUT.associatedPins[4].assignedPin       = "0";
-GPIO_OUT.associatedPins[4].assignedPort      = "PORTB";
-GPIO_OUT.associatedPins[4].direction         = "OUTPUT";
-GPIO_OUT.associatedPins[4].initialValue      = "CLEARED";
-
-GPIO_OUT.associatedPins[5].$name             = "GPIO_BUZZER";
-GPIO_OUT.associatedPins[5].assignedPin       = "0";
-GPIO_OUT.associatedPins[5].assignedPort      = "PORTA";
-GPIO_OUT.associatedPins[5].direction         = "OUTPUT";
-GPIO_OUT.associatedPins[5].initialValue      = "CLEARED";
-
-GPIO_OUT.associatedPins[6].$name             = "GPIO_LASER_EN";
-GPIO_OUT.associatedPins[6].assignedPin       = "1";
-GPIO_OUT.associatedPins[6].assignedPort      = "PORTA";
-GPIO_OUT.associatedPins[6].direction         = "OUTPUT";
-GPIO_OUT.associatedPins[6].initialValue      = "CLEARED";
-
-GPIO_OUT.associatedPins[7].$name             = "GPIO_LED_R";
-GPIO_OUT.associatedPins[7].assignedPin       = "26";
-GPIO_OUT.associatedPins[7].assignedPort      = "PORTB";
-GPIO_OUT.associatedPins[7].direction         = "OUTPUT";
-GPIO_OUT.associatedPins[7].initialValue      = "SET";
-
-GPIO_OUT.associatedPins[8].$name             = "GPIO_LED_G";
-GPIO_OUT.associatedPins[8].assignedPin       = "27";
-GPIO_OUT.associatedPins[8].assignedPort      = "PORTB";
-GPIO_OUT.associatedPins[8].direction         = "OUTPUT";
-GPIO_OUT.associatedPins[8].initialValue      = "CLEARED";
-
-GPIO_OUT.associatedPins[9].$name             = "GPIO_LED_B";
-GPIO_OUT.associatedPins[9].assignedPin       = "22";
-GPIO_OUT.associatedPins[9].assignedPort      = "PORTB";
-GPIO_OUT.associatedPins[9].direction         = "OUTPUT";
-GPIO_OUT.associatedPins[9].initialValue      = "CLEARED";
-
-/* ========================================================================== */
-/* GPIO 输入组：一键启动按键 (S1) + IMU DataReady 中断 + 右编码器 A/B          */
-/*   START_BTN = PA18  (板载 S1，下降沿触发，内部上拉)                         */
-/*   IMU_INT   = PB4   (MPU6050 INT，上升沿触发)                               */
-/*   ENC_R_A   = PA12  (右编码器 A 相，双边沿中断 — 阶段 2 拟升级为 CAPTURE)   */
-/*   ENC_R_B   = PA13  (右编码器 B 相，无中断，仅在 ISR 内读电平判方向)         */
-/* ========================================================================== */
-const GPIO_IN = GPIO.addInstance();
-GPIO_IN.$name = "GPIO_IN";
-GPIO_IN.associatedPins.create(4);
-
-GPIO_IN.associatedPins[0].$name             = "GPIO_START_BTN";
-GPIO_IN.associatedPins[0].assignedPin       = "18";
-GPIO_IN.associatedPins[0].assignedPort      = "PORTA";
-GPIO_IN.associatedPins[0].direction         = "INPUT";
-GPIO_IN.associatedPins[0].interruptEn       = true;
-GPIO_IN.associatedPins[0].polarity          = "FALL";
-GPIO_IN.associatedPins[0].internalResistor  = "PULL_UP";
-
-GPIO_IN.associatedPins[1].$name             = "GPIO_IMU_INT";
-GPIO_IN.associatedPins[1].assignedPin       = "4";
-GPIO_IN.associatedPins[1].assignedPort      = "PORTB";
-GPIO_IN.associatedPins[1].direction         = "INPUT";
-GPIO_IN.associatedPins[1].interruptEn       = true;
-GPIO_IN.associatedPins[1].polarity          = "RISE";
-GPIO_IN.associatedPins[1].internalResistor  = "NONE";
-
-GPIO_IN.associatedPins[2].$name             = "GPIO_ENC_R_A";
-GPIO_IN.associatedPins[2].assignedPin       = "12";
-GPIO_IN.associatedPins[2].assignedPort      = "PORTA";
-GPIO_IN.associatedPins[2].direction         = "INPUT";
-GPIO_IN.associatedPins[2].interruptEn       = true;
-GPIO_IN.associatedPins[2].polarity          = "RISE_FALL";
-GPIO_IN.associatedPins[2].internalResistor  = "NONE";
-
-GPIO_IN.associatedPins[3].$name             = "GPIO_ENC_R_B";
-GPIO_IN.associatedPins[3].assignedPin       = "13";
-GPIO_IN.associatedPins[3].assignedPort      = "PORTA";
-GPIO_IN.associatedPins[3].direction         = "INPUT";
-GPIO_IN.associatedPins[3].interruptEn       = false;
-GPIO_IN.associatedPins[3].internalResistor  = "NONE";
 
 /* ========================================================================== */
 /* TIMA0 PWM —— TB6612 双电机驱动                                              */
@@ -235,6 +147,30 @@ K230_UART.enableDMATX                      = true;
 K230_UART.peripheral.$assign               = "UART1";
 K230_UART.peripheral.txPin.$assign         = "PB6";
 K230_UART.peripheral.rxPin.$assign         = "PB7";
+
+/* ========================================================================== */
+/* UART3 —— 蓝牙串口 (HC-04)                                                   */
+/*   TX = PB12, RX = PB13, 115200 8N1                                          */
+/*   用于：MPU6050 姿态数据 → VOFA+ JustFloat 二进制流上位机可视化             */
+/*                                                                              */
+/*   注 1：HC-04 出厂默认 9600 8N1，需先通过 USB-TTL 用 AT 指令 AT+UART=115200,0,0 */
+/*         配置为 115200 8N1，详见 docs/TaskLog/Stage1-IMU-BT-Telemetry.md   */
+/*   注 2：RX 中断仅用于将来接收上位机控制位 / AT 回显，本阶段进环缓冲不解析 */
+/*                                                                              */
+/*   注 3：原阶段 0 文档将蓝牙引脚预留在 UART2 (PB17/PB16)，但 SDK 2.10.00.04   */
+/*         在 LQFP-64(PM) 上对该 multi-pad 引脚组的 UART2 模板生成存在 bug      */
+/*         （getGPIONumberMultiPad → identifyPadIndex 越界 → 'Cannot read       */
+/*         properties of undefined (match)'）。改用 UART3 + PB12/PB13 这对单    */
+/*         pad 引脚后规避，详见 Stage1-IMU-BT-Telemetry.md §8 踩坑记录。      */
+/* ========================================================================== */
+const BT_UART = UART.addInstance();
+BT_UART.$name                              = "UART_BT";
+BT_UART.targetBaudRate                     = 115200;
+BT_UART.enableFIFO                         = true;
+BT_UART.enabledInterrupts                  = ["RX"];
+BT_UART.peripheral.$assign                 = "UART3";
+BT_UART.peripheral.txPin.$assign           = "PB12";
+BT_UART.peripheral.rxPin.$assign           = "PB13";
 
 /* ========================================================================== */
 /* ADC0 —— 电池电压分压采样                                                    */
