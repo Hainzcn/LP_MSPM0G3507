@@ -13,3 +13,7 @@
 # eide template
 *.ept
 *.eide-template
+
+syscfg.bat
+.clangd
+EIDE\.eide\eide.yml
