@@ -72,7 +72,7 @@
           <BeforeMake>
             <RunUserProg1>1</RunUserProg1>
             <RunUserProg2>0</RunUserProg2>
-            <UserProg1Name>cmd.exe /C "$P../../syscfg.bat '$P' empty.syscfg"</UserProg1Name>
+            <UserProg1Name>cmd.exe /C "$P../../syscfg.bat '$P' LP_MSPM0G3507.syscfg"</UserProg1Name>
             <UserProg2Name></UserProg2Name>
             <UserProg1Dos16Mode>0</UserProg1Dos16Mode>
             <UserProg2Dos16Mode>0</UserProg2Dos16Mode>
@@ -340,7 +340,7 @@
               <MiscControls></MiscControls>
               <Define>__MSPM0G3507__</Define>
               <Undefine></Undefine>
-              <IncludePath>..\..\source;..\..\empty;..\..\source\third_party\CMSIS\Core\Include;..\hardware;..\middle;..\app</IncludePath>
+              <IncludePath>A:\ti\mspm0_sdk_2_10_00_04\source;A:\ti\mspm0_sdk_2_10_00_04\source\third_party\CMSIS\Core\Include;..\hardware;..\middle;..\app</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -374,7 +374,7 @@
             <ScatterFile>./mspm0g3507.sct</ScatterFile>
             <IncludeLibs></IncludeLibs>
             <IncludeLibsPath></IncludeLibsPath>
-            <Misc>../../source/ti/driverlib/lib/keil/m0p/mspm0g1x0x_g3x0x/driverlib.a</Misc>
+            <Misc>A:/ti/mspm0_sdk_2_10_00_04/source/ti/driverlib/lib/keil/m0p/mspm0g1x0x_g3x0x/driverlib.a</Misc>
             <LinkerInputFile></LinkerInputFile>
             <DisabledWarnings></DisabledWarnings>
           </LDads>
@@ -390,9 +390,9 @@
               <FilePath>../main.c</FilePath>
             </File>
             <File>
-              <FileName>empty.syscfg</FileName>
+              <FileName>LP_MSPM0G3507.syscfg</FileName>
               <FileType>5</FileType>
-              <FilePath>../empty.syscfg</FilePath>
+              <FilePath>../LP_MSPM0G3507.syscfg</FilePath>
             </File>
             <File>
               <FileName>startup_mspm0g350x_uvision.s</FileName>

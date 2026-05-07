@@ -8,7 +8,7 @@
 >
 > - 项目总览：[../Overview/Overview.md](../Overview/Overview.md)
 > - 阶段 0 引脚分配：[Stage0-PinAllocation.md](Stage0-PinAllocation.md)（已升级到 v0.4）
-> - SysConfig 真源：[../../EIDE/empty.syscfg](../../EIDE/empty.syscfg)
+> - SysConfig 真源：[../../EIDE/LP_MSPM0G3507.syscfg](../../EIDE/LP_MSPM0G3507.syscfg)
 > - EIDE 工程清单：[../../EIDE/.eide/eide.yml](../../EIDE/.eide/eide.yml)
 
 ---
@@ -44,7 +44,7 @@
 
 ---
 
-## 2. SysConfig 改动（[EIDE/empty.syscfg](../../EIDE/empty.syscfg)）
+## 2. SysConfig 改动（[EIDE/LP_MSPM0G3507.syscfg](../../EIDE/LP_MSPM0G3507.syscfg)）
 
 仅新增 UART3 实例（其它部分保持阶段 0 不变）：
 
@@ -311,7 +311,7 @@ BT_UART.peripheral.rxPin.$assign = "PB16";   // PINCM33 multi-pad
 
 #### 根因 1：SysConfig `assignedPort` 是非法属性、被静默丢弃
 
-`empty.syscfg` 自 Stage 0 起对 14 个 GPIO 引脚一直用：
+`LP_MSPM0G3507.syscfg` 自 Stage 0 起对 14 个 GPIO 引脚一直用：
 
 ```javascript
 GPIO_OUT.associatedPins[7].$name             = "GPIO_LED_R";
@@ -333,7 +333,7 @@ GPIO_OUT.associatedPins[7].pin.$assign       = "PB26";  // 一句话锁死，不
 
 工程结构是：
 
-- `EIDE/syscfg.bat` 读 `EIDE/empty.syscfg` → **生成到 `EIDE/ti_msp_dl_config.{c,h}`**
+- `EIDE/syscfg.bat` 读 `EIDE/LP_MSPM0G3507.syscfg` → **生成到 `EIDE/ti_msp_dl_config.{c,h}`**
 - 但 `EIDE/.eide/eide.yml` 把构建源指向 `**../template/ti_msp_dl_config.{c,h}**` —— 那是**项目模板期一次性放进去的桩文件，从未被 `syscfg.bat` 更新过**
 
 后果是非常隐蔽：
@@ -345,7 +345,7 @@ GPIO_OUT.associatedPins[7].pin.$assign       = "PB26";  // 一句话锁死，不
 **修法**：
 
 1. 删 `template/ti_msp_dl_config.{c,h}` 桩，避免 main.c 同目录优先匹配。
-2. `eide.yml` 把这两个文件改成 `path: ./ti_msp_dl_config.{c,h}`（相对项目根 EIDE/），同时把 `empty.syscfg` 也由 `../template/empty.syscfg` 改回 `./empty.syscfg`（之前 Stage 0 引入的笔误，但因为 syscfg.bat 用绝对路径才一直没暴露）。
+2. `eide.yml` 把这两个文件改成 `path: ./ti_msp_dl_config.{c,h}`（相对项目根 EIDE/），同时把 SysConfig 真源也由旧模板路径改回 `./LP_MSPM0G3507.syscfg`（之前 Stage 0 引入的笔误，但因为 syscfg.bat 用绝对路径才一直没暴露）。
 
 #### 复盘要点
 
@@ -501,7 +501,7 @@ C 端宏命名也跟着升级（保留 SDK 标准约定）：
 
 | 文件                             | 改动                                                                                                                                                                                                      |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `EIDE/empty.syscfg`            | 删除 `GPIO_OUT_A/B`、`GPIO_IN_A/B` 全部 4 个实例（保留 `GPIO` 模块导入即可，无 instance 不会触发 codegen）。peripheral pins（UART/I2C/PWM/QEI/ADC）走 `getDualBondedPadFunction` 路径，不踩 bug，全部保留。                                    |
+| `EIDE/LP_MSPM0G3507.syscfg`    | 删除 `GPIO_OUT_A/B`、`GPIO_IN_A/B` 全部 4 个实例（保留 `GPIO` 模块导入即可，无 instance 不会触发 codegen）。peripheral pins（UART/I2C/PWM/QEI/ADC）走 `getDualBondedPadFunction` 路径，不踩 bug，全部保留。                                    |
 | `template/hardware/bsp_gpio.h` | 新增。14 组 `BSP_*_PORT/PIN/IOMUX` 宏，覆盖原 syscfg 全部 GPIO（LED_R/G/B、BUZZER、LASER_EN、STBY、AIN1/2、BIN1/2、START_BTN、ENC_R_A/B、IMU_INT）。                                                                          |
 | `template/hardware/bsp_gpio.c` | 新增。`bsp_gpio_init()` 用 `DL_GPIO_initDigitalOutput(IOMUX_PINCMxx)` + `DL_GPIO_PIN_<bit>` 直接初始化，与 SDK 自动生成的 `SYSCFG_DL_GPIO_init` 等价。**输入引脚只配方向 + 上拉，不开 NVIC**——中断由阶段 2 各模块按需开启，避免当前阶段没有 ISR 时触发默认 fault。 |
 | `template/main.c`              | 在 `SYSCFG_DL_init()` 之后立刻 `bsp_gpio_init()`；原先 4 处 `GPIO_OUT_*_`* 宏全部改为 `BSP_*_PORT/PIN`。                                                                                                               |
@@ -716,5 +716,98 @@ Verifying    ... done
 | 2026-04-30 | v0.9 | §8.6 复盘 + 真修法：`PT_LOAD` 那行揭示是**段总长**校验失败而非格式问题。修复需在链接期向 `ER_IROM1` 末尾物理写入 padding 字节。`template/keil/mspm0g3507.sct` 在 `ER_IROM1` 末尾追加 `.ANY (.flash_pad, +Last)`；`template/main.c` 用 `__attribute__((used, section(".flash_pad"), aligned(8)))` 定义 `static const uint64_t _flash_image_pad = 0xFFFFFFFFFFFFFFFFULL`（8 字节定长 + 8 字节对齐 + `used` 防剔除 + 全 0xFF 等价 flash 擦除态）。配合 `ALIGNALL 8` 对 section 起始的对齐，期望整个 PT_LOAD 段大小变成 8 的倍数。**保留 `.axf` 烧录**：`PT_LOAD[i]` 诊断信息更详细。§8.6 重写，含"两轮现象 + 真根因 + scatter/C 双侧改动 + 备选方案对比表 + 多产品延展"完整落档。 | 主控团队 |
 | 2026-04-30 | v0.10 | v0.9 修补**仍然失败**：`PT_LOAD[0]: 0 of 12604`，`12604 - 12588 = 16` 但 `12604 mod 8 = 4`。根因：ARMCLANG armlink 的 `.ANYn` 是**优先级匹配**（n=1..9，大者优先；`.ANY` ≡ `.ANY1`）；`_flash_image_pad` 自带 RO 属性，被前面 `.ANY (+RO)` 通配选择器**先**抢走，塞到 RO section 中段——`+Last` 因此匹配不到任何 section，形同虚设。修法：scatter 把 `.ANY (.flash_pad, +Last)` 改为 `.ANY3 (.flash_pad, +Last)`，优先级 3 抢先于 `.ANY1 (+RO)` 拿到 `.flash_pad`，再由 `+Last` 排末尾。同时把 `.ANY (+RO)` 显式写为 `.ANY1 (+RO)`、`.ANY (+XO)` 写为 `.ANY1 (+XO)`，让 priority 一目了然。§8.6 追加「关键陷阱：.ANY vs .ANY3」小节，含 12604 失败现象的逐字节解释与「依赖文本顺序 + +Last 排序在 ARMCLANG 上对带 +RO/+RW 等常用属性 section 一律不奏效」原则说明。 | 主控团队 |
 | 2026-04-30 | v0.11 | v0.10 的 `.ANY3` 修补**仍然失败**，烧录依旧报 `PT_LOAD[0]: 0 of 12604`——一字节都没变。说明 ARMCLANG armlink 对 `.ANYn (<section_name>, ...)` 的优先级处理在本工具链上跟文档描述不一致（疑似 SDK 给的 `*.o (RESET, +First)` 通配模块级 selector 干扰了 .ANY 特异性计算，或 ARMCLANG 19.x 某次回归破坏了节名级 .ANY 选择器语义）。改走**模块级 selector**：把 `_flash_image_pad` 单独搬到新建的 [`template/hardware/bsp_flash_pad.c`](../../template/hardware/bsp_flash_pad.c)（独立 .c 文件、`extern` 链接 + `used` 属性双保险），scatter 改为 `bsp_flash_pad.o (+Last)`——**链接报 `L6234E: Last must follow a single selector`**：`+Last` 只能跟单一 section 或单一属性 selector，`<obj>.o (+Last)` 等价"该 .o 所有 section"是多 section 通配，被链接器拒。**最终修法**：scatter 加节名收窄成 `bsp_flash_pad.o (.flash_pad, +Last)`——模块名 + 节名是 ARMCLANG selector 最特异性形式（高于任何 .ANY），节名收窄到单一 section 又满足 `+Last` 语法约束。两条独立约束同时满足。`template/main.c` 同步删除原 `_flash_image_pad` 定义、保留指向独立文件的注释。`EIDE/.eide/eide.yml` 在 `hardware` 虚拟目录登记 `bsp_flash_pad.c`。§8.6 「修法」与「关键陷阱」整段重写：分四轮（`.ANY` → `.ANY3` → `<obj>.o (+Last)` 报 L6234E → `<obj>.o (.flash_pad, +Last)`）记录全过程；并给出两条独立法则——「精确控制 section 位置必须用独立 .c + 模块级 selector」「`+Last` 必须跟单一 section selector，所以模块名后必须跟节名」。烧录通过：`PT_LOAD[0]: 0 of 12608 at 0x0`，12608 = 1576×8 ✓。 | 主控团队 |
+
+---
+
+## 11. 硬件接线对照表（焊接 / 杜邦线施工面板）
+
+> 本节为**装车焊接 / 调试杜邦线**的速查面板，对引脚功能定义的真源仍是 [Stage0-PinAllocation.md §3.2](Stage0-PinAllocation.md)；本表只提供"把哪根线焊到哪个针脚"的施工视图。
+>
+> 阶段 1 物理接线只涉及 3 个外接模块：**MPU6050**（I²C 姿态）、**HC-04**（蓝牙串口）、**K230**（与上位 SoC 通讯，本阶段仅 RX 骨架，可先不接）。其它模块（TB6612 / 编码器 / 蜂鸣器 / 激光等）属于后续阶段，本阶段不接线、保持悬空，固件已默认拉低 STBY/LASER_EN 防止误动作。
+>
+> **共地是装机前的硬约束**：所有外接模块的 GND 必须与 LaunchPad GND（J101 任意 GND 针 / 板边 GND 焊盘）单点星型汇接。任何"忘了接 GND，靠 USB 共地"的接线都会在电机上电时炸 I²C 总线。
+
+### 11.1 MPU6050（I²C 姿态传感器）
+
+> **接口**：I²C1 主机 400 kHz；上拉 4.7 kΩ → 3V3 必须**外置**（LaunchPad 默认未提供）。
+>
+> **本阶段不用 INT 引脚**（走 SysTick 1 kHz 软轮询读 raw），但 INT 走线建议**预留焊接**，下一阶段平衡环时可直接切到中断模式不用拆线。
+>
+> **电源**：MPU6050 模块 VCC 接 **3V3**（LaunchPad J27 / J28 任意 3V3 针），**不要接 5V**——MPU6050 芯片本身 2.375~3.46 V 供电，市售模块虽然带 LDO 但部分批次直通无 LDO，5V 直供瞬间烧片。
+
+| MPU6050 模块引脚 | 信号    | MSPM0G3507 引脚 | LQFP pin | 外设 / 功能          | 备注                                          |
+| ---------- | ----- | ------------- | -------- | ---------------- | ------------------------------------------- |
+| VCC        | 3V3   | LaunchPad 3V3 | —        | 电源               | 板载 J27 / J28 任意 3V3，**勿接 5V**               |
+| GND        | GND   | LaunchPad GND | —        | 地                | 与主控、HC-04、K230 共地（星型汇接）                     |
+| SCL        | I²C 时钟 | **PB2**       | 50       | I2C1_SCL         | **必接 4.7 kΩ 上拉到 3V3**                       |
+| SDA        | I²C 数据 | **PB3**       | 51       | I2C1_SDA         | 同上 4.7 kΩ 上拉                                |
+| INT        | DataReady | **PB4**       | 52       | GPIO + EXTI 上升沿  | 阶段 1 不用、可悬空；建议焊一根杜邦线占位，下一阶段直接切中断            |
+| AD0        | I²C 地址低位 | GND           | —        | —                | 接 GND 时模块地址 = 0x68（默认）；接 3V3 时 = 0x69，需改驱动 |
+| XCL / XDA / FSYNC | — | 悬空            | —        | —                | 主从 I²C / 帧同步，本项目不用                          |
+
+### 11.2 HC-04（蓝牙串口模块）
+
+> **接口**：UART3 (PB12 TX / PB13 RX) 115200 8N1；**TX/RX 必须交叉接**（HC-04 的 TXD ↔ MSPM0 的 RX，反之亦然）。
+>
+> **AT 配置在装车之前完成**（一次性，见 §6.1）；装车后正常上电即遥测，**不需要再进 AT 模式**。
+>
+> **电源**：HC-04 板载 LDO，VCC 接 **5V**（LaunchPad J27 5V 针），不要接 3V3，否则蓝牙模块蓝灯不亮 / 配对失败。
+
+| HC-04 模块引脚 | 信号        | MSPM0G3507 引脚 | LQFP pin | 外设 / 功能      | 备注                                      |
+| --------- | --------- | ------------- | -------- | ------------ | --------------------------------------- |
+| VCC       | 5V        | LaunchPad 5V  | —        | 电源           | LaunchPad J27 5V 或 USB 5V               |
+| GND       | GND       | LaunchPad GND | —        | 地            | 共地                                      |
+| TXD       | HC-04 → 主控  | **PB13**      | 1        | UART3_RX     | **交叉**：模块 TXD → 主控 RX                   |
+| RXD       | 主控 → HC-04 | **PB12**      | 64       | UART3_TX     | **交叉**：主控 TX → 模块 RXD（部分模块此脚有 1 kΩ 限流串电阻） |
+| EN / KEY  | AT 模式控制   | 悬空            | —        | —            | AT 模式只在初次配置时用 USB-TTL 拉高一次（见 §6.1）；装车后悬空即可 |
+| STATE     | 连接状态指示    | 悬空（可选）       | —        | —            | 配对连上时输出高，本阶段固件不读；如需指示 LED 直接外挂          |
+
+### 11.3 K230（上位 SoC 通讯，本阶段可暂不接）
+
+> **接口**：UART1 (PB6 TX / PB7 RX) 921600 8N1，DMA RX 已就绪、DMA TX 阶段 2 启用；本阶段固件**只统计 RX 字节数**做硬件自测，不解析协议。
+>
+> **本阶段可选接线**：
+>
+> - **不接 K230**：固件正常运行，1 Hz 日志里 `k230_rx=0 b/s`；正常。
+> - **接 K230**：能收到 K230 端发的任意字节流，1 Hz 日志 `k230_rx` 非零线性增长。
+> - **自测回环（无 K230 时验证 UART1 通路）**：拿一根杜邦线把 PB6 和 PB7 短接，主控 TX 自发自收（**当前阶段固件未启用 TX**，所以自测需要另外手动触发，详见验收清单 §7"K230 RX 自测"行）。
+>
+> **电平**：K230 GPIO 也是 3.3 V，可与 MSPM0 直连，**不需要电平转换**；唯一硬要求是共地。
+
+| K230 端引脚 | 信号        | MSPM0G3507 引脚 | LQFP pin | 外设 / 功能      | 备注                                  |
+| ------- | --------- | ------------- | -------- | ------------ | ----------------------------------- |
+| GND     | GND       | LaunchPad GND | —        | 地            | **唯一硬约束** —— 不接共地 UART1 必收乱码        |
+| UART_TX | K230 → 主控  | **PB7**       | 59       | UART1_RX     | 交叉：K230 TX → 主控 RX                  |
+| UART_RX | 主控 → K230 | **PB6**       | 58       | UART1_TX     | 交叉：主控 TX → K230 RX（阶段 1 主控暂不发，此线可悬空但建议焊） |
+| 5V / 3V3 | 电源       | **不互供**       | —        | —            | K230 自有电源，**不要**从 LaunchPad 引电压过去   |
+
+### 11.4 调试链路（板载 XDS110，无需杜邦线）
+
+> 阶段 1 调试日志走 LaunchPad 自带的 XDS110-ET 桥：USB-CDC 在电脑端虚拟出一个 COM 口，固件 `printf` → UART0_TX (PA10) → XDS110 → USB → 电脑串口监视器。**只要 J21 / J22 跳线 ON，不需要任何外接线**。
+
+| 通路              | LaunchPad 跳线  | 主控引脚                | LQFP pin | 外设         | 备注                                        |
+| --------------- | ------------ | ------------------- | -------- | ---------- | ----------------------------------------- |
+| LOG_TX (主控 → PC) | **J21 ON**   | **PA10**            | 56       | UART0_TX   | 电脑端 115200 8N1 收 `printf`                 |
+| LOG_RX (PC → 主控) | **J22 ON**   | **PA11**            | 57       | UART0_RX   | 阶段 1 固件不读，预留下一阶段串口调参                      |
+| SWD             | **J101 ON**  | **PA19 / PA20**     | 12 / 13  | DEBUGSS    | XDS110 → MSPM0 烧录 + 调试，必接                 |
+
+### 11.5 接线总验收（装车前一次性核对）
+
+- [ ] MPU6050 VCC = 3V3（**不是** 5V），万用表测 2.4~3.4 V。
+- [ ] MPU6050 SCL/SDA 各**有**一个 4.7 kΩ 上拉到 3V3（断电后用万用表测 SCL ↔ 3V3 阻值 ≈ 4.7 kΩ）。
+- [ ] HC-04 VCC = 5V，模块通电后红灯快闪（未配对态）。
+- [ ] HC-04 TXD → 主控 PB13、HC-04 RXD → 主控 PB12（**交叉**核对，万用表蜂鸣档点测两端 LQFP 焊盘）。
+- [ ] 所有模块 GND 与 LaunchPad GND 单点星型汇接，万用表测各 GND 节点之间阻值 < 0.1 Ω。
+- [ ] LaunchPad J21 / J22 / J101 跳线全 ON。
+- [ ] 阶段 1 不用的外设（TB6612 / 编码器 / 蜂鸣器 / 激光器 / 按键）相关引脚全部**悬空**，**不要**接任何外部电源或上拉。
+
+> **整线后第一次通电的预期现象**：
+>
+> 1. LaunchPad XDS110 红灯常亮 → MCU 上电；
+> 2. HC-04 红灯快闪（未配对）→ 蓝牙就绪；
+> 3. 串口监视器（XDS-UART，115200）每秒打印一行 `[hb] t=Ns pitch=... rate=... acc=... T=... k230_rx=...b/s`；
+> 4. 蓝牙手机助手配对 HC-04（PIN 1234）→ 连上后能收到二进制流，约 20 字节/帧、100 帧/秒；
+> 5. **板载红色 LED_R（PB26）熄灭**——表示 MPU6050 init 成功（若常亮则 init 失败，去看 XDS-UART 错误码）；
+> 6. **板载绿色 LED_G（PB27）以 5 Hz 闪烁**——心跳，证明主循环在跑。
 
 

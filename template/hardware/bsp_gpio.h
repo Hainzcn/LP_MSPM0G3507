@@ -3,7 +3,7 @@
  * @brief   GPIO 引脚抽象层 —— 绕开 SDK 2.10 multi-pad codegen bug
  *
  * 设计要点：
- *   · 本工程所有业务 GPIO 都不走 SysConfig（详见 EIDE/empty.syscfg 头部注释、
+ *   · 本工程所有业务 GPIO 都不走 SysConfig（详见 EIDE/LP_MSPM0G3507.syscfg 头部注释、
  *     docs/TaskLog/Stage1-IMU-BT-Telemetry.md §8.5）。
  *   · 引脚分配真值表见 docs/TaskLog/Stage0-PinAllocation.md，本头文件中
  *     14 个 BSP_*_PORT/PIN/IOMUX 宏与该表保持一致；任何引脚改动必须先改文档。

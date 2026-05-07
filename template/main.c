@@ -19,7 +19,7 @@
  *            蜂鸣器报警 200 ms，然后死循环；不进入主循环以免上报无效数据。
  *
  *  GPIO 备注：业务 GPIO 全部由 bsp_gpio.[ch] 管理，宏前缀 BSP_*；syscfg 不
- *  生成 GPIO_OUT_*_PORT/PIN 这类宏（详见 EIDE/empty.syscfg 头部注释、
+ *  生成 GPIO_OUT_*_PORT/PIN 这类宏（详见 EIDE/LP_MSPM0G3507.syscfg 头部注释、
  *  docs/TaskLog/Stage1-IMU-BT-Telemetry.md §8.5）。同 port 的引脚可合并到
  *  一次 DL_GPIO_xxxPins 调用（LED_R/G/B 同属 GPIOB → BSP_LED_*_PORT）。
  */

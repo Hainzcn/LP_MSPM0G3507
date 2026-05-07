@@ -1,6 +1,6 @@
 # 阶段 0 ｜ 硬件准备与引脚分配
 
-> 文档定位：自平衡瞄准小车项目的 **引脚分配唯一真源**。任何后续硬件改动 / 外设增减，必须先改本表，再改 `EIDE/empty.syscfg`，再改驱动代码。
+> 文档定位：自平衡瞄准小车项目的 **引脚分配唯一真源**。任何后续硬件改动 / 外设增减，必须先改本表，再改 `EIDE/LP_MSPM0G3507.syscfg`，再改驱动代码。
 >
 > 关联文档：
 >
@@ -301,7 +301,7 @@
 
 1. **本表是唯一真源**：任何引脚改动必须先改本表，再按引脚类型走对应路径，最后更新阶段验收文档。
    - **业务 GPIO**（§4.7 表中所有引脚）：改 [`template/hardware/bsp_gpio.h`](../../template/hardware/bsp_gpio.h) 对应 `BSP_<NAME>_PORT/PIN/IOMUX` + 必要时改 [`bsp_gpio.c`](../../template/hardware/bsp_gpio.c) init 语句。**不进 SysConfig**（理由见 §4.7 提示与 [Stage1-IMU-BT-Telemetry.md §8.5](Stage1-IMU-BT-Telemetry.md)）。
-   - **Peripheral 引脚**（PWM/QEI/I2C/UART/ADC 的 ccp/sda/scl/tx/rx/adcPin 等）：改 [`EIDE/empty.syscfg`](../../EIDE/empty.syscfg)，触发 `syscfg.bat` 重生 `ti_msp_dl_config.{c,h}`；这条路径走 SDK `getDualBondedPadFunction`，不踩 multi-pad bug。
+   - **Peripheral 引脚**（PWM/QEI/I2C/UART/ADC 的 ccp/sda/scl/tx/rx/adcPin 等）：改 [`EIDE/LP_MSPM0G3507.syscfg`](../../EIDE/LP_MSPM0G3507.syscfg)，触发 `syscfg.bat` 重生 `ti_msp_dl_config.{c,h}`；这条路径走 SDK `getDualBondedPadFunction`，不踩 multi-pad bug。
 2. **改动需走 PR / 提交说明**：在 commit message 标 `[pin]` 标签，并在 [docs/Overview/Overview.md](../Overview/Overview.md) 引用。
 3. **跳线变化记入本文第 2 节**：不要散落在驱动文件注释里。
 4. **预留引脚不允许"借用"**：3.3 节预留的 PB16/PB17 在蓝牙到位前不得被其他模块占用；如确需占用，必须升级本表。

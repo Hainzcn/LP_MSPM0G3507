@@ -1,130 +1,15 @@
-# =============================================================================
-# 白名单策略：默认忽略一切，仅追踪核心代码文件夹
-# 多人协同：同事 clone 后只需按 README 获取 TI MSPM0 SDK 即可构建
-# =============================================================================
+# dot files
+/.vscode/launch.json
+/.settings
+/.eide/log
+/.eide.usr.ctx.json
 
-# ---- 1. 根目录默认全部忽略（注意：仅用 /*，不要用 /*/，
-#         否则子目录被整体屏蔽，下面的 ! 反向规则将不再生效）----
-/*
+# project out
+/build
+/bin
+/obj
+/out
 
-# ---- 2. 显式追踪的根级文件 / 目录 ----
-!/.gitignore
-!/.gitattributes
-!/README.md
-!/LICENSE
-!/docs
-!/scripts
-!/EIDE
-!/template
-
-# =============================================================================
-# EIDE/ 工程目录：保留工程定义，排除本机/生成/构建产物
-# =============================================================================
-
-# 默认追踪 EIDE/ 下所有内容，再单独排除以下：
-
-# EIDE 自动生成的 CMSIS 头文件副本（每台机器自动生成）
-EIDE/.cmsis/
-
-# EIDE 用户态 / 日志 / 缓存
-EIDE/.eide/log/
-EIDE/.eide.usr.ctx.json
-EIDE/.vscode/launch.json
-EIDE/.settings/
-
-# clangd 含本机绝对路径（编译器位置因人而异）
-# 仓库内仅提供 .clangd.example，每人本地拷贝一份再改
-EIDE/.clangd
-
-# VSCode 工作区个人偏好（若需共享请另外提供 *.code-workspace.example）
-EIDE/*.code-workspace
-
-# SysConfig 生成物（由 syscfg.bat 在构建前从 *.syscfg 自动生成）
-EIDE/ti_msp_dl_config.c
-EIDE/ti_msp_dl_config.h
-EIDE/syscfg/
-
-# EIDE 构建输出
-EIDE/build/
-EIDE/bin/
-EIDE/obj/
-EIDE/out/
-
-# syscfg.bat
-EIDE/syscfg.bat
-
-# EIDE 模板包
+# eide template
 *.ept
 *.eide-template
-
-# =============================================================================
-# template/ 源代码目录：排除 IDE 用户态文件与构建产物
-# =============================================================================
-
-# Keil μVision 用户态文件（每人独立，不入库）
-*.uvoptx
-*.uvgui.*
-*.uvguix.*
-*.uvgui_*.bak
-*.uvopt.bak
-*.uvproj.bak
-*.uvprojx.bak
-
-# Keil 构建中间文件
-template/keil/Objects/
-template/keil/Listings/
-template/keil/DebugConfig/
-template/keil/RTE/_*/
-template/keil/*.bak
-template/keil/JLinkLog.txt
-template/keil/JLinkSettings.ini
-
-# SysConfig 生成物（template 下若由工具生成，同样忽略）
-template/ti_msp_dl_config.c
-template/ti_msp_dl_config.h
-
-# =============================================================================
-# 通用：编译/链接/烧录产物（任何位置）
-# =============================================================================
-*.o
-*.obj
-*.d
-*.dep
-*.crf
-*.lst
-*.lnp
-*.htm
-*.map
-*.map.view
-*.map.old
-*.objlist
-*.iex
-*.sct.Bak
-*.scvd
-*.axf
-*.elf
-*.hex
-*.bin
-*.s19
-*.srec
-*.i
-*.su
-
-# =============================================================================
-# 通用：操作系统 / 编辑器 / 临时文件
-# =============================================================================
-Thumbs.db
-ehthumbs.db
-Desktop.ini
-$RECYCLE.BIN/
-.DS_Store
-._*
-*.swp
-*.swo
-*.tmp
-*.bak
-*.log
-~$*
-.idea/
-.vs/
-*.code-workspace
