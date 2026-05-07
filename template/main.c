@@ -39,11 +39,10 @@
 #include <stdint.h>
 #include <stdio.h>
 
-/* PT_LOAD 段 8 字节对齐尾填充移到独立文件 hardware/bsp_flash_pad.c
- * scatter 用模块级 `bsp_flash_pad.o (+Last)` 选择器（见
- * template/keil/mspm0g3507.sct 与 docs/TaskLog/Stage1-IMU-BT-Telemetry.md §8.6）。
- * 之前放本文件用 `.ANY3 (.flash_pad, +Last)` 抢，被 `.ANY1 (+RO)` 拦下，
- * 12588 → 12604 仍 mod 8 = 4，未对齐，已记录为反面教材。 */
+/* PT_LOAD 段 8 字节对齐尾填充在独立文件 hardware/bsp_flash_pad.c
+ * scatter 用模块级 `bsp_flash_pad.o (.flash_pad, +Last)` 选择器（见
+ * template/keil/mspm0g3507.sct）。模块级选择器优先级高于 .ANY，
+ * 且满足 +Last 单 section 约束。全 0xFF = flash 擦除态。 */
 
 static void fatal_imu_init_failure(int32_t rc)
 {
