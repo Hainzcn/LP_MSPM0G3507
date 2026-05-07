@@ -16,4 +16,4 @@
 
 syscfg.bat
 .clangd
-EIDE\.eide\eide.yml
+eide.yml
