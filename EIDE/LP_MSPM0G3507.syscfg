@@ -25,11 +25,15 @@ const SYSCTL = scripting.addModule("/ti/driverlib/SYSCTL");
 const GPIO   = scripting.addModule("/ti/driverlib/GPIO", {}, false);
 const PWM    = scripting.addModule("/ti/driverlib/PWM",  {}, false);
 const QEI    = scripting.addModule("/ti/driverlib/QEI",  {}, false);
-const I2C    = scripting.addModule("/ti/driverlib/I2C",  {}, false);
 const UART   = scripting.addModule("/ti/driverlib/UART", {}, false);
 const ADC12  = scripting.addModule("/ti/driverlib/ADC12", {}, false);
 
 const Board  = scripting.addModule("/ti/driverlib/Board", {}, false);
+
+/* I2C 模块在 Stage 1.5 已下线：原 MPU6050 占用 I2C1 (PB2/PB3)，但开发板
+ * PB2/PB3 未板载 4.7 kΩ 上拉电阻，I²C 总线全开路；为避免焊接修复风险
+ * 改用 ATK-MS901M（UART2 / PA21 TX / PA22 RX / 115200 8N1）。详见
+ * docs/TaskLog/Stage1.5-IMU-Swap-MS901M.md。 */
 
 /* ========================================================================== */
 /* 时钟                                                                        */
@@ -105,17 +109,35 @@ QEI_LEFT.peripheral.ccp1Pin.$assign        = "PA30";
 QEI_LEFT.peripheral.idxPin.$assign         = "PB14";
 
 /* ========================================================================== */
-/* I2C1 —— MPU6050                                                             */
-/*   SCL = PB2, SDA = PB3, 400 kHz (Fast mode)                                 */
-/*   外部需 4.7 kΩ 上拉到 3V3 (LaunchPad 板载未提供，请在小车主板上加)         */
+/* UART2 —— ATK-MS901M 姿态传感器 (Stage 1.5 替代原 I²C MPU6050)              */
+/*   TX = PA21, RX = PA22, 115200 8N1, FIFO + RX 中断                          */
+/*                                                                              */
+/*   背景：开发板 PB2/PB3 缺 I²C 上拉电阻，I2C1 全开路；为避免焊接修复风险，   */
+/*         改用 MS901M（自带 EKF，串口主动上报 0x01 RPY / 0x02 四元数 /         */
+/*         0x03 raw gyro+accel / 0x04 mag+temp / 0x05 baro+alt）。              */
+/*                                                                              */
+/*   引脚选型：                                                                 */
+/*     · PA21 (PINCM46, 单 pad) → UART2_TX，用于将来发配置/校准命令            */
+/*     · PA22 (PINCM47, 单 pad) → UART2_RX，主用接收 MS901M 主动上报           */
+/*     · 单 pad 引脚不踩 SDK 2.10 multi-pad codegen bug（详见                   */
+/*       docs/TaskLog/Stage1-IMU-BT-Telemetry.md §8.5）                          */
+/*     · PA21 在 Stage 0 §3.4 曾因 ADC VREF- 列入禁用，但本工程使用内部 VREF    */
+/*       (2.5 V)，PA21 实际可作 GPIO/UART 复用（详见 Stage 1.5 文档）           */
+/*                                                                              */
+/*   不开 DMA：MS901M 帧组合典型 100 Hz × ~50 B ≈ 40 kbps，远低于 115200 链路 */
+/*           容量；UART2 RX FIFO + 半满中断 + 256 B 环缓即可，无需 DMA 通道。  */
+/*                                                                              */
+/*   注：MS901M 默认出厂 115200 8N1 主动上报 0x01..0x05 五帧；上位机一次性配置 */
+/*       后永久写入 EEPROM，详见 docs/TaskLog/Stage1.5-IMU-Swap-MS901M.md。    */
 /* ========================================================================== */
-const IMU_I2C = I2C.addInstance();
-IMU_I2C.$name                              = "I2C_IMU";
-IMU_I2C.basicEnableController              = true;
-IMU_I2C.basicControllerStandardBusSpeed    = "Fast";
-IMU_I2C.peripheral.$assign                 = "I2C1";
-IMU_I2C.peripheral.sdaPin.$assign          = "PB3";
-IMU_I2C.peripheral.sclPin.$assign          = "PB2";
+const IMU_UART = UART.addInstance();
+IMU_UART.$name                             = "UART_IMU";
+IMU_UART.targetBaudRate                    = 115200;
+IMU_UART.enableFIFO                        = true;
+IMU_UART.enabledInterrupts                 = ["RX"];
+IMU_UART.peripheral.$assign                = "UART2";
+IMU_UART.peripheral.txPin.$assign          = "PA21";
+IMU_UART.peripheral.rxPin.$assign          = "PA22";
 
 /* ========================================================================== */
 /* UART0 —— 开发期日志 (XDS-UART 桥)                                           */
@@ -151,7 +173,8 @@ K230_UART.peripheral.rxPin.$assign         = "PB7";
 /* ========================================================================== */
 /* UART3 —— 蓝牙串口 (HC-04)                                                   */
 /*   TX = PB12, RX = PB13, 115200 8N1                                          */
-/*   用于：MPU6050 姿态数据 → VOFA+ JustFloat 二进制流上位机可视化             */
+/*   用于：姿态数据 → VOFA+ JustFloat 二进制流上位机可视化                     */
+/*         （Stage 1.5 起姿态来自 MS901M / UART2，不再来自 MPU6050 / I²C）     */
 /*                                                                              */
 /*   注 1：HC-04 出厂默认 9600 8N1，需先通过 USB-TTL 用 AT 指令 AT+UART=115200,0,0 */
 /*         配置为 115200 8N1，详见 docs/TaskLog/Stage1-IMU-BT-Telemetry.md   */

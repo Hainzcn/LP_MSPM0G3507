@@ -3,13 +3,14 @@
  * @brief   GPIO 引脚初始化 —— 手工调用 DriverLib，绕开 SDK 2.10 codegen bug
  *
  * 与 SDK 自动生成的 SYSCFG_DL_GPIO_init() 等价的最小手工实现。
- * 拆分为 4 个静态函数让阅读更清晰：
+ * 拆分为 3 个静态函数让阅读更清晰：
  *   · init_outputs_porta() —— PORTA 的 6 路输出
  *   · init_outputs_portb() —— PORTB 的 4 路输出
  *   · init_inputs_porta()  —— PORTA 的 3 路输入（START_BTN / ENC_R_A / ENC_R_B）
- *   · init_inputs_portb()  —— PORTB 的 1 路输入（IMU_INT）
  *
- * GPIO power 启用不在这里做：UART/I2C/PWM/QEI 等 peripheral 占用了 PORTA/PORTB
+ * Stage 1.5 后 PORTB 不再有业务输入：IMU_INT(PB4) 随 MPU6050→MS901M 切换下线。
+ *
+ * GPIO power 启用不在这里做：UART/PWM/QEI 等 peripheral 占用了 PORTA/PORTB
  * 之后，SDK 在 SYSCFG_DL_initPower() 里已经 `DL_GPIO_enablePower(GPIOA/B)`。
  */
 #include "bsp_gpio.h"
@@ -74,20 +75,12 @@ static void init_inputs_porta(void)
         DL_GPIO_HYSTERESIS_DISABLE, DL_GPIO_WAKEUP_DISABLE);
 }
 
-/* -------------------------------------------------------------------------- */
-/* PORTB 输入：IMU_INT（无上拉，外部 MPU6050 推挽输出）                        */
-/* -------------------------------------------------------------------------- */
-static void init_inputs_portb(void)
-{
-    DL_GPIO_initDigitalInputFeatures(BSP_IMU_INT_IOMUX,
-        DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_NONE,
-        DL_GPIO_HYSTERESIS_DISABLE, DL_GPIO_WAKEUP_DISABLE);
-}
+/* PORTB 输入：Stage 1.5 后无业务输入；IMU_INT(PB4) 已随 MS901M 替换下线。
+ * 若将来再添加 PORTB 输入，按 init_inputs_porta() 模板新增 init_inputs_portb()。 */
 
 void bsp_gpio_init(void)
 {
     init_outputs_porta();
     init_outputs_portb();
     init_inputs_porta();
-    init_inputs_portb();
 }

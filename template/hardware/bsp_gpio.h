@@ -90,10 +90,9 @@
 #define BSP_ENC_R_B_PIN         DL_GPIO_PIN_13
 #define BSP_ENC_R_B_IOMUX       IOMUX_PINCM35
 
-/* MPU6050 INT —— 阶段 1 用 SysTick 1 kHz 轮询；阶段 2 改 INT 触发后再开 NVIC */
-#define BSP_IMU_INT_PORT        GPIOB
-#define BSP_IMU_INT_PIN         DL_GPIO_PIN_4
-#define BSP_IMU_INT_IOMUX       IOMUX_PINCM17
+/* PB4 已于 Stage 1.5 释放：MPU6050 被 ATK-MS901M 串口姿态传感器替代后，
+ * 不再需要 IMU DataReady 中断引脚（MS901M 主动按帧上报）。详见
+ * docs/TaskLog/Stage1.5-IMU-Swap-MS901M.md。 */
 
 /* ========================================================================== */
 /* API                                                                         */
@@ -104,8 +103,10 @@
  *          ① 11 个输出 pin 全部 initDigitalOutput()；
  *          ② STBY/AIN/BIN/BUZZER/LASER_EN/LED_G/LED_B 初值 CLEARED；
  *          ③ LED_R 初值 SET（开机点亮一颗，便于直观判断 init 完成）；
- *          ④ 4 个输入 pin initDigitalInputFeatures()，仅 START_BTN 上拉；
+ *          ④ 3 个输入 pin initDigitalInputFeatures()，仅 START_BTN 上拉；
  *          ⑤ **不**调用 NVIC_EnableIRQ —— 中断在阶段 2 各模块按需开启。
+ *
+ *  Stage 1.5 后：原 PORTB 输入 IMU_INT(PB4) 已下线，PORTB 不再有业务输入。
  */
 void bsp_gpio_init(void);
 

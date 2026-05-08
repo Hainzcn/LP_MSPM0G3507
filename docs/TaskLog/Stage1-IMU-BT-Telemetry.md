@@ -1,5 +1,7 @@
 # 阶段 1 ｜ 蓝牙串口配置 + MPU6050 姿态转发
 
+> **⚠️ Stage 1.5 部分替换提示（2026-05-07）**：本文中 IMU 链路（MPU6050 / I²C1 / PB2-PB3-PB4 / `bsp_imu_i2c.{c,h}` / `mpu6050.{c,h}` / `att_filter.{c,h}` / 互补滤波算法）已**全部废弃**——开发板 PB2/PB3 缺 4.7 kΩ I²C 上拉电阻、I2C1 总线全开路，改用 ATK-MS901M 通过 UART2（PA21 TX / PA22 RX，115200 8N1）主动上报姿态。新链路、解析器移植、VOFA 通道重映射详见 [Stage1.5-IMU-Swap-MS901M.md](Stage1.5-IMU-Swap-MS901M.md)。本文蓝牙 UART3 / VOFA+ 协议 / K230 RX 骨架 / §8 踩坑记录仍然有效，阅读时跳过 §3-§5 的 IMU 部分即可。
+>
 > 文档定位：阶段 1 第一刀的实现总结与验收凭证。本轮交付 ① 蓝牙 UART2 实例化 ② MPU6050 驱动 + 互补滤波 ③ VOFA+ JustFloat 蓝牙转发 ④ K230 UART DMA RX 接收骨架。
 >
 > K230 帧协议解析、IMU_TELEM/MOTION_CMD/HEARTBEAT/ERROR、心跳超时降级 留到下一轮。

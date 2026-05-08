@@ -24,8 +24,8 @@ virtualFolder:
         - path: ../template/hardware/bsp_log_uart.c
         - path: ../template/hardware/bsp_bt_uart.h
         - path: ../template/hardware/bsp_bt_uart.c
-        - path: ../template/hardware/bsp_imu_i2c.h
-        - path: ../template/hardware/bsp_imu_i2c.c
+        - path: ../template/hardware/bsp_imu_uart.h
+        - path: ../template/hardware/bsp_imu_uart.c
         - path: ../template/hardware/bsp_k230_uart.h
         - path: ../template/hardware/bsp_k230_uart.c
         - path: ../template/hardware/bsp_gpio.c
@@ -34,10 +34,8 @@ virtualFolder:
       folders: []
     - name: middle
       files:
-        - path: ../template/middle/mpu6050.h
-        - path: ../template/middle/mpu6050.c
-        - path: ../template/middle/att_filter.h
-        - path: ../template/middle/att_filter.c
+        - path: ../template/middle/ms901m.h
+        - path: ../template/middle/ms901m.c
         - path: ../template/middle/vofa.h
         - path: ../template/middle/vofa.c
       folders: []

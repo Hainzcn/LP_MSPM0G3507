@@ -26,9 +26,9 @@
 
 | 决策项 | 结论 | 影响 |
 |--------|------|------|
-| IMU 接口 | I²C（MPU6050 仅支持 I²C） | 占用 I2C1（PB2/PB3）+ 一根 INT |
+| **IMU 接口** | **Stage 1.5 起改用 UART**：ATK-MS901M 通过 UART2 (PA21 TX / PA22 RX, 115200 8N1, FIFO + RX 中断) 主动上报姿态帧 | 占用 UART2 + PA21/PA22；释放 I2C1 + PB2/PB3/PB4。原因详见 [Stage1.5-IMU-Swap-MS901M.md](Stage1.5-IMU-Swap-MS901M.md) |
 | 蜂鸣器类型 | 有源（GPIO 高低电平直驱） | 不占 PWM 通道 |
-| 蓝牙串口 | **阶段 1 已实例化 UART3 (PB12 TX / PB13 RX, 115200 8N1, RX 中断)** | 用于 MPU6050 姿态数据 VOFA+ 可视化；外设由 UART2 改为 UART3 是为绕开 SDK multi-pad pin 模板生成 bug，详见 [Stage1-IMU-BT-Telemetry.md §8](Stage1-IMU-BT-Telemetry.md) |
+| 蓝牙串口 | **阶段 1 已实例化 UART3 (PB12 TX / PB13 RX, 115200 8N1, RX 中断)** | 用于姿态数据 VOFA+ 可视化；外设由 UART2 改为 UART3 是为绕开 SDK multi-pad pin 模板生成 bug，详见 [Stage1-IMU-BT-Telemetry.md §8](Stage1-IMU-BT-Telemetry.md) |
 | 编码器 Z 相 | PB14 配为 TIMG8 IDX 输入（3 Pin Mode） | 编码器无 Z 相也不冲突，留作扩展 |
 | **左/右编码器解码方式** | **左 = 硬件 QEI（TIMG8）；右 = GPIO 双边沿中断（阶段 2 评估升级 CAPTURE）** | MSPM0G3507 仅 TIMG8 支持 SysConfig QEI 模块 |
 | TB6612 控制方式 | 2 PWM + 4 方向 + 1 STBY | 共 7 根线 |
@@ -76,7 +76,7 @@
 
 > 排序按"功能模块 → 引脚名"。**所有未在本表出现的引脚一律视为未分配**，禁止在驱动代码里直接拉电平。
 >
-> 方向：IN（输入）/ OUT（输出）/ I/O（双向，仅 I²C SDA 与 SWDIO）。
+> 方向：IN（输入）/ OUT（输出）/ I/O（双向，仅 SWDIO；Stage 1.5 起 I²C SDA 已下线）。
 > 电平：3.3 V（默认）/ 5V-tolerant 标识为 5VT（MSPM0G3507 数字 IO 默认 5V 容忍，参见数据手册）。
 
 ### 3.1 必占（不可变更）
@@ -104,9 +104,8 @@
 | BIN1           | PA26 | 30         | OUT  | GPIO                         | TB6612 右电机方向 1，J18 OFF |
 | BIN2           | PA27 | 31         | OUT  | GPIO                         | TB6612 右电机方向 2，J17 OFF |
 | STBY           | PB0  | 47         | OUT  | GPIO                         | 上电默认低，初始化完成后拉高 |
-| IMU_SCL        | PB2  | 50         | OUT  | I2C1_SCL                     | 400 kHz，外部 4.7 kΩ 上拉到 3V3 |
-| IMU_SDA        | PB3  | 51         | I/O  | I2C1_SDA                     | 同上 |
-| IMU_INT        | PB4  | 52         | IN   | GPIO + EXTI                  | MPU6050 DataReady，上升沿触发 |
+| IMU_TX         | PA21 | 17         | OUT  | **UART2_TX**                 | ATK-MS901M（115200 8N1，单 pad PINCM46）；备用配置 / 校准命令 |
+| IMU_RX         | PA22 | 18         | IN   | **UART2_RX**                 | ATK-MS901M 主动上报，FIFO + RX 中断（PINCM47） |
 | K230_TX        | PB6  | 58         | OUT  | **UART1_TX**                 | DMA TX 通道 |
 | K230_RX        | PB7  | 59         | IN   | **UART1_RX**                 | DMA RX 通道 |
 | BT_TX          | PB12 | 64         | OUT  | **UART3_TX**                 | 蓝牙 HC-04，115200 8N1，遥测口（PINCM29，单 pad） |
@@ -134,8 +133,12 @@
 | PA2 / ROSC (42) | 内部 ROSC |
 | PA3 / LFXIN (43) / PA4 / LFXOUT (44) | LFXT 晶振接口 |
 | PA5 / HFXIN (45) / PA6 / HFXOUT (46) | HFXT 晶振接口 |
-| PA21 / VREF- (17) | ADC VREF- |
-| PA23 / VREF+ (24) | ADC VREF+ |
+| PA23 / VREF+ (24) | ADC VREF+（仅外部 VREF 模式占用；本工程内部 VREF 故 PA23 实际可作扩展，但暂未启用） |
+
+> **PA21 / PA22 状态变更（Stage 1.5）**：
+> - PA21（LQFP pin 17）原列于本表"VREF-"，但本工程 ADC 用内部 VREF（2.5 V），PA21 实际为可用 IO。Stage 1.5 起 PA21 已被 §3.2 业务模块表占用为 `IMU_TX (UART2_TX)`。
+> - PA22（LQFP pin 18）原属 LaunchPad 光传感器 OPA0 输出（J16），跳线已 OFF，Stage 1.5 起占用为 `IMU_RX (UART2_RX)`。
+> - 二者均为 **单 pad** 引脚，不踩 [Stage1-IMU-BT-Telemetry.md §8.5](Stage1-IMU-BT-Telemetry.md) 描述的 multi-pad codegen bug。
 
 ---
 
@@ -170,16 +173,24 @@
 | 死区 | 不需要（TB6612 内部已处理） |
 | 真值表 | AIN1/AIN2 = 10 → 正转；01 → 反转；11 → 短路刹车；00 → 滑行 |
 
-### 4.3 IMU MPU6050
+### 4.3 IMU ATK-MS901M（Stage 1.5 替代原 MPU6050）
 
 | 项目 | 配置 |
 |------|------|
-| 接口 | I²C1，主机模式，400 kHz 标准模式 |
-| 引脚 | SCL = PB2，SDA = PB3 |
-| 上拉 | 外部 4.7 kΩ 至 3V3（板载未提供，需在小车主板/转接板上添加） |
-| 中断 | INT = PB4，上升沿触发 + DataReady |
-| 软件读取 | DMP 不启用，仅读 raw → 软件互补滤波 / Mahony |
-| 期望频率 | 1 kHz IMU 采样、200~500 Hz 平衡环 |
+| 元件 | 正点原子 ATK-MS901M（板载 9 轴 + 气压，内部 15 阶 EKF） |
+| 接口 | UART2，主动上报（MS901M → 主控），单向流为主 |
+| 引脚 | TX = PA21（PINCM46，主控 → 模块，发配置/校准命令）；RX = PA22（PINCM47，模块 → 主控，业务接收） |
+| 波特率 | 115200 8N1（出厂默认；上位机可改 230400/460800，需主控同步） |
+| FIFO / 中断 | UART2 FIFO 启用 + RX 半满中断；不开 DMA（吞吐 < 20 kB/s，无需） |
+| 帧格式 | `0x55 0x55 <ID> <LEN> <DATA[LEN]> <CHECKSUM>`，`CHECKSUM = sum(除最后字节) & 0xFF` |
+| 帧组（默认上报） | 0x01 姿态 (RPY) / 0x02 四元数 / 0x03 raw gyro+accel / 0x04 mag+temp / 0x05 baro+alt |
+| 量程 | ±4 g / ±2000 dps（与上位机默认一致；与 [ms901m.h](../../template/middle/ms901m.h) 中 `ms901m_init(4, 2000)` 强绑定） |
+| 主控用法 | UART RX 中断 → 256 B 环缓 → 主循环 1 kHz drain → `ms901m_feed_bytes` 状态机 → `ms901m_get_snapshot`；姿态 pitch 直接采纳 0x01 帧（板载 EKF 输出），不在主控做互补滤波 |
+| 期望频率 | MS901M 默认 200 Hz 主动上报；主控 1 kHz drain 足够覆盖 |
+| 上电检测 | 上电后 500 ms 内若仍未收到 0x01 → 视为 IMU 未在线，主控进入 fatal handler（LED_R 常亮 + 蜂鸣 200 ms + 死循环） |
+| 上拉电阻 | UART 不需要外部上拉电阻（区别于原 I²C 方案）——这是切换到 MS901M 的核心动机 |
+
+> **元件替换原因**：开发板 PB2/PB3 未板载 4.7 kΩ I²C 上拉电阻、I2C1 总线全开路；为避免热风焊台修复风险，改用串口推送的 MS901M。详见 [Stage1.5-IMU-Swap-MS901M.md](Stage1.5-IMU-Swap-MS901M.md)。
 
 ### 4.4 K230 通讯 UART
 
@@ -239,7 +250,6 @@
 | LED_STATUS_R | PB26 | OUT | 1（起播红灯，提示未就绪）| — | `BSP_LED_R_*` | bsp_gpio_init 设 SET，IMU init 完成后由 main.c 拉低 |
 | LED_STATUS_G | PB27 | OUT | 0 | — | `BSP_LED_G_*` | 5 Hz 心跳由 app_telemetry 翻转 |
 | LED_STATUS_B | PB22 | OUT | 0 | — | `BSP_LED_B_*` | 留作业务状态指示 |
-| IMU_INT | PB4 | IN  | — | 上升沿（**阶段 1 不开 NVIC**） | `BSP_IMU_INT_*` | DataReady；阶段 1 用 SysTick 1 kHz 轮询 |
 | START_BTN | PA18 | IN | — | 下降沿（**阶段 1 不开 NVIC**） | `BSP_START_BTN_*` | S1 按下时拉低，bsp_gpio_init 已配内部上拉 |
 | ENC_R_A | PA12 | IN | — | 双边沿（**阶段 1 不开 NVIC**） | `BSP_ENC_R_A_*` | 右编码器 A 相，阶段 2 拟开中断或升 CAPTURE |
 | ENC_R_B | PA13 | IN | — | 无中断 | `BSP_ENC_R_B_*` | 右编码器 B 相，ISR 内读电平判方向 |
@@ -282,7 +292,7 @@
 
 ### 5.6 IMU 与 K230 空载枚举
 
-- [ ] I²C1 总线上能扫到 MPU6050（地址 0x68 或 0x69）。
+- [ ] **MS901M（Stage 1.5）**：上电后用 USB-TTL 监听 PA22 (UART2_RX) 应在 100~200 ms 内看到 `0x55 0x55 ...` 周期数据流；XDS-UART 1 Hz 心跳日志 `ms901m_good` 字段持续递增、`bad` 字段保持 0。
 - [ ] UART3 物理回环（TX 短接 RX）能收到自发数据，无丢字符。
 
 ### 5.7 SWD / XDS
@@ -301,7 +311,7 @@
 
 1. **本表是唯一真源**：任何引脚改动必须先改本表，再按引脚类型走对应路径，最后更新阶段验收文档。
    - **业务 GPIO**（§4.7 表中所有引脚）：改 [`template/hardware/bsp_gpio.h`](../../template/hardware/bsp_gpio.h) 对应 `BSP_<NAME>_PORT/PIN/IOMUX` + 必要时改 [`bsp_gpio.c`](../../template/hardware/bsp_gpio.c) init 语句。**不进 SysConfig**（理由见 §4.7 提示与 [Stage1-IMU-BT-Telemetry.md §8.5](Stage1-IMU-BT-Telemetry.md)）。
-   - **Peripheral 引脚**（PWM/QEI/I2C/UART/ADC 的 ccp/sda/scl/tx/rx/adcPin 等）：改 [`EIDE/LP_MSPM0G3507.syscfg`](../../EIDE/LP_MSPM0G3507.syscfg)，触发 `syscfg.bat` 重生 `ti_msp_dl_config.{c,h}`；这条路径走 SDK `getDualBondedPadFunction`，不踩 multi-pad bug。
+   - **Peripheral 引脚**（PWM/QEI/UART/ADC 的 ccp/tx/rx/adcPin 等；Stage 1.5 起本工程不再使用 I²C）：改 [`EIDE/LP_MSPM0G3507.syscfg`](../../EIDE/LP_MSPM0G3507.syscfg)，触发 `syscfg.bat` 重生 `ti_msp_dl_config.{c,h}`；这条路径走 SDK `getDualBondedPadFunction`，不踩 multi-pad bug。
 2. **改动需走 PR / 提交说明**：在 commit message 标 `[pin]` 标签，并在 [docs/Overview/Overview.md](../Overview/Overview.md) 引用。
 3. **跳线变化记入本文第 2 节**：不要散落在驱动文件注释里。
 4. **预留引脚不允许"借用"**：3.3 节预留的 PB16/PB17 在蓝牙到位前不得被其他模块占用；如确需占用，必须升级本表。
@@ -319,3 +329,4 @@
 | 2026-04-29 | v0.4 | 阶段 1 实例化 UART2 蓝牙串口（HC-04，PB17/PB16，115200 8N1，RX 中断），PB16/PB17 由「预留」迁入「业务模块」，详见 [Stage1-IMU-BT-Telemetry.md](Stage1-IMU-BT-Telemetry.md) | 主控团队 |
 | 2026-04-29 | v0.5 | **撤销 v0.4** 的 UART2/PB17/PB16 决定（命中 SDK 2.10.00.04 multi-pad 引脚 codegen bug），改用 **UART3 / PB12 (TX) / PB13 (RX)**（PINCM29/PINCM30 单 pad），新增 §4.5 蓝牙串口外设详表，K230 §4.4 → §4.4，ADC §4.5 → §4.6，GPIO §4.6 → §4.7 | 主控团队 |
 | 2026-04-30 | v0.6 | 第五轮编译彻底确认 SDK 2.10 GPIO module 在所有 multi-pad 引脚上 codegen 不可用（无 syntax workaround；详见 [Stage1-IMU-BT-Telemetry.md §8.5](Stage1-IMU-BT-Telemetry.md) 根因复盘）。**14 个业务 GPIO 由 [`template/hardware/bsp_gpio.{h,c}`](../../template/hardware/bsp_gpio.h) 接管**，syscfg 不再 addInstance() GPIO 模块。§4.7 表头补充 `BSP_<NAME>_*` 宏前缀列与中断说明（阶段 1 输入引脚均不开 NVIC，留给阶段 2）；§6 维护规则把"修引脚"流程拆成"业务 GPIO 走 BSP / Peripheral 引脚走 SysConfig"两条独立路径 | 主控团队 |
+| 2026-05-07 | v0.7 | **元件替换：MPU6050 → ATK-MS901M（Stage 1.5）**。开发板 PB2/PB3 未板载 4.7 kΩ I²C 上拉电阻、I2C1 总线全开路；为避免热风焊台修复风险，IMU 链路由 I²C 切换为 UART2 + ATK-MS901M（板载 EKF，主动按帧上报）。引脚 diff：① 释放 `PB2 (IMU_SCL) / PB3 (IMU_SDA) / PB4 (IMU_INT)` 三脚 + I2C1 实例；② 占用 `PA21 (UART2_TX, PINCM46) / PA22 (UART2_RX, PINCM47)`，二者均为单 pad；③ §3.4 禁用表把 PA21 移出（仅外部 VREF 模式占用，本工程内部 VREF），PA23 保留并备注"内部 VREF 实际可作扩展但未启用"；④ §4.3 IMU 详表整段重写为 MS901M（帧格式、量程 ±4 g/±2000 dps、上电 500 ms 检测、115200 8N1、不需上拉）；⑤ §4.7 GPIO 表删 IMU_INT 行（PB4 不再使用）；⑥ §5.6 上电验证清单中"I²C 扫地址 0x68"改为"USB-TTL 监听 PA22 应见 0x55 0x55 周期帧 + 1 Hz 日志 ms901m_good 递增"。详见 [Stage1.5-IMU-Swap-MS901M.md](Stage1.5-IMU-Swap-MS901M.md) | 主控团队 |
