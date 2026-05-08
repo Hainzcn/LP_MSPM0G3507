@@ -1,7 +1,0 @@
-CompileFlags:
-  Add:
-    - -IA:\Program Files (x86)\Keil_v5\ARM\ARMCLANG/include
-    - -IA:\Program Files (x86)\Keil_v5\ARM\ARMCLANG/include/libcxx
-  Remove: []
-  CompilationDatabase: ./build/LP_MSPM0G3507
-  Compiler: A:\Program Files (x86)\Keil_v5\ARM\ARMCLANG\bin\armclang.exe
