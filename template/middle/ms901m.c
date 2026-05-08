@@ -53,6 +53,124 @@ static inline int16_t le16(uint8_t lo, uint8_t hi)
     return (int16_t)(((uint16_t)hi << 8) | (uint16_t)lo);
 }
 
+static uint8_t sum_bytes(const uint8_t *data, size_t len)
+{
+    uint8_t sum = 0u;
+
+    if (data == NULL) {
+        return 0u;
+    }
+
+    for (size_t i = 0u; i < len; ++i) {
+        sum = (uint8_t)(sum + data[i]);
+    }
+    return sum;
+}
+
+static bool set_acc_scale_by_sel(uint8_t fsr)
+{
+    switch (fsr) {
+        case MS901M_ACC_FSR_2G:
+            s_acc_scale = 2.0f / 32768.0f;
+            return true;
+        case MS901M_ACC_FSR_4G:
+            s_acc_scale = 4.0f / 32768.0f;
+            return true;
+        case MS901M_ACC_FSR_8G:
+            s_acc_scale = 8.0f / 32768.0f;
+            return true;
+        case MS901M_ACC_FSR_16G:
+            s_acc_scale = 16.0f / 32768.0f;
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool set_gyro_scale_by_sel(uint8_t fsr)
+{
+    switch (fsr) {
+        case MS901M_GYRO_FSR_250DPS:
+            s_gyro_scale = 250.0f / 32768.0f;
+            return true;
+        case MS901M_GYRO_FSR_500DPS:
+            s_gyro_scale = 500.0f / 32768.0f;
+            return true;
+        case MS901M_GYRO_FSR_1000DPS:
+            s_gyro_scale = 1000.0f / 32768.0f;
+            return true;
+        case MS901M_GYRO_FSR_2000DPS:
+            s_gyro_scale = 2000.0f / 32768.0f;
+            return true;
+        default:
+            return false;
+    }
+}
+
+static size_t build_frame(uint8_t cmd_id, const uint8_t *data, uint8_t data_len,
+    uint8_t *out, size_t out_cap)
+{
+    size_t frame_len = 5u + (size_t)data_len;
+
+    if (out == NULL || out_cap < frame_len) {
+        return 0u;
+    }
+    if (data_len > 0u && data == NULL) {
+        return 0u;
+    }
+
+    out[0] = MS901M_CMD_SYNC1;
+    out[1] = MS901M_CMD_SYNC2;
+    out[2] = cmd_id;
+    out[3] = data_len;
+    for (uint8_t i = 0u; i < data_len; ++i) {
+        out[4u + i] = data[i];
+    }
+    out[frame_len - 1u] = sum_bytes(out, frame_len - 1u);
+    return frame_len;
+}
+
+static bool port_mode_cmd_id(uint8_t port_index, uint8_t *cmd_id)
+{
+    if (cmd_id == NULL) {
+        return false;
+    }
+
+    switch (port_index) {
+        case 0u: *cmd_id = MS901M_CMD_D0MODE; return true;
+        case 1u: *cmd_id = MS901M_CMD_D1MODE; return true;
+        case 2u: *cmd_id = MS901M_CMD_D2MODE; return true;
+        case 3u: *cmd_id = MS901M_CMD_D3MODE; return true;
+        default: return false;
+    }
+}
+
+static bool pwm_pulse_cmd_id(uint8_t port_index, uint8_t *cmd_id)
+{
+    if (cmd_id == NULL) {
+        return false;
+    }
+
+    switch (port_index) {
+        case 1u: *cmd_id = MS901M_CMD_D1PULSE; return true;
+        case 3u: *cmd_id = MS901M_CMD_D3PULSE; return true;
+        default: return false;
+    }
+}
+
+static bool pwm_period_cmd_id(uint8_t port_index, uint8_t *cmd_id)
+{
+    if (cmd_id == NULL) {
+        return false;
+    }
+
+    switch (port_index) {
+        case 1u: *cmd_id = MS901M_CMD_D1PERIOD; return true;
+        case 3u: *cmd_id = MS901M_CMD_D3PERIOD; return true;
+        default: return false;
+    }
+}
+
 static void reset_state_machine(void)
 {
     s_state    = ST_SYNC1;
@@ -216,6 +334,140 @@ void ms901m_feed_bytes(const uint8_t *p, size_t n)
             break;
         }
     }
+}
+
+size_t ms901m_build_read_cmd(uint8_t cmd_id, uint8_t *out, size_t out_cap)
+{
+    uint8_t payload = 0x00u;
+    return build_frame((uint8_t)((cmd_id & 0x7Fu) | 0x80u), &payload, 1u, out, out_cap);
+}
+
+size_t ms901m_build_write_cmd(uint8_t cmd_id, const uint8_t *data, uint8_t data_len,
+    uint8_t *out, size_t out_cap)
+{
+    return build_frame((uint8_t)(cmd_id & 0x7Fu), data, data_len, out, out_cap);
+}
+
+size_t ms901m_build_write_u8_cmd(uint8_t cmd_id, uint8_t value, uint8_t *out, size_t out_cap)
+{
+    return ms901m_build_write_cmd(cmd_id, &value, 1u, out, out_cap);
+}
+
+size_t ms901m_build_write_u16_cmd(uint8_t cmd_id, uint16_t value, uint8_t *out, size_t out_cap)
+{
+    uint8_t data[2];
+
+    data[0] = (uint8_t)(value & 0xFFu);
+    data[1] = (uint8_t)((value >> 8) & 0xFFu);
+    return ms901m_build_write_cmd(cmd_id, data, 2u, out, out_cap);
+}
+
+size_t ms901m_build_save_cmd(uint8_t *out, size_t out_cap)
+{
+    return ms901m_build_write_u8_cmd(MS901M_CMD_SAVE, 0x00u, out, out_cap);
+}
+
+size_t ms901m_build_reset_cmd(uint8_t *out, size_t out_cap)
+{
+    return ms901m_build_write_u8_cmd(MS901M_CMD_RESET, 0x00u, out, out_cap);
+}
+
+size_t ms901m_build_sensor_cal_cmd(ms901m_sencal_t cal, uint8_t *out, size_t out_cap)
+{
+    return ms901m_build_write_u8_cmd(MS901M_CMD_SENCAL, (uint8_t)cal, out, out_cap);
+}
+
+size_t ms901m_build_set_gyro_fsr_cmd(ms901m_gyro_fsr_t fsr, uint8_t *out, size_t out_cap)
+{
+    return ms901m_build_write_u8_cmd(MS901M_CMD_GYROFSR, (uint8_t)fsr, out, out_cap);
+}
+
+size_t ms901m_build_set_acc_fsr_cmd(ms901m_acc_fsr_t fsr, uint8_t *out, size_t out_cap)
+{
+    return ms901m_build_write_u8_cmd(MS901M_CMD_ACCFSR, (uint8_t)fsr, out, out_cap);
+}
+
+size_t ms901m_build_set_baud_cmd(ms901m_baud_t baud, uint8_t *out, size_t out_cap)
+{
+    return ms901m_build_write_u8_cmd(MS901M_CMD_BAUD, (uint8_t)baud, out, out_cap);
+}
+
+size_t ms901m_build_set_return_mask_cmd(uint8_t mask, uint8_t *out, size_t out_cap)
+{
+    return ms901m_build_write_u8_cmd(MS901M_CMD_RETURNSET, mask, out, out_cap);
+}
+
+size_t ms901m_build_set_return_rate_cmd(ms901m_return_rate_t rate, uint8_t *out, size_t out_cap)
+{
+    return ms901m_build_write_u8_cmd(MS901M_CMD_RETURNRATE, (uint8_t)rate, out, out_cap);
+}
+
+size_t ms901m_build_set_alg_cmd(ms901m_alg_t alg, uint8_t *out, size_t out_cap)
+{
+    return ms901m_build_write_u8_cmd(MS901M_CMD_ALG, (uint8_t)alg, out, out_cap);
+}
+
+size_t ms901m_build_set_asm_cmd(ms901m_asm_t asm_mode, uint8_t *out, size_t out_cap)
+{
+    return ms901m_build_write_u8_cmd(MS901M_CMD_ASM, (uint8_t)asm_mode, out, out_cap);
+}
+
+size_t ms901m_build_set_gaucal_cmd(ms901m_switch_t enable, uint8_t *out, size_t out_cap)
+{
+    return ms901m_build_write_u8_cmd(MS901M_CMD_GAUCAL, (uint8_t)enable, out, out_cap);
+}
+
+size_t ms901m_build_set_baucal_cmd(ms901m_switch_t enable, uint8_t *out, size_t out_cap)
+{
+    return ms901m_build_write_u8_cmd(MS901M_CMD_BAUCAL, (uint8_t)enable, out, out_cap);
+}
+
+size_t ms901m_build_set_ledoff_cmd(ms901m_switch_t led_off, uint8_t *out, size_t out_cap)
+{
+    return ms901m_build_write_u8_cmd(MS901M_CMD_LEDOFF, (uint8_t)led_off, out, out_cap);
+}
+
+size_t ms901m_build_set_port_mode_cmd(uint8_t port_index, ms901m_port_mode_t mode,
+    uint8_t *out, size_t out_cap)
+{
+    uint8_t cmd_id = 0u;
+
+    if (!port_mode_cmd_id(port_index, &cmd_id)) {
+        return 0u;
+    }
+    return ms901m_build_write_u8_cmd(cmd_id, (uint8_t)mode, out, out_cap);
+}
+
+size_t ms901m_build_set_pwm_pulse_cmd(uint8_t port_index, uint16_t pulse_us,
+    uint8_t *out, size_t out_cap)
+{
+    uint8_t cmd_id = 0u;
+
+    if (!pwm_pulse_cmd_id(port_index, &cmd_id)) {
+        return 0u;
+    }
+    return ms901m_build_write_u16_cmd(cmd_id, pulse_us, out, out_cap);
+}
+
+size_t ms901m_build_set_pwm_period_cmd(uint8_t port_index, uint16_t period_us,
+    uint8_t *out, size_t out_cap)
+{
+    uint8_t cmd_id = 0u;
+
+    if (!pwm_period_cmd_id(port_index, &cmd_id)) {
+        return 0u;
+    }
+    return ms901m_build_write_u16_cmd(cmd_id, period_us, out, out_cap);
+}
+
+bool ms901m_apply_acc_fsr(ms901m_acc_fsr_t fsr)
+{
+    return set_acc_scale_by_sel((uint8_t)fsr);
+}
+
+bool ms901m_apply_gyro_fsr(ms901m_gyro_fsr_t fsr)
+{
+    return set_gyro_scale_by_sel((uint8_t)fsr);
 }
 
 bool ms901m_has_attitude(void)
