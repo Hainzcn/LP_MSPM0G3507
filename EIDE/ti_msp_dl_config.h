@@ -120,18 +120,18 @@ extern "C" {
 
 
 /* Defines for UART_IMU */
-#define UART_IMU_INST                                                      UART2
+#define UART_IMU_INST                                                      UART3
 #define UART_IMU_INST_FREQUENCY                                         32000000
-#define UART_IMU_INST_IRQHandler                                UART2_IRQHandler
-#define UART_IMU_INST_INT_IRQN                                    UART2_INT_IRQn
-#define GPIO_UART_IMU_RX_PORT                                              GPIOA
-#define GPIO_UART_IMU_TX_PORT                                              GPIOA
-#define GPIO_UART_IMU_RX_PIN                                      DL_GPIO_PIN_22
-#define GPIO_UART_IMU_TX_PIN                                      DL_GPIO_PIN_21
-#define GPIO_UART_IMU_IOMUX_RX                                   (IOMUX_PINCM47)
-#define GPIO_UART_IMU_IOMUX_TX                                   (IOMUX_PINCM46)
-#define GPIO_UART_IMU_IOMUX_RX_FUNC                    IOMUX_PINCM47_PF_UART2_RX
-#define GPIO_UART_IMU_IOMUX_TX_FUNC                    IOMUX_PINCM46_PF_UART2_TX
+#define UART_IMU_INST_IRQHandler                                UART3_IRQHandler
+#define UART_IMU_INST_INT_IRQN                                    UART3_INT_IRQn
+#define GPIO_UART_IMU_RX_PORT                                              GPIOB
+#define GPIO_UART_IMU_TX_PORT                                              GPIOB
+#define GPIO_UART_IMU_RX_PIN                                      DL_GPIO_PIN_13
+#define GPIO_UART_IMU_TX_PIN                                      DL_GPIO_PIN_12
+#define GPIO_UART_IMU_IOMUX_RX                                   (IOMUX_PINCM30)
+#define GPIO_UART_IMU_IOMUX_TX                                   (IOMUX_PINCM29)
+#define GPIO_UART_IMU_IOMUX_RX_FUNC                    IOMUX_PINCM30_PF_UART3_RX
+#define GPIO_UART_IMU_IOMUX_TX_FUNC                    IOMUX_PINCM29_PF_UART3_TX
 #define UART_IMU_BAUD_RATE                                              (115200)
 #define UART_IMU_IBRD_32_MHZ_115200_BAUD                                    (17)
 #define UART_IMU_FBRD_32_MHZ_115200_BAUD                                    (23)
@@ -167,22 +167,6 @@ extern "C" {
 #define UART_K230_BAUD_RATE                                             (921600)
 #define UART_K230_IBRD_32_MHZ_921600_BAUD                                    (2)
 #define UART_K230_FBRD_32_MHZ_921600_BAUD                                   (11)
-/* Defines for UART_BT */
-#define UART_BT_INST                                                       UART3
-#define UART_BT_INST_FREQUENCY                                          32000000
-#define UART_BT_INST_IRQHandler                                 UART3_IRQHandler
-#define UART_BT_INST_INT_IRQN                                     UART3_INT_IRQn
-#define GPIO_UART_BT_RX_PORT                                               GPIOB
-#define GPIO_UART_BT_TX_PORT                                               GPIOB
-#define GPIO_UART_BT_RX_PIN                                       DL_GPIO_PIN_13
-#define GPIO_UART_BT_TX_PIN                                       DL_GPIO_PIN_12
-#define GPIO_UART_BT_IOMUX_RX                                    (IOMUX_PINCM30)
-#define GPIO_UART_BT_IOMUX_TX                                    (IOMUX_PINCM29)
-#define GPIO_UART_BT_IOMUX_RX_FUNC                     IOMUX_PINCM30_PF_UART3_RX
-#define GPIO_UART_BT_IOMUX_TX_FUNC                     IOMUX_PINCM29_PF_UART3_TX
-#define UART_BT_BAUD_RATE                                               (115200)
-#define UART_BT_IBRD_32_MHZ_115200_BAUD                                     (17)
-#define UART_BT_FBRD_32_MHZ_115200_BAUD                                     (23)
 
 
 
@@ -221,7 +205,6 @@ void SYSCFG_DL_QEI_LEFT_init(void);
 void SYSCFG_DL_UART_IMU_init(void);
 void SYSCFG_DL_UART_LOG_init(void);
 void SYSCFG_DL_UART_K230_init(void);
-void SYSCFG_DL_UART_BT_init(void);
 void SYSCFG_DL_ADC_BAT_init(void);
 void SYSCFG_DL_DMA_init(void);
 

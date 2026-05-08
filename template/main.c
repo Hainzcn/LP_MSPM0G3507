@@ -1,16 +1,15 @@
 /**
  * @file    main.c
  * @brief   阶段 1 主入口：MSPM0G3507 自平衡瞄准小车
- *          —— 蓝牙姿态遥测固件（Stage 1.5: MS901M 替代 MPU6050）。
+ *          —— 姿态遥测固件（Stage 1.5/1.6: MS901M 替代 MPU6050、蓝牙下线）。
  *
  *  调用链：
  *      SYSCFG_DL_init()      -- 由 SysConfig 自动生成，配置时钟 / peripheral pins
  *      bsp_gpio_init         -- 14 路业务 GPIO 手工 init（绕开 SDK multi-pad bug）
  *      bsp_systick_init      -- 1 kHz 节拍 + ms 计时
  *      bsp_log_uart_init     -- UART0 (XDS-UART) printf retarget
- *      bsp_bt_uart_init      -- UART3 (HC-04) RX 中断 + 阻塞 TX
  *      bsp_k230_uart_init    -- UART1 + DMA RX 接收骨架
- *      bsp_imu_uart_init     -- UART2 (MS901M) RX 中断 + 256 B 环缓
+ *      bsp_imu_uart_init     -- UART3 (MS901M) RX 中断 + 256 B 环缓
  *      ms901m_init           -- 解析器状态机复位 + 量程系数（±4 g / ±2000 dps）
  *      wait_for_ms901m_*     -- 上电后 500 ms 内等到第一帧 0x01；超时报警
  *      app_telemetry_run     -- 永不返回的主循环
@@ -24,8 +23,12 @@
  *  一次 DL_GPIO_xxxPins 调用（LED_R/G/B 同属 GPIOB → BSP_LED_*_PORT）。
  *
  *  Stage 1.5 变更（2026-05-07）：原 I²C+MPU6050 链路因开发板 PB2/PB3 缺上拉
- *  电阻被废弃，改走 UART2+ATK-MS901M（板载 EKF），姿态直接采纳 0x01 帧。
- *  详见 docs/TaskLog/Stage1.5-IMU-Swap-MS901M.md。
+ *  电阻被废弃，改走 UART+ATK-MS901M（板载 EKF），姿态直接采纳 0x01 帧。
+ *
+ *  Stage 1.6 变更（2026-05-08）：IMU 串口从 UART2/PA21/PA22 迁到 UART3/PB12/
+ *  PB13（原蓝牙引脚），原因是 PA21 未引到 BoosterPack 需焊接；同期蓝牙
+ *  HC-04 模块整体下线，遥测改走 1 Hz XDS-UART printf。详见
+ *  docs/TaskLog/Stage1.5-IMU-Swap-MS901M.md §11 Stage 1.6 重排。
  */
 
 #include "ti_msp_dl_config.h"
@@ -33,7 +36,6 @@
 #include "bsp_gpio.h"
 #include "bsp_systick.h"
 #include "bsp_log_uart.h"
-#include "bsp_bt_uart.h"
 #include "bsp_k230_uart.h"
 #include "bsp_imu_uart.h"
 #include "ms901m.h"
@@ -69,7 +71,7 @@ static void fatal_imu_init_failure(int32_t rc)
  * @brief  上电后等 MS901M 第一帧 0x01 姿态，最长 timeout_ms 毫秒。
  * @return 0 = 拿到了；-1 = 超时。
  *
- *  MS901M 默认主动按帧上报，主控只需被动 drain UART2 RX 环缓 + 喂解析器。
+ *  MS901M 默认主动按帧上报，主控只需被动 drain UART3 RX 环缓 + 喂解析器。
  *  本函数主动 1 ms 轮询而非 SysTick 节拍，避免和 main 主循环 tick 标志竞争。
  */
 static int32_t wait_for_ms901m_attitude(uint32_t timeout_ms)
@@ -101,14 +103,13 @@ int main(void)
     }
 
     bsp_log_uart_init();
-    bsp_bt_uart_init();
     bsp_k230_uart_init();
     bsp_imu_uart_init();
 
     /* MS901M 出厂默认 ±4 g / ±2000 dps（与 ATK 上位机默认量程一致） */
     ms901m_init(4, 2000);
 
-    (void)printf("\n[boot] MSPM0G3507 stage1.5 telemetry start (MS901M)\n");
+    (void)printf("\n[boot] MSPM0G3507 stage1.6 telemetry start (MS901M / no BT)\n");
 
     int32_t rc = wait_for_ms901m_attitude(MS901M_BOOT_TIMEOUT_MS);
     if (rc != 0) {

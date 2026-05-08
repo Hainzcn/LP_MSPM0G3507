@@ -109,23 +109,27 @@ QEI_LEFT.peripheral.ccp1Pin.$assign        = "PA30";
 QEI_LEFT.peripheral.idxPin.$assign         = "PB14";
 
 /* ========================================================================== */
-/* UART2 —— ATK-MS901M 姿态传感器 (Stage 1.5 替代原 I²C MPU6050)              */
-/*   TX = PA21, RX = PA22, 115200 8N1, FIFO + RX 中断                          */
+/* UART3 —— ATK-MS901M 姿态传感器 (Stage 1.6 引脚集中化重排)                   */
+/*   TX = PB12, RX = PB13, 115200 8N1, FIFO + RX 中断                          */
 /*                                                                              */
-/*   背景：开发板 PB2/PB3 缺 I²C 上拉电阻，I2C1 全开路；为避免焊接修复风险，   */
-/*         改用 MS901M（自带 EKF，串口主动上报 0x01 RPY / 0x02 四元数 /         */
-/*         0x03 raw gyro+accel / 0x04 mag+temp / 0x05 baro+alt）。              */
+/*   背景：开发板 PB2/PB3 缺 I²C 上拉电阻，I2C1 全开路；Stage 1.5 改用 MS901M  */
+/*         （自带 EKF，串口主动上报 0x01 RPY / 0x02 四元数 / 0x03 raw gyro+    */
+/*         accel / 0x04 mag+temp / 0x05 baro+alt），原方案占 UART2 + PA21/PA22。 */
 /*                                                                              */
-/*   引脚选型：                                                                 */
-/*     · PA21 (PINCM46, 单 pad) → UART2_TX，用于将来发配置/校准命令            */
-/*     · PA22 (PINCM47, 单 pad) → UART2_RX，主用接收 MS901M 主动上报           */
-/*     · 单 pad 引脚不踩 SDK 2.10 multi-pad codegen bug（详见                   */
-/*       docs/TaskLog/Stage1-IMU-BT-Telemetry.md §8.5）                          */
-/*     · PA21 在 Stage 0 §3.4 曾因 ADC VREF- 列入禁用，但本工程使用内部 VREF    */
-/*       (2.5 V)，PA21 实际可作 GPIO/UART 复用（详见 Stage 1.5 文档）           */
+/*   Stage 1.6 重排原因：PA21（LQFP pin 17）**未引到 BoosterPack**，仅可从板底 */
+/*         J23-J28 引脚扩展接头取出（焊接成本高）。复核 LaunchPad User's Guide  */
+/*         图 2-10 BoosterPack 引脚布局后，把 IMU 串口从 UART2/PA21/PA22 整体  */
+/*         迁到 UART3/PB12/PB13——PB12 = J4.32、PB13 = J2.26，二者均为开放排针 */
+/*         直接接出，且都是单 pad（PINCM29 / PINCM30），不踩 SDK 2.10 multi-pad */
+/*         codegen bug（详见 docs/TaskLog/Stage1-IMU-BT-Telemetry.md §8.5）。   */
+/*                                                                              */
+/*   蓝牙模块（原 UART_BT 占用 UART3 + PB12/PB13）已在 Stage 1.6 整体下线，    */
+/*   引脚释放给 IMU；遥测可视化方案改为 XDS-UART (UART0) printf + 上位机串口   */
+/*   数据流，详见 docs/TaskLog/Stage1.5-IMU-Swap-MS901M.md §11 Stage 1.6 重排。 */
 /*                                                                              */
 /*   不开 DMA：MS901M 帧组合典型 100 Hz × ~50 B ≈ 40 kbps，远低于 115200 链路 */
-/*           容量；UART2 RX FIFO + 半满中断 + 256 B 环缓即可，无需 DMA 通道。  */
+/*           容量；UART3 RX FIFO + 半满中断 + 256 B 环缓即可，无需 DMA 通道    */
+/*           （DMA 通道留给 K230 UART1）。                                      */
 /*                                                                              */
 /*   注：MS901M 默认出厂 115200 8N1 主动上报 0x01..0x05 五帧；上位机一次性配置 */
 /*       后永久写入 EEPROM，详见 docs/TaskLog/Stage1.5-IMU-Swap-MS901M.md。    */
@@ -135,9 +139,9 @@ IMU_UART.$name                             = "UART_IMU";
 IMU_UART.targetBaudRate                    = 115200;
 IMU_UART.enableFIFO                        = true;
 IMU_UART.enabledInterrupts                 = ["RX"];
-IMU_UART.peripheral.$assign                = "UART2";
-IMU_UART.peripheral.txPin.$assign          = "PA21";
-IMU_UART.peripheral.rxPin.$assign          = "PA22";
+IMU_UART.peripheral.$assign                = "UART3";
+IMU_UART.peripheral.txPin.$assign          = "PB12";
+IMU_UART.peripheral.rxPin.$assign          = "PB13";
 
 /* ========================================================================== */
 /* UART0 —— 开发期日志 (XDS-UART 桥)                                           */
@@ -171,29 +175,16 @@ K230_UART.peripheral.txPin.$assign         = "PB6";
 K230_UART.peripheral.rxPin.$assign         = "PB7";
 
 /* ========================================================================== */
-/* UART3 —— 蓝牙串口 (HC-04)                                                   */
-/*   TX = PB12, RX = PB13, 115200 8N1                                          */
-/*   用于：姿态数据 → VOFA+ JustFloat 二进制流上位机可视化                     */
-/*         （Stage 1.5 起姿态来自 MS901M / UART2，不再来自 MPU6050 / I²C）     */
+/* 蓝牙串口（UART_BT / UART3 / PB12 / PB13）已在 Stage 1.6 整体下线：         */
+/*   原占用的 PB12/PB13 释放给 IMU MS901M（UART_IMU 改用 UART3，见上方）。     */
+/*   遥测路径切换为 XDS-UART (UART0) printf + 上位机串口工具直接读取，         */
+/*   VOFA+ JustFloat 二进制流暂停；如未来需要无线遥测，可走 K230 BLE 透传     */
+/*   或 USB Type-C HID/CDC，不再占用主控 UART。                                */
 /*                                                                              */
-/*   注 1：HC-04 出厂默认 9600 8N1，需先通过 USB-TTL 用 AT 指令 AT+UART=115200,0,0 */
-/*         配置为 115200 8N1，详见 docs/TaskLog/Stage1-IMU-BT-Telemetry.md   */
-/*   注 2：RX 中断仅用于将来接收上位机控制位 / AT 回显，本阶段进环缓冲不解析 */
-/*                                                                              */
-/*   注 3：原阶段 0 文档将蓝牙引脚预留在 UART2 (PB17/PB16)，但 SDK 2.10.00.04   */
-/*         在 LQFP-64(PM) 上对该 multi-pad 引脚组的 UART2 模板生成存在 bug      */
-/*         （getGPIONumberMultiPad → identifyPadIndex 越界 → 'Cannot read       */
-/*         properties of undefined (match)'）。改用 UART3 + PB12/PB13 这对单    */
-/*         pad 引脚后规避，详见 Stage1-IMU-BT-Telemetry.md §8 踩坑记录。      */
+/*   引脚迁移决策与重排根因详见：                                              */
+/*     · docs/TaskLog/Stage1.5-IMU-Swap-MS901M.md §11（Stage 1.6 引脚重排）   */
+/*     · docs/TaskLog/Stage0-PinAllocation.md v0.8（蓝牙整段下线 / IMU UART3）*/
 /* ========================================================================== */
-const BT_UART = UART.addInstance();
-BT_UART.$name                              = "UART_BT";
-BT_UART.targetBaudRate                     = 115200;
-BT_UART.enableFIFO                         = true;
-BT_UART.enabledInterrupts                  = ["RX"];
-BT_UART.peripheral.$assign                 = "UART3";
-BT_UART.peripheral.txPin.$assign           = "PB12";
-BT_UART.peripheral.rxPin.$assign           = "PB13";
 
 /* ========================================================================== */
 /* ADC0 —— 电池电压分压采样                                                    */

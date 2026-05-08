@@ -1,6 +1,8 @@
 # 阶段 1 ｜ 蓝牙串口配置 + MPU6050 姿态转发
 
-> **⚠️ Stage 1.5 部分替换提示（2026-05-07）**：本文中 IMU 链路（MPU6050 / I²C1 / PB2-PB3-PB4 / `bsp_imu_i2c.{c,h}` / `mpu6050.{c,h}` / `att_filter.{c,h}` / 互补滤波算法）已**全部废弃**——开发板 PB2/PB3 缺 4.7 kΩ I²C 上拉电阻、I2C1 总线全开路，改用 ATK-MS901M 通过 UART2（PA21 TX / PA22 RX，115200 8N1）主动上报姿态。新链路、解析器移植、VOFA 通道重映射详见 [Stage1.5-IMU-Swap-MS901M.md](Stage1.5-IMU-Swap-MS901M.md)。本文蓝牙 UART3 / VOFA+ 协议 / K230 RX 骨架 / §8 踩坑记录仍然有效，阅读时跳过 §3-§5 的 IMU 部分即可。
+> **⚠️ Stage 1.5 部分替换提示（2026-05-07）**：本文中 IMU 链路（MPU6050 / I²C1 / PB2-PB3-PB4 / `bsp_imu_i2c.{c,h}` / `mpu6050.{c,h}` / `att_filter.{c,h}` / 互补滤波算法）已**全部废弃**——开发板 PB2/PB3 缺 4.7 kΩ I²C 上拉电阻、I2C1 总线全开路，改用 ATK-MS901M 通过 UART 主动上报姿态。新链路、解析器移植、VOFA 通道重映射详见 [Stage1.5-IMU-Swap-MS901M.md](Stage1.5-IMU-Swap-MS901M.md)。
+>
+> **⚠️ Stage 1.6 蓝牙整体下线提示（2026-05-08）**：本文 §1 决策表 / §2 SysConfig / §6 蓝牙 AT 配置 / §7 VOFA+ JustFloat 协议 / §8 蓝牙 UART3 踩坑记录中所有 **HC-04 + UART3 + PB12/PB13 + 100 Hz VOFA+ 推送** 相关内容已**整体废弃**——Stage 1.6 引脚集中化重排时 IMU 串口由 UART2/PA21/PA22 迁到 UART3/PB12/PB13（原因：PA21 不在 BP 排针上需要焊接），蓝牙模块让位下线，VOFA+ 100 Hz 二进制流暂停，姿态可视化改走 1 Hz XDS-UART printf 文本日志。详见 [Stage1.5-IMU-Swap-MS901M.md §11](Stage1.5-IMU-Swap-MS901M.md)。本文 **K230 UART1 DMA RX 骨架 / §8.5 SDK 2.10 multi-pad GPIO codegen bug 复盘 / §8.6 PT_LOAD 段对齐** 仍然有效，可继续参考；蓝牙 / IMU 相关章节请直接跳过。
 >
 > 文档定位：阶段 1 第一刀的实现总结与验收凭证。本轮交付 ① 蓝牙 UART2 实例化 ② MPU6050 驱动 + 互补滤波 ③ VOFA+ JustFloat 蓝牙转发 ④ K230 UART DMA RX 接收骨架。
 >

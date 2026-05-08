@@ -40,7 +40,13 @@
 ;   <o> Stack Size (in Bytes) <0x0-0xFFFFFFFF:8>
 ; </h>
 
-Stack_Size      EQU     0x00000100
+; Stack_Size 由 0x100 (256 B) 提升到 0x400 (1 KB)：
+;   原 256 B 栈不够装 Keil AC6 标准库 printf("%f") 浮点格式化路径
+;   （vsnprintf + 浮点 → int 转换栈帧典型 200~300 B），1 Hz [hb] 心跳塞
+;   4 个 %.2f/%.1f 时栈瞬间溢出 → HardFault → 主循环死锁。
+;   即便业务层已把 %f 改成手动 %c%ld.%02lu 整数格式化，1 KB 栈仍是
+;   合理裕度，覆盖未来 snprintf / 浮点数学等可能的栈高峰。
+Stack_Size      EQU     0x00000400
 
                 AREA    STACK, NOINIT, READWRITE, ALIGN=3
 Stack_Mem       SPACE   Stack_Size

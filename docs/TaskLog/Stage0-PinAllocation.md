@@ -26,9 +26,9 @@
 
 | 决策项 | 结论 | 影响 |
 |--------|------|------|
-| **IMU 接口** | **Stage 1.5 起改用 UART**：ATK-MS901M 通过 UART2 (PA21 TX / PA22 RX, 115200 8N1, FIFO + RX 中断) 主动上报姿态帧 | 占用 UART2 + PA21/PA22；释放 I2C1 + PB2/PB3/PB4。原因详见 [Stage1.5-IMU-Swap-MS901M.md](Stage1.5-IMU-Swap-MS901M.md) |
+| **IMU 接口** | **Stage 1.5 起改用 UART**；**Stage 1.6 起占用 UART3 (PB12 TX / PB13 RX, 115200 8N1, FIFO + RX 中断)** 主动上报姿态帧 | 占用 UART3 + PB12/PB13；释放 I2C1 + PB2/PB3/PB4 + UART2 + PA21/PA22。引脚集中化重排原因详见 [Stage1.5-IMU-Swap-MS901M.md §11](Stage1.5-IMU-Swap-MS901M.md) |
 | 蜂鸣器类型 | 有源（GPIO 高低电平直驱） | 不占 PWM 通道 |
-| 蓝牙串口 | **阶段 1 已实例化 UART3 (PB12 TX / PB13 RX, 115200 8N1, RX 中断)** | 用于姿态数据 VOFA+ 可视化；外设由 UART2 改为 UART3 是为绕开 SDK multi-pad pin 模板生成 bug，详见 [Stage1-IMU-BT-Telemetry.md §8](Stage1-IMU-BT-Telemetry.md) |
+| 蓝牙串口 | **Stage 1.6 起整体下线** | 原占 UART3 (PB12/PB13)，引脚让给 IMU MS901M。无线遥测/可视化路径暂停（VOFA+ 二进制流），姿态数据改走 1 Hz XDS-UART (UART0) printf 文本日志；后续无线路径回归方案见 [Stage1.5-IMU-Swap-MS901M.md §11](Stage1.5-IMU-Swap-MS901M.md) |
 | 编码器 Z 相 | PB14 配为 TIMG8 IDX 输入（3 Pin Mode） | 编码器无 Z 相也不冲突，留作扩展 |
 | **左/右编码器解码方式** | **左 = 硬件 QEI（TIMG8）；右 = GPIO 双边沿中断（阶段 2 评估升级 CAPTURE）** | MSPM0G3507 仅 TIMG8 支持 SysConfig QEI 模块 |
 | TB6612 控制方式 | 2 PWM + 4 方向 + 1 STBY | 共 7 根线 |
@@ -57,9 +57,9 @@
 | J9   | PB24 → 热敏电阻  | (1)-(2) | **OFF** | PB24 释放给电池分压 ADC 输入 |
 | J12  | PA29 / PA30 / PB14 → QEI 接口 | 不适用 | **必须 ON** | 用作左编码器硬件 QEI |
 | J13  | 模拟域 3V3 → 热敏 / OPA2365 | ON | OFF（可选） | 不使用片上 OPA，可断电避免漏流 |
-| J14  | PB23 → BP J1.3 | (1)-(2) PB23 | 保留默认 | 暂不动 BoosterPack |
-| J15  | PA16 → BP J3.29 | (1)-(2) PA16 | 保留默认 | 与 4.3 节 AIN2 复用，BoosterPack 排针上不要再连其他设备 |
-| J16  | PA22 → 光传感器 OPA0_OUT | ON | **OFF** | PA22 留给蓝牙 UART 或其它扩展 |
+| J14  | PB23 / PA9 → BP J1.3 | (1)-(2) PB23 | **(2)-(3) PA9** | Stage 1.6 起把 PWMB (PA9) 接到 BoosterPack J1.3，避免 PA9 焊接 |
+| J15  | PA16 → BP J3.29 | (1)-(2) PA16 | 保留默认 | 与 4.2 节 AIN2 复用，BoosterPack 排针上不要再连其他设备 |
+| J16  | PA22 → 光传感器 OPA0_OUT | ON | **OFF** | PA22 在 Stage 1.5 给 IMU 用；Stage 1.6 起 IMU 迁出，PA22 释放且不再连光传感器 |
 | J17  | PA27 → OPA0_IN0- | ON | **OFF** | PA27 让给 TB6612 BIN2 |
 | J18  | PA26 → OPA0_IN0+ | ON | **OFF** | PA26 让给 TB6612 BIN1 |
 | J19  | PA0 开漏上拉 → 3V3 | (1)-(2) | **OFF** | 蜂鸣器输出，不需要 3V3 上拉 |
@@ -104,12 +104,10 @@
 | BIN1           | PA26 | 30         | OUT  | GPIO                         | TB6612 右电机方向 1，J18 OFF |
 | BIN2           | PA27 | 31         | OUT  | GPIO                         | TB6612 右电机方向 2，J17 OFF |
 | STBY           | PB0  | 47         | OUT  | GPIO                         | 上电默认低，初始化完成后拉高 |
-| IMU_TX         | PA21 | 17         | OUT  | **UART2_TX**                 | ATK-MS901M（115200 8N1，单 pad PINCM46）；备用配置 / 校准命令 |
-| IMU_RX         | PA22 | 18         | IN   | **UART2_RX**                 | ATK-MS901M 主动上报，FIFO + RX 中断（PINCM47） |
+| IMU_TX         | PB12 | 64         | OUT  | **UART3_TX**                 | ATK-MS901M（115200 8N1，单 pad PINCM29）；备用配置 / 校准命令；Stage 1.6 由 PA21 迁来，BP J4.32 直接接出 |
+| IMU_RX         | PB13 | 1          | IN   | **UART3_RX**                 | ATK-MS901M 主动上报，FIFO + RX 中断（PINCM30，单 pad）；Stage 1.6 由 PA22 迁来，BP J2.26 直接接出 |
 | K230_TX        | PB6  | 58         | OUT  | **UART1_TX**                 | DMA TX 通道 |
 | K230_RX        | PB7  | 59         | IN   | **UART1_RX**                 | DMA RX 通道 |
-| BT_TX          | PB12 | 64         | OUT  | **UART3_TX**                 | 蓝牙 HC-04，115200 8N1，遥测口（PINCM29，单 pad） |
-| BT_RX          | PB13 | 1          | IN   | **UART3_RX**                 | 蓝牙 HC-04，RX 中断进环缓冲（PINCM30，单 pad） |
 | BUZZER         | PA0  | 33         | OUT  | GPIO                         | 有源蜂鸣器，J4 OFF, J19 OFF |
 | START_BTN      | PA18 | 11         | IN   | GPIO + EXTI                  | 板载 S1，J8 ON，下降沿触发 |
 | LASER_EN       | PA1  | 34         | OUT  | GPIO                         | J20 OFF，默认低 |
@@ -122,7 +120,9 @@
 
 | 信号        | 引脚 | LQFP 引脚号 | 用途                       | 启用条件 |
 |-------------|------|------------|---------------------------|----------|
-| —           | —    | —          | 当前无预留项                 | 阶段 1 蓝牙引脚已实例化（见 3.2 BT_TX/BT_RX） |
+| —           | PA21 | 17         | UART2_TX 候选 / VREF- 模式 | Stage 1.6 起释放（IMU 已迁到 UART3）；本工程内部 VREF，可作扩展 GPIO，但需焊接（不在 BoosterPack 上）|
+| —           | PA22 | 18         | UART2_RX 候选 / ADC0_7      | Stage 1.6 起释放（IMU 已迁到 UART3）；BP J3.14 开放，可作扩展 |
+| —           | UART2 整体 | — | 备用 UART 实例 | 蓝牙若回归且坚持单 pad，可走 PA21/PA22（PA21 焊接）或试验 PB15/PB16（multi-pad bug 风险未验） |
 
 ### 3.4 禁用（硬件不可作通用 IO）
 
@@ -135,10 +135,18 @@
 | PA5 / HFXIN (45) / PA6 / HFXOUT (46) | HFXT 晶振接口 |
 | PA23 / VREF+ (24) | ADC VREF+（仅外部 VREF 模式占用；本工程内部 VREF 故 PA23 实际可作扩展，但暂未启用） |
 
-> **PA21 / PA22 状态变更（Stage 1.5）**：
-> - PA21（LQFP pin 17）原列于本表"VREF-"，但本工程 ADC 用内部 VREF（2.5 V），PA21 实际为可用 IO。Stage 1.5 起 PA21 已被 §3.2 业务模块表占用为 `IMU_TX (UART2_TX)`。
-> - PA22（LQFP pin 18）原属 LaunchPad 光传感器 OPA0 输出（J16），跳线已 OFF，Stage 1.5 起占用为 `IMU_RX (UART2_RX)`。
-> - 二者均为 **单 pad** 引脚，不踩 [Stage1-IMU-BT-Telemetry.md §8.5](Stage1-IMU-BT-Telemetry.md) 描述的 multi-pad codegen bug。
+> **PA21 / PA22 状态变更（Stage 1.5 → Stage 1.6）**：
+> - **Stage 1.5**：PA21（LQFP pin 17，原 VREF-）+ PA22（LQFP pin 18，原 J16 光传感器 OUT）首次启用为 `IMU_TX (UART2_TX) / IMU_RX (UART2_RX)`，单 pad（PINCM46/47），规避 multi-pad codegen bug。
+> - **Stage 1.6（2026-05-08）**：因 PA21 不在 BoosterPack 排针上，需要焊到板底 J23-J28 才能接出 → IMU UART 整体迁到 UART3 + PB12/PB13（BP 直接接出）。PA21/PA22 重新进入预留 §3.3，**未来扩展 GPIO 仍需考虑 PA21 焊接代价**。
+
+> **必须焊接清单（Stage 1.6 起，板载固有限制）**：
+>
+> | 信号 | 引脚 | LQFP | 唯一接出方式 |
+> |------|------|------|-------------|
+> | BUZZER | PA0 | 33 | 板载 J4 跳线柱 PA0 端飞线 / 板底 J23-J28（J4 OFF + J19 OFF）|
+> | LASER_EN | PA1 | 34 | 板载 J20 跳线柱 PA1 端飞线 / 板底 J23-J28（J20 OFF）|
+>
+> 这两脚 LaunchPad 只引到板载 LED1 跳线柱与开漏上拉跳线柱，**没有引到 BoosterPack 排针**。其余所有业务引脚（PWMA/PWMB、TB6612 方向、IMU、K230、ADC、LOG、START_BTN、编码器）Stage 1.6 重排后**全部从 BoosterPack 排针 + J12 编码器接头直接接出，无焊接需求**。
 
 ---
 
@@ -173,15 +181,15 @@
 | 死区 | 不需要（TB6612 内部已处理） |
 | 真值表 | AIN1/AIN2 = 10 → 正转；01 → 反转；11 → 短路刹车；00 → 滑行 |
 
-### 4.3 IMU ATK-MS901M（Stage 1.5 替代原 MPU6050）
+### 4.3 IMU ATK-MS901M（Stage 1.5 替代原 MPU6050；Stage 1.6 引脚集中化重排）
 
 | 项目 | 配置 |
 |------|------|
 | 元件 | 正点原子 ATK-MS901M（板载 9 轴 + 气压，内部 15 阶 EKF） |
-| 接口 | UART2，主动上报（MS901M → 主控），单向流为主 |
-| 引脚 | TX = PA21（PINCM46，主控 → 模块，发配置/校准命令）；RX = PA22（PINCM47，模块 → 主控，业务接收） |
+| 接口 | **UART3**（Stage 1.6 起；Stage 1.5 曾用 UART2），主动上报（MS901M → 主控），单向流为主 |
+| 引脚 | TX = **PB12**（PINCM29，主控 → 模块，发配置/校准命令；BP J4.32 直接接出）；RX = **PB13**（PINCM30，模块 → 主控，业务接收；BP J2.26 直接接出） |
 | 波特率 | 115200 8N1（出厂默认；上位机可改 230400/460800，需主控同步） |
-| FIFO / 中断 | UART2 FIFO 启用 + RX 半满中断；不开 DMA（吞吐 < 20 kB/s，无需） |
+| FIFO / 中断 | UART3 FIFO 启用 + RX 半满中断；不开 DMA（吞吐 < 20 kB/s，无需） |
 | 帧格式 | `0x55 0x55 <ID> <LEN> <DATA[LEN]> <CHECKSUM>`，`CHECKSUM = sum(除最后字节) & 0xFF` |
 | 帧组（默认上报） | 0x01 姿态 (RPY) / 0x02 四元数 / 0x03 raw gyro+accel / 0x04 mag+temp / 0x05 baro+alt |
 | 量程 | ±4 g / ±2000 dps（与上位机默认一致；与 [ms901m.h](../../template/middle/ms901m.h) 中 `ms901m_init(4, 2000)` 强绑定） |
@@ -189,8 +197,11 @@
 | 期望频率 | MS901M 默认 200 Hz 主动上报；主控 1 kHz drain 足够覆盖 |
 | 上电检测 | 上电后 500 ms 内若仍未收到 0x01 → 视为 IMU 未在线，主控进入 fatal handler（LED_R 常亮 + 蜂鸣 200 ms + 死循环） |
 | 上拉电阻 | UART 不需要外部上拉电阻（区别于原 I²C 方案）——这是切换到 MS901M 的核心动机 |
+| 接线（装车）| MS901M VCC → 主控 5V；MS901M GND → 共地；MS901M TX → 主控 PB13（J2.26）；MS901M RX → 主控 PB12（J4.32）；交叉接（模块 TX 接主控 RX）|
 
 > **元件替换原因**：开发板 PB2/PB3 未板载 4.7 kΩ I²C 上拉电阻、I2C1 总线全开路；为避免热风焊台修复风险，改用串口推送的 MS901M。详见 [Stage1.5-IMU-Swap-MS901M.md](Stage1.5-IMU-Swap-MS901M.md)。
+>
+> **Stage 1.6 重排原因**：原 Stage 1.5 使用 UART2 + PA21/PA22，但 PA21（LQFP pin 17）不在 LaunchPad BoosterPack 排针上（仅板底 J23-J28 引脚扩展接头可达），需要焊接才能接出；同期蓝牙模块下线，UART3 + PB12/PB13 释放给 IMU，二者均为 BoosterPack 开放排针 + 单 pad，无 SDK codegen 风险。详见 [Stage1.5-IMU-Swap-MS901M.md §11](Stage1.5-IMU-Swap-MS901M.md)。
 
 ### 4.4 K230 通讯 UART
 
@@ -207,20 +218,17 @@
 
 > **外设选择依据**：MSPM0G3507 LQFP-64 上 PB6/PB7 是 **UART1** 的 TX/RX 引脚（PINCM23/PINCM24，参 [mspm0g350x.h:707/718](file:///A:/Program%20Files/ti/mspm0_sdk_2_10_00_04/source/ti/devices/msp/m0p/mspm0g350x.h)）。
 
-### 4.5 蓝牙串口 UART
+### 4.5 蓝牙串口 UART（**Stage 1.6 起整体下线**）
 
-| 项目 | 配置 |
+| 项目 | 配置（已下线，仅作历史参考） |
 |------|------|
-| 外设 | **UART3** |
-| 引脚 | TX = PB12 (PINCM29)，RX = PB13 (PINCM30) |
-| 模块 | HC-04（BC417 经典蓝牙 SPP，需用 USB-TTL AT 配 115200 一次） |
-| 电平 | HC-04 Vcc 5V，TXD/RXD 3.3 V LVTTL 可直连 MSPM0 |
-| 波特率 | 115200 8N1 |
-| FIFO | 启用，深度 4×8 |
-| 中断 | RX FIFO 半满中断（用作上位机控制位接收，本阶段进环缓冲不解析） |
-| DMA | 不开（VOFA+ JustFloat 帧仅 20 B，阻塞 TX 1.74 ms 可接受） |
+| 外设 | ~~UART3~~ → 引脚 PB12/PB13 已交还给 IMU MS901M |
+| 模块 | ~~HC-04~~（已不焊接到主板）|
+| 下线原因 | Stage 1.6 引脚集中化重排：IMU 原 UART2/PA21/PA22 因 PA21 不在 BoosterPack 上需要焊接，迁到 UART3/PB12/PB13 后蓝牙必须让位；选择"取消蓝牙"而非"赌 PB15/PB16 multi-pad bug 不复发"是为保留 SDK 可用性 |
+| 替代方案 | 调试期：1 Hz XDS-UART (UART0) printf 文本日志（已实现）；运行期可视化：暂无；未来无线遥测可走 K230 BLE 透传或 USB CDC，不再占主控 UART |
+| 历史踩坑 | 原计划 UART2 + PB17/PB16（PINCM43/PINCM33）命中 SDK 2.10 multi-pad codegen bug，详见 [Stage1-IMU-BT-Telemetry.md §8](Stage1-IMU-BT-Telemetry.md) |
 
-> **外设选择依据 + 踩坑记录**：原计划走 UART2 + PB17/PB16（PINCM43/PINCM33），但 SDK 2.10.00.04 在 LQFP-64(PM) 上对该 multi-pad 引脚组生成 `ti_msp_dl_config.h` 时 `getGPIONumberMultiPad → identifyPadIndex` 落到越界索引，崩在 `Common.js:sliceNumber` 上。改用 UART3 + PB12/PB13（单 pad，PINCM29/PINCM30）规避。详细诊断与修复过程见 [Stage1-IMU-BT-Telemetry.md §8](Stage1-IMU-BT-Telemetry.md)。
+> **如未来需要恢复无线遥测**：优先评估 K230 端 BLE 模块（K230 已通过 UART1/PB6/PB7 与主控通讯，加 BLE 模组即可在 K230 端转发 VOFA 流），或 USB Type-C HID/CDC（MSPM0G3507 自带 USB FS 控制器但本工程未启用）。**不推荐**重新占用主控 UART：UART2 单 pad 选项 PA21 仍需焊接，PB15/PB16 SDK bug 风险未验。
 
 ### 4.6 ADC 电池分压
 
@@ -292,8 +300,8 @@
 
 ### 5.6 IMU 与 K230 空载枚举
 
-- [ ] **MS901M（Stage 1.5）**：上电后用 USB-TTL 监听 PA22 (UART2_RX) 应在 100~200 ms 内看到 `0x55 0x55 ...` 周期数据流；XDS-UART 1 Hz 心跳日志 `ms901m_good` 字段持续递增、`bad` 字段保持 0。
-- [ ] UART3 物理回环（TX 短接 RX）能收到自发数据，无丢字符。
+- [ ] **MS901M（Stage 1.6）**：上电后用 USB-TTL 监听 PB13 (UART3_RX, BP J2.26) 应在 100~200 ms 内看到 `0x55 0x55 ...` 周期数据流；XDS-UART 1 Hz 心跳日志 `ms901m_good` 字段持续递增、`bad` 字段保持 0。
+- [ ] UART1 物理回环（K230 端 TX 短接 RX，或 PB6 短接 PB7）能收到自发数据，无丢字符。
 
 ### 5.7 SWD / XDS
 
@@ -330,3 +338,4 @@
 | 2026-04-29 | v0.5 | **撤销 v0.4** 的 UART2/PB17/PB16 决定（命中 SDK 2.10.00.04 multi-pad 引脚 codegen bug），改用 **UART3 / PB12 (TX) / PB13 (RX)**（PINCM29/PINCM30 单 pad），新增 §4.5 蓝牙串口外设详表，K230 §4.4 → §4.4，ADC §4.5 → §4.6，GPIO §4.6 → §4.7 | 主控团队 |
 | 2026-04-30 | v0.6 | 第五轮编译彻底确认 SDK 2.10 GPIO module 在所有 multi-pad 引脚上 codegen 不可用（无 syntax workaround；详见 [Stage1-IMU-BT-Telemetry.md §8.5](Stage1-IMU-BT-Telemetry.md) 根因复盘）。**14 个业务 GPIO 由 [`template/hardware/bsp_gpio.{h,c}`](../../template/hardware/bsp_gpio.h) 接管**，syscfg 不再 addInstance() GPIO 模块。§4.7 表头补充 `BSP_<NAME>_*` 宏前缀列与中断说明（阶段 1 输入引脚均不开 NVIC，留给阶段 2）；§6 维护规则把"修引脚"流程拆成"业务 GPIO 走 BSP / Peripheral 引脚走 SysConfig"两条独立路径 | 主控团队 |
 | 2026-05-07 | v0.7 | **元件替换：MPU6050 → ATK-MS901M（Stage 1.5）**。开发板 PB2/PB3 未板载 4.7 kΩ I²C 上拉电阻、I2C1 总线全开路；为避免热风焊台修复风险，IMU 链路由 I²C 切换为 UART2 + ATK-MS901M（板载 EKF，主动按帧上报）。引脚 diff：① 释放 `PB2 (IMU_SCL) / PB3 (IMU_SDA) / PB4 (IMU_INT)` 三脚 + I2C1 实例；② 占用 `PA21 (UART2_TX, PINCM46) / PA22 (UART2_RX, PINCM47)`，二者均为单 pad；③ §3.4 禁用表把 PA21 移出（仅外部 VREF 模式占用，本工程内部 VREF），PA23 保留并备注"内部 VREF 实际可作扩展但未启用"；④ §4.3 IMU 详表整段重写为 MS901M（帧格式、量程 ±4 g/±2000 dps、上电 500 ms 检测、115200 8N1、不需上拉）；⑤ §4.7 GPIO 表删 IMU_INT 行（PB4 不再使用）；⑥ §5.6 上电验证清单中"I²C 扫地址 0x68"改为"USB-TTL 监听 PA22 应见 0x55 0x55 周期帧 + 1 Hz 日志 ms901m_good 递增"。详见 [Stage1.5-IMU-Swap-MS901M.md](Stage1.5-IMU-Swap-MS901M.md) | 主控团队 |
+| 2026-05-08 | v0.8 | **引脚集中化重排（Stage 1.6）+ 蓝牙整体下线**。复核 LaunchPad User's Guide 图 2-10 BoosterPack 引脚布局后，发现 v0.7 中 `IMU_TX = PA21` 不在 BP 排针上（仅板底 J23-J28 引脚扩展接头可达，需焊接），同时 `PWMB = PA9` 默认通过 J14 接 PB23 也不开放。引脚 diff：① IMU UART 整体由 UART2 迁到 UART3：`IMU_TX PA21 → PB12（BP J4.32，PINCM29 单 pad）`、`IMU_RX PA22 → PB13（BP J2.26，PINCM30 单 pad）`；② 蓝牙 HC-04 模块整体下线，UART_BT 实例从 syscfg 删除，`bsp_bt_uart.{c,h}` git rm，VOFA+ JustFloat 100 Hz 推送暂停（vofa.{c,h} 接口保留待无线路径回归后复用）；③ §1 决策行同步更新（IMU 接口/蓝牙串口）；④ §2 跳线表 J14 由 (1)-(2) PB23 改为 (2)-(3) PA9，让 PWMB 从 BP J1.3 直接接出（避免 PA9 焊接）；J16 备注更新（PA22 释放）；⑤ §3.2 业务表 IMU_TX/IMU_RX 引脚改 PB12/PB13；删 BT_TX/BT_RX 两行；⑥ §3.3 预留表加 PA21/PA22/UART2 备注；⑦ §3.4 禁用表追加"必须焊接清单"小节，明确 PA0(BUZZER)/PA1(LASER_EN) 是 LaunchPad 板载固有限制无法绕过，其余业务引脚 1.6 起全部从 BP/J12 直接接出；⑧ §4.3 IMU 详表更新外设/引脚/装车接线；⑨ §4.5 蓝牙详表整段改写为"已下线"+ 替代方案 + 历史踩坑保留；⑩ §5.6 上电验证清单中"USB-TTL 监听 PA22"改为"USB-TTL 监听 PB13"。详见 [Stage1.5-IMU-Swap-MS901M.md §11](Stage1.5-IMU-Swap-MS901M.md) | 主控团队 |

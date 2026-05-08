@@ -1,6 +1,7 @@
 /**
  * @file    bsp_imu_uart.c
- * @brief   ATK-MS901M UART2 接收实现，详见 bsp_imu_uart.h。
+ * @brief   ATK-MS901M UART3 接收实现，详见 bsp_imu_uart.h。
+ *          Stage 1.6 起占用 UART3 + PB12/PB13（原蓝牙引脚），不再使用 UART2。
  *
  * 实现要点：
  *   · 256 B 环形缓冲（2 的幂便于 (idx & MASK) 折回）
@@ -24,11 +25,19 @@ static volatile uint32_t s_rx_overrun = 0u;
 
 void bsp_imu_uart_init(void)
 {
-    /* SysConfig 已配好引脚 / 波特率 / FIFO / RX 中断；这里只清挂起的 IT */
+    /* SysConfig 已配好引脚 / 波特率 / FIFO + 外设级 RX 中断使能位（IMSC）。
+     * 但 SDK 2.10 的 SYSCFG_DL_UART_IMU_init 仅调用 DL_UART_Main_enableInterrupt
+     * 设外设 IMSC，**不**会自动 NVIC_EnableIRQ；NVIC 必须由用户代码显式开启，
+     * 否则 RX FIFO 半满中断永远不会进入 CPU 调度（症状：MS901M 数据流到达
+     * 串口但 UART3_IRQHandler 永不触发，环缓 head 不前进，ms901m_has_attitude
+     * 永 false → main 500 ms 超时 fatal）。
+     *
+     * 参考对照：bsp_k230_uart.c:bsp_k230_uart_init() 同样显式调用
+     * NVIC_EnableIRQ(DMA_INT_IRQn) 才能让 K230 RX DMA 完成中断生效。 */
     DL_UART_Main_clearInterruptStatus(UART_IMU_INST,
         DL_UART_MAIN_INTERRUPT_RX | DL_UART_MAIN_INTERRUPT_TX);
+    NVIC_EnableIRQ(UART_IMU_INST_INT_IRQN);
 
-    /* SDK 在 SYSCFG_DL_UART_IMU_init 里已经使能 RX 中断 + NVIC，无需再开 */
     s_rx_head = 0u;
     s_rx_tail = 0u;
     s_rx_overrun = 0u;
@@ -92,14 +101,17 @@ uint32_t bsp_imu_uart_rx_overrun(void)
 }
 
 /**
- * @brief  UART2 中断服务函数（IMU UART）。
+ * @brief  UART3 中断服务函数（IMU UART，Stage 1.6 起）。
  * @note   函数名由 startup_mspm0g350x_uvision.s 中的向量表决定，
- *         在 MSPM0G3507 SDK 中是 `UART2_IRQHandler`。
+ *         在 MSPM0G3507 SDK 中是 `UART3_IRQHandler`。
  *         若以后 IMU UART 切到其它外设号，**必须**同步把这里函数名改成
  *         对应的 `UARTx_IRQHandler`，否则中断不会触发但编译能过（弱符号
  *         回退到 startup 默认死循环）。
+ *
+ *         Stage 1.6 之前 IMU 占 UART2，本函数原名 `UART2_IRQHandler`；
+ *         同期蓝牙模块下线，UART3 向量从 bsp_bt_uart.c 让出给 IMU。
  */
-void UART2_IRQHandler(void)
+void UART3_IRQHandler(void)
 {
     switch (DL_UART_Main_getPendingInterrupt(UART_IMU_INST)) {
         case DL_UART_MAIN_IIDX_RX: {

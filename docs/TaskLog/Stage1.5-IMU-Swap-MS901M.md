@@ -1,12 +1,14 @@
-# 阶段 1.5 ｜ IMU 元件替换：MPU6050 → ATK-MS901M
+# 阶段 1.5 ｜ IMU 元件替换：MPU6050 → ATK-MS901M（含 1.6 引脚重排）
 
-> 文档定位：临时阶段，记录 IMU 链路从 I²C+MPU6050 切换到 UART+ATK-MS901M 的全部变更——硬件原因、引脚迁移、UART2 实例化、C 版解析器移植、VOFA 通道重映射、上位机一次性配置流程、验收清单。
+> 文档定位：临时阶段，记录 IMU 链路从 I²C+MPU6050 切换到 UART+ATK-MS901M 的全部变更——硬件原因、引脚迁移、UART 实例化、C 版解析器移植、VOFA 通道重映射、上位机一次性配置流程、验收清单。
+>
+> **2026-05-08 追加 §11**：Stage 1.6 引脚集中化重排，IMU 串口由 UART2/PA21/PA22 迁到 UART3/PB12/PB13（蓝牙整体下线），原因是 PA21 不在 LaunchPad BoosterPack 排针上需要焊接。本文 §1-§10 中所有 `PA21/PA22/UART2` 字样在 1.6 后实际指 `PB12/PB13/UART3`，阅读时请注意；§5 SysConfig 改动以 §11.2 的最新 diff 为准。
 >
 > 关联文档：
 >
 > - 项目总览：[../Overview/Overview.md](../Overview/Overview.md)
-> - 引脚分配真源（已升级到 v0.7）：[Stage0-PinAllocation.md](Stage0-PinAllocation.md)
-> - 阶段 1（被本文部分替代，蓝牙/K230 部分仍有效）：[Stage1-IMU-BT-Telemetry.md](Stage1-IMU-BT-Telemetry.md)
+> - 引脚分配真源（已升级到 v0.8）：[Stage0-PinAllocation.md](Stage0-PinAllocation.md)
+> - 阶段 1（蓝牙整段被本文 §11 下线，K230/SDK bug 复盘部分仍有效）：[Stage1-IMU-BT-Telemetry.md](Stage1-IMU-BT-Telemetry.md)
 > - 移植参考（C++ 原版解析器）：[../chore/Ms901mStreamParser.cpp](../chore/Ms901mStreamParser.cpp) / [.h](../chore/Ms901mStreamParser.h)
 
 ---
@@ -254,8 +256,181 @@
 
 ---
 
-## 11. 修订历史
+## 11. Stage 1.6 引脚集中化重排（2026-05-08）
+
+### 11.1 触发原因
+
+复核 [LaunchPad User's Guide 图 2-10](../MSPM0G3507%20LaunchPad%20User%27s%20Guide.pdf) BoosterPack 引脚布局后发现：本文 §3 占用的 `IMU_TX = PA21`（LQFP pin 17）**未引到任何一个 BoosterPack 排针**——LaunchPad 把 PA21 仅留给"VREF- 模式"占位（板上 R20 DNC，本工程不用外部 VREF 故空置），可达性仅限板底 J23-J28 引脚扩展接头。如要把 IMU TX 接到外部 MS901M 模块，**必须在 LaunchPad 上焊接**——这与本工程"避免热风焊台修复风险"的 Stage 1.5 立项初衷相违，等同于回到 PB2/PB3 加上拉电阻的同等代价。
+
+同时，`PWMB = PA9`（LQFP pin 55）默认通过 J14 跳线接到 PB23 而非 PA9，需要把 J14 从 (1)-(2) 切到 (2)-(3) 才能把 PA9 接到 BP J1.3。这一项不需焊接、只需切换跳线，但 [docs/Overview/pin.md](../Overview/pin.md) 第 56-69 行的"开放引脚表"未体现 J14 的可切换性，容易让人误以为 PA9 不可用。
+
+### 11.2 决策摘要（与项目负责人 2026-05-08 确认）
+
+| 决策项 | 结论 | 理由 |
+|--------|------|------|
+| IMU UART 实例 | **UART2 → UART3** | UART3 + PB12/PB13 二者均在 BP（J4.32 + J2.26），且为单 pad（PINCM29/PINCM30），无 SDK multi-pad codegen 风险 |
+| 蓝牙模块 | **HC-04 整体下线**（释放 UART3 + PB12/PB13）| UART3 让给 IMU；蓝牙是 Stage 1 引入的"无线姿态可视化"路径，本阶段 K230 视觉链尚未联调，可视化暂时改走 1 Hz XDS-UART printf 不影响整车功能 |
+| PWMB 接出 | J14 切到 (2)-(3)，让 PA9 → BP J1.3 | 避免 PA9 焊接，整车装配只剩 PA0/PA1 两个不可避免焊点 |
+| VOFA+ 路径 | 100 Hz JustFloat 二进制流暂停；保留 vofa.{c,h} 模块接口 | 二进制流与 printf 文本日志混用同一 XDS-UART 会让 VOFA+ 上位机分帧失败；未来无线路径回归（K230 BLE / USB CDC）后只需重新注入 writer，业务代码无须改动 |
+| 焊接清单 | 仅 **PA0 (BUZZER)** + **PA1 (LASER_EN)** 两脚必须焊接 | LaunchPad 把 PA0/PA1 仅引到板载 LED1 跳线柱与开漏上拉跳线柱，没有引到任何 BP 排针；从 J4.1/J20.1 跳线柱直接飞线即可，无需热风焊台 |
+| 备选方案保留 | 若蓝牙必须回归，优先 K230 BLE 透传或 USB CDC，不再占主控 UART | 主控 UART2 单 pad 选项 PA21 仍需焊接，PB15/PB16 是否触发 SDK multi-pad bug 未实测验证 |
+
+### 11.3 引脚 diff（vs Stage 1.5）
+
+释放：
+- `PA21 (IMU_TX, UART2_TX, PINCM46)` —— 退回 §3.3 预留池，未来扩展 GPIO 仍需考虑焊接代价
+- `PA22 (IMU_RX, UART2_RX, PINCM47)` —— 退回 §3.3 预留池（BP J3.14 仍可用作扩展）
+- `UART2` 实例 —— 整体从 SysConfig 下线
+- `PB12 (BT_TX, UART3_TX)` / `PB13 (BT_RX, UART3_RX)` —— 蓝牙下线后释放，**当 tick 即被 IMU 重新占用**
+- `UART3` 蓝牙实例 —— 删 `UART_BT` addInstance；`bsp_bt_uart.{c,h}` git rm
+
+新占用：
+- `PB12 (PINCM29, 单 pad)` → `UART3_TX`（IMU），主控 → MS901M（发配置/校准命令）
+- `PB13 (PINCM30, 单 pad)` → `UART3_RX`（IMU），MS901M → 主控（业务接收）
+- `UART3` 重新 addInstance 为 `UART_IMU`（实例名复用 Stage 1.5 的 `UART_IMU`，仅 peripheral.$assign / txPin / rxPin 三行变化）
+
+跳线变化：
+- `J14`：(1)-(2) PB23 → **(2)-(3) PA9**，让 PWMB 从 BP J1.3 直接接出
+
+### 11.4 SysConfig 改动（替代 §5）
+
+[`EIDE/LP_MSPM0G3507.syscfg`](../../EIDE/LP_MSPM0G3507.syscfg) 的最终 diff（vs Stage 1.5 v0.7）：
+
+```diff
+ const IMU_UART = UART.addInstance();
+ IMU_UART.$name                             = "UART_IMU";
+ IMU_UART.targetBaudRate                    = 115200;
+ IMU_UART.enableFIFO                        = true;
+ IMU_UART.enabledInterrupts                 = ["RX"];
+-IMU_UART.peripheral.$assign                = "UART2";
+-IMU_UART.peripheral.txPin.$assign          = "PA21";
+-IMU_UART.peripheral.rxPin.$assign          = "PA22";
++IMU_UART.peripheral.$assign                = "UART3";
++IMU_UART.peripheral.txPin.$assign          = "PB12";
++IMU_UART.peripheral.rxPin.$assign          = "PB13";
+
+-const BT_UART = UART.addInstance();
+-BT_UART.$name                              = "UART_BT";
+-BT_UART.targetBaudRate                     = 115200;
+-BT_UART.enableFIFO                         = true;
+-BT_UART.enabledInterrupts                  = ["RX"];
+-BT_UART.peripheral.$assign                 = "UART3";
+-BT_UART.peripheral.txPin.$assign           = "PB12";
+-BT_UART.peripheral.rxPin.$assign           = "PB13";
+```
+
+注意：
+- 重新生成 `ti_msp_dl_config.{c,h}` 后，`UART_IMU_INST` 宏指向 `UART3`，`UART_IMU_INST_IRQHandler` 展开为 `UART3_IRQHandler`；[`bsp_imu_uart.c`](../../template/hardware/bsp_imu_uart.c) 已把 IRQ 函数名从 `UART2_IRQHandler` 改为 `UART3_IRQHandler`，与启动文件向量表一致。
+- `UART_BT_INST` / `UART_BT_INST_IRQHandler` 等宏在重生后会消失，编译期任何残留 `bsp_bt_uart_*` 调用都会报错；本次改动已把 [`main.c`](../../template/main.c) 的 `bsp_bt_uart_init()` 与 [`app_telemetry.c`](../../template/app/app_telemetry.c) 的 `vofa_set_writer(bsp_bt_uart_write)` 与 100 Hz `vofa_send` 全部删除。
+
+### 11.5 文件改动清单（vs Stage 1.5 v0.1）
+
+| 路径 | 动作 | 说明 |
+|------|------|------|
+| [`EIDE/LP_MSPM0G3507.syscfg`](../../EIDE/LP_MSPM0G3507.syscfg) | 改 | UART_IMU 改 UART3+PB12/PB13；删 UART_BT 整段（含 §5 历史注释） |
+| [`template/hardware/bsp_imu_uart.{h,c}`](../../template/hardware/bsp_imu_uart.h) | 改 | 头部注释 UART2→UART3；IRQ 函数名 `UART2_IRQHandler` → `UART3_IRQHandler` |
+| [`template/hardware/bsp_bt_uart.{h,c}`](../../template/hardware/bsp_imu_uart.h) | **删除** | git rm，历史可回退；蓝牙下线 |
+| [`template/app/app_telemetry.{h,c}`](../../template/app/app_telemetry.h) | 改 | 删 `bsp_bt_uart.h` 引入、`vofa.h` 引入、`PHASE_VOFA_TICKS` 宏、`vofa_set_writer` 调用、100 Hz `vofa_send` 调用；1 Hz printf 心跳保留并升级为姿态可视化主路径 |
+| [`template/main.c`](../../template/main.c) | 改 | 删 `bsp_bt_uart.h` 引入、`bsp_bt_uart_init()` 调用；启动 banner 改 `stage1.6 telemetry start (MS901M / no BT)` |
+| [`EIDE/.eide/eide.yml`](../../EIDE/.eide/eide.yml) | 改 | `hardware` 文件列表删 `bsp_bt_uart.{c,h}` |
+| [`docs/TaskLog/Stage0-PinAllocation.md`](Stage0-PinAllocation.md) | 改 | 升 v0.8：§1 决策行 / §2 跳线 J14 / §3.2 业务表 IMU 引脚 + 删 BT 行 / §3.3 预留 / §3.4 焊接清单 / §4.3 IMU 详表 / §4.5 蓝牙下线 / §5.6 验证清单 / §7 修订历史 |
+| 本文 | 改 | 头部 banner + 关联文档版本号 + 新增 §11 章；§1-§10 中 UART2/PA21/PA22 字样保留作历史，加文档头部说明 |
+| [`docs/TaskLog/Stage1-IMU-BT-Telemetry.md`](Stage1-IMU-BT-Telemetry.md) | 改 | 头部 banner 追加 1.6 蓝牙下线提示 |
+
+### 11.6 验收追加项（在 §9 基础上）
+
+| 项 | 通过条件 | 验证方式 | 状态 |
+|---|---------|---------|------|
+| 工程能编译且无未定义引用 | 删除蓝牙后 `bsp_bt_uart_*` / `UART_BT_INST` 等符号在主控代码中零引用，AC6 链接器无 undefined reference | EIDE 构建按钮 + map 文件 grep | [x] |
+| `ti_msp_dl_config.h` 正确生成 UART3 IMU 宏 | grep `UART_IMU_INST` 指向 `UART3`、`UART_IMU_INST_IRQHandler` 展开为 `UART3_IRQHandler` | 文本检查 | [x] |
+| MS901M 在 PB12/PB13 在线 | 上电后 USB-TTL 监听 BP J2.26 (PB13) 应见 `0x55 0x55 ...` 周期帧；XDS-UART 不再出现 fatal | 串口工具 + XDS-UART | [x] |
+| 1 Hz 心跳承载姿态可视化 | XDS-UART 文本日志中 pitch/roll/gy/temp 数值随手动倾斜模块变化；`ms901m_good` 持续递增、`bad=0`、`over=0` | XDS-UART | [x] |
+| 蓝牙模块物理拆除 | HC-04 已从主控板上拔除；BP J4.32 (PB12) 与 J2.26 (PB13) 让位给 MS901M | 装车前目检 | [ ] |
+| PWMB 通过 J14 接出 | 万用表蜂鸣档点测：PA9 (LQFP 55) ↔ J1.3 通；PB23 ↔ J1.3 不通 | 万用表 | [ ] |
+| 焊接清单仅剩 2 项 | 整车装配后，飞线统计：PA0(BUZZER) + PA1(LASER_EN) 共 2 路，无其他业务信号需焊接 | 装配检查表 | [ ] |
+
+---
+
+## 12. 首次实测踩坑与修复（2026-05-08）
+
+> 本节记录 Stage 1.6 固件首次烧录实测中暴露的两个 bug，及其修复过程与根因分析。
+> 属于"测试驱动发现"的经验资产，**比代码改动本身更有长期参考价值**。
+
+### 12.1 Bug A：UART RX 中断到达 FIFO 但 ISR 永不触发 → `[FATAL] ms901m boot timeout`
+
+**现象**：构建通过、下载成功、XDS-UART 打印 banner，随即出现：
+
+```
+[boot] MSPM0G3507 stage1.6 telemetry start (MS901M / no BT)
+[FATAL] ms901m boot timeout rc=-1
+```
+
+**根因**：MSPM0G3507 SDK 2.10 的 `SYSCFG_DL_UART_IMU_init()`（SysConfig 自动生成）仅调用 `DL_UART_Main_enableInterrupt()` 设置**外设级 IMSC 寄存器**（让 UART3 模块在 RX FIFO 半满时声明中断线电平），但**不调用 `NVIC_EnableIRQ()`**（让 Cortex-M0+ 内核 NVIC 监听这条 IRQ 线）。
+
+两者缺一不可：
+
+| 层次 | 寄存器 | 作用 | 谁来设置 |
+|------|--------|------|---------|
+| UART 外设级 | IMSC | 触发条件 → IRQ 线 | SysConfig 生成的 `SYSCFG_DL_UART_IMU_init` |
+| ARM 内核级 | NVIC ISER | IRQ 线 → CPU 调度 ISR | **用户代码必须显式调用** |
+
+原 `bsp_imu_uart_init()` 注释写"SDK 在 SYSCFG_DL_UART_IMU_init 里已经使能 RX 中断 + NVIC，无需再开"——这条假设**错误**。结果是 MS901M 数据帧完整送达 UART3 FIFO，FIFO 半满标志置位，但 `UART3_IRQHandler` 永远得不到 CPU 调度 → 环缓 `s_rx_head` 不前进 → `ms901m_has_attitude()` 永远 false → 500 ms 超时触发 fatal。
+
+**修复**：`bsp_imu_uart_init()` 加一行：
+
+```c
+NVIC_EnableIRQ(UART_IMU_INST_INT_IRQN);   /* 当前展开为 UART3_INT_IRQn */
+```
+
+`UART_IMU_INST_INT_IRQN` 是 SysConfig 生成的宏，外设号变更时自动跟随。参考对照：`bsp_k230_uart.c:bsp_k230_uart_init()` 早就正确调用了 `NVIC_EnableIRQ(DMA_INT_IRQn)`。
+
+**经验规则（后续所有 BSP 驱动必须遵守）**：
+> SDK 2.10 SysConfig 生成的外设初始化函数**只设置外设级中断 mask，不开 NVIC**。
+> 凡需要 ISR 的外设（UART RX、DMA 完成、定时器 OVF 等），BSP init 函数里**必须**显式调用 `NVIC_EnableIRQ(<INST>_INT_IRQN)`。
+
+---
+
+### 12.2 Bug B：printf 浮点格式化栈溢出 → 进入主循环后无后续输出
+
+**现象**：修复 Bug A 后重新烧录，出现：
+
+```
+[boot] MSPM0G3507 stage1.6 telemetry start (MS901M / no BT)
+[boot] MS901M attitude online, 4 good / 0 bad frames
+（此后永久无输出；绿灯不翻转）
+```
+
+MS901M 已经在线（4 good 帧），主循环却像死了一样——绿灯 5 Hz 翻转没出现，1 Hz `[hb]` 心跳也没出现。
+
+**根因**：双因素叠加：
+
+| 因素 | 数值 | 危险点 |
+|------|------|--------|
+| 启动文件栈大小 | `Stack_Size EQU 0x100`（**256 B**）| Cortex-M0+ 默认值，极保守 |
+| 1 Hz 心跳一次 printf 4 个 `%.2f / %.1f` | 每个浮点格式化栈帧 ~200 B | 共计 > 800 B，4 倍于栈上限 |
+
+启动期 banner 只用 `%lu` 整数格式化（栈帧 < 50 B），正常输出。进入主循环后，`tick_count == 1000` 的瞬间调用含 4 个 `%f` 的 printf → 栈从顶向下写穿 → 踩到 NVIC 向量表以下的内存 → HardFault → CPU 跳进默认死循环 → 主循环永不返回。
+
+绿灯翻转发生在 `tick_count == 200`（5 Hz 分支），而 printf 崩溃在 `tick_count == 1000`（1 Hz 分支）——实测中绿灯**出现过 5 次翻转**，正好证明主循环在 0~999 ms 内活着，第 1000 ms 崩。（用户报告"无后续报文"时绿灯状态未记录，后续遇到类似现象可检查 LED 辅助定位崩溃点。）
+
+**修复**：
+
+1. **栈扩到 1 KB**：`startup_mspm0g350x_uvision.s` 改 `Stack_Size EQU 0x00000400`，覆盖未来 snprintf / 浮点数学等潜在栈高峰。
+2. **printf 改整数化**：引入 `F2_X100 / F2_S / F2_I / F2_F` 四个宏，把 float 先 ×100 四舍五入为 `int32_t`，再用 `%c%ld.%02lu` 整数格式化输出。不再链接浮点格式化路径，栈占用从 > 800 B 降至 < 80 B，附带节省 ~3 KB ROM。
+
+宏实现关键点：先把 `v` 整体 ×100 四舍五入到一个 `int32_t`，再统一拆整数/小数。这样 `99.995 → 10000 → " 100.00"` 不会出现独立计算时的 `" 99.100"` 跨整数边界错误。
+
+**经验规则（后续所有 printf 调用必须遵守）**：
+> Keil AC6 标准库 `printf("%f")` 单次栈帧 200~300 B，Cortex-M0+ 栈空间一般只有几百 B。
+> **嵌入式项目中应完全禁用 `%f / %e / %g`**，改用 `×100` 整数化宏或 `snprintf` 分段截断。
+> 若必须用浮点格式化，链接选项加 `--float` 并把栈至少开到 2 KB。
+
+---
+
+## 13. 修订历史
 
 | 日期 | 版本 | 修订内容 | 作者 |
 |------|------|---------|------|
 | 2026-05-07 | v0.1 | 初版：MPU6050 → MS901M 元件替换全程落档；含决策摘要、元件对比、引脚迁移、SysConfig 改动、解析器移植差异、VOFA 通道重映射、ATK 上位机一次性配置、验收清单、风险与回退路径 | 主控团队 |
+| 2026-05-08 | v0.2 | **追加 §11 Stage 1.6 引脚集中化重排**：① IMU UART 由 UART2/PA21/PA22 迁到 UART3/PB12/PB13；② 蓝牙 HC-04 整体下线；③ PWMB 通过 J14 切换；④ VOFA+ 暂停改走 1 Hz printf；⑤ 焊接清单收敛到 PA0+PA1 | 主控团队 |
+| 2026-05-08 | v0.3 | **追加 §12 首次实测踩坑复盘**：Bug A（UART NVIC 未开→IMU fatal）+ Bug B（printf %f 栈溢出→主循环无输出）；修复：`bsp_imu_uart_init` 加 `NVIC_EnableIRQ`、栈 256 B→1 KB、printf 改整数化宏 `F2_X100/F2_S/F2_I/F2_F`；提炼两条项目级经验规则 | 主控团队 |

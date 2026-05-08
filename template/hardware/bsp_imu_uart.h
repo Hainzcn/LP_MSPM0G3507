@@ -1,8 +1,12 @@
 /**
  * @file    bsp_imu_uart.h
- * @brief   ATK-MS901M 姿态传感器串口 UART2 (PA21 TX / PA22 RX, 115200 8N1)。
+ * @brief   ATK-MS901M 姿态传感器串口 UART3 (PB12 TX / PB13 RX, 115200 8N1)。
  *
  * Stage 1.5 替代原 I²C MPU6050 链路（详见 docs/TaskLog/Stage1.5-IMU-Swap-MS901M.md）。
+ * Stage 1.6 引脚集中化重排：从原 UART2/PA21/PA22 迁到 UART3/PB12/PB13，
+ *   原因是 PA21（LQFP pin 17）未引到 BoosterPack，需要焊接才能接出；
+ *   PB12 = J4.32 / PB13 = J2.26 都是开放排针，无需焊接。代价是蓝牙模块
+ *   （原占 UART3）整体下线，详见 Stage 1.5 文档 §11。
  *
  * - RX：开 RX FIFO 半满 + 超时中断，ISR 内逐字节排入 256 B 环形缓冲，
  *       上层 `pop_bulk` 一次拉走全部待解析字节给 ms901m 状态机。
@@ -11,9 +15,6 @@
  *
  * 容量估算：MS901M 出厂上报 5 帧 / 200 Hz、单帧最大 ~15 B、≈ 15 kB/s；
  * 1 kHz 主循环每拍 drain ≈ 15 B，远低于 256 B 环缓 → 无溢出风险。
- *
- * 与 bsp_bt_uart 结构镜像（同样 SysConfig 实例 + 单 RX 中断 + 环形缓冲），
- * 二者代码改动相互独立——这里只动 UART2，不影响蓝牙链路。
  */
 
 #ifndef BSP_IMU_UART_H
@@ -28,13 +29,13 @@ extern "C" {
 #endif
 
 /**
- * @brief  初始化 IMU UART2 接收。SysConfig 已配好引脚 / FIFO / 波特率 / 中断，
+ * @brief  初始化 IMU UART3 接收。SysConfig 已配好引脚 / FIFO / 波特率 / 中断，
  *         本函数仅清挂起标志并复位环缓游标。
  */
 void bsp_imu_uart_init(void);
 
 /**
- * @brief  阻塞写一段缓冲到 IMU UART2（仅供发 MS901M 配置命令使用）。
+ * @brief  阻塞写一段缓冲到 IMU UART3（仅供发 MS901M 配置命令使用）。
  */
 void bsp_imu_uart_write(const uint8_t *data, size_t len);
 
