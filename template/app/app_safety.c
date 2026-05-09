@@ -26,6 +26,7 @@
 #include "bsp_motor.h"
 
 #include <stddef.h>
+#include <stdio.h>
 
 /* -------------------------------------------------------------------------- */
 /* 内部                                                                        */
@@ -118,16 +119,22 @@ app_safety_state_t app_safety_tick(const app_safety_attitude_t *att)
 {
     /* ---- 1) 处理 S1 重启请求（边沿事件，自动消费） ---- */
     if (bsp_motor_consume_toggle_request()) {
+        (void)printf("[btn] S1 pressed: safety state=%d\n", (int)s_state);
         if (s_state == APP_SAFETY_DISARMED ||
             s_state == APP_SAFETY_FALLEN ||
             s_state == APP_SAFETY_LOW_BAT_WARN) {
-            (void)app_safety_arm();   /* 失败则被电池态卡住；本调用不返回 */
+            bool ok = app_safety_arm();   /* 失败则被电池态卡住；本调用不返回 */
+            (void)printf("[safety] S1 arm request %s, state=%d\n",
+                ok ? "accepted" : "rejected", (int)s_state);
         } else if (s_state == APP_SAFETY_ARMED) {
             /* 用户在 ARMED 时再按 S1 → 主动 disarm（人工急停） */
             transition(APP_SAFETY_DISARMED);
+            (void)printf("[safety] S1 disarm request accepted, state=%d\n",
+                (int)s_state);
         } else if (s_state == APP_SAFETY_LOW_BAT_STOP) {
             /* 拒绝；状态保持 */
             (void)app_safety_arm();
+            (void)printf("[safety] S1 arm request rejected by LOW_BAT_STOP\n");
         }
     }
 

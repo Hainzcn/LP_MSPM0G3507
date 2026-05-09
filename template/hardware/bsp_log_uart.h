@@ -11,6 +11,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -23,6 +24,12 @@ void bsp_log_uart_init(void);
  *         printf 通过 retarget 的 fputc 间接走这条路径。
  */
 void bsp_log_uart_write(const uint8_t *data, size_t len);
+
+/**
+ * @brief 非阻塞读取 XDS-UART RX 单字节。
+ * @return true = 读到 1 字节；false = RX FIFO 为空。
+ */
+bool bsp_log_uart_read_byte(uint8_t *out);
 
 #ifdef __cplusplus
 }

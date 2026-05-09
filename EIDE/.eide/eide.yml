@@ -35,10 +35,6 @@ targets:
         - ../template/keil/RTE/_LP_MSPM0G3507
       libList: []
     excludeList:
-      # Stage 2.2 上车基线：排除与 app_balance_run() 互斥的旧主循环模块
-      #   - app_motor_demo: Stage 2.0/2.1 演示固件，与 balance 共用 S1 toggle / set_output
-      #   - app_telemetry : Stage 1.6 IMU 遥测，自带 for(;;) 主循环（已被 app_balance_run 吸收）
-      # 排除路径 = <虚拟分组>/<文件名>，分组名 = srcDirs 扫描的目录最后一级
       - <virtual_root>/app/app_motor_demo.c
       - <virtual_root>/app/app_telemetry.c
     settings:

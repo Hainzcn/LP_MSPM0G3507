@@ -292,7 +292,7 @@ void app_balance_run(void)
             (void)printf("[hb] t=%lus state=%s pitch=%c%ld.%02lu tilt*=%c%ld.%02lu "
                          "pwm=%c%ld.%02lu L=%ld R=%ld v=%ldcps "
                          "batt=%lumV ms901m_g=%lu/b=%lu k230_rx=%lub/s "
-                         "encL=%ld encR=%ld encISR=%lu/s%s\n",
+                         "encL=%ld encR=%ld encISR=%lu/s btn=%lu/%lu%s\n",
                 (unsigned long)(tick_count / 1000u),
                 safety_state_to_str(app_safety_get_state()),
                 BAL_F2_S(diag.pitch_meas_deg), (long)BAL_F2_I(diag.pitch_meas_deg), (unsigned long)BAL_F2_F(diag.pitch_meas_deg),
@@ -306,6 +306,8 @@ void app_balance_run(void)
                 (unsigned long)delta_rx,
                 (long)left_cnt, (long)right_cnt,
                 (unsigned long)delta_enc_irq,
+                (unsigned long)bsp_motor_get_button_irq_count(),
+                (unsigned long)bsp_motor_get_button_poll_count(),
                 encQuenched ? " [ISR_QUENCH!]" : "");
         }
     }

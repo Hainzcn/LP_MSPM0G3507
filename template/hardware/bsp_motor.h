@@ -11,7 +11,7 @@
  *      Stage 2.3 起从 J12 迁来；2-Pin Mode = X4 解码），16-bit 计数器
  *      （LOAD = 65535）由 `bsp_motor_update()` 软件扩为 32-bit
  *   ─ 右轮编码器：PA12 双边沿中断 + PA13 ISR 内电平判方向（X2 解码）
- *   ─ 板载按键 S1：PA18，下降沿中断 + 80 ms 软件去抖
+ *   ─ 板载按键 S1：PA18，双沿中断 + 上电空闲电平判定 + 80 ms 软件去抖
  *
  * 接口约定：
  *   ─ 速度命令使用 permille（千分比），范围 [-1000, 1000]，
@@ -275,6 +275,18 @@ uint32_t bsp_motor_get_enc_irq_count(void);
 /** @return ISR 雪崩兜底当前是否激活（剩余抑制毫秒数 > 0 即为 true）。 */
 bool bsp_motor_enc_irq_is_quenched(void);
 
+/** 读取 S1(PA18) 中断命中次数，用于诊断 J8 / GROUP1 / polarity 配置。 */
+uint32_t bsp_motor_get_button_irq_count(void);
+
+/** 读取 S1(PA18) 轮询兜底命中次数；非 0 说明按键可读但中断路径未命中。 */
+uint32_t bsp_motor_get_button_poll_count(void);
+
+/** 按上电空闲电平判定 S1 当前是否处于按下态。 */
+bool bsp_motor_is_start_button_active(void);
+
+/** 直接读取 S1(PA18) 原始电平：true = 高，false = 低。 */
+bool bsp_motor_get_start_button_raw_level(void);
+
 /**
  * @brief 同时清零左右轮累计计数与速度差分窗口。常用于上电校准、调试归零、
  *        或上一次跑车结束后准备下一次试跑。不影响命令与 STBY 状态。
@@ -286,9 +298,9 @@ void bsp_motor_reset_encoders(void);
 /* ========================================================================== */
 
 /**
- * @brief 取出 S1(PA18) 按键中断置位的 toggle 请求。读后自动清零。
- *        典型用法：业务层把它当作 "正反转切换 / 模式切换" 的边沿事件源。
- *        80 ms 软件去抖在 ISR 内已做。
+ * @brief 取出 S1(PA18) 按键置位的 toggle 请求。读后自动清零。
+ *        典型用法：业务层把它当作 "急刹 / 启动 / 模式切换" 的边沿事件源。
+ *        中断与轮询兜底都会按上电空闲电平判定按下态，并做 80 ms 软件去抖。
  *
  * @return true  = 上一次调用以来 S1 至少按下过一次
  *         false = 没有新事件

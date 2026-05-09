@@ -53,6 +53,7 @@
 #include "ms901m.h"
 
 #include "app_balance.h"
+#include "app_motor_demo.h"
 #include "app_safety.h"
 
 #include <stdint.h>
@@ -68,6 +69,14 @@
 
 /* 等待期间每拍 drain 字节数上限（≥ 单帧最大 17 B + 几帧裕度即可） */
 #define MS901M_DRAIN_CHUNK       64u
+
+/* 装车模式临时测试 PID：只用于离地 / 支架调试，正式整定前应改为串口注入。 */
+#define LOAD_TEST_BALANCE_KP     (30.0f)
+#define LOAD_TEST_BALANCE_KI     (0.0f)
+#define LOAD_TEST_BALANCE_KD     (4.0f)
+#define LOAD_TEST_SPEED_KP       (0.0f)
+#define LOAD_TEST_SPEED_KI       (0.0f)
+#define LOAD_TEST_SPEED_KD       (0.0f)
 
 static void fatal_imu_init_failure(int32_t rc)
 {
@@ -134,20 +143,38 @@ int main(void)
         (unsigned long)ms901m_good_frames(),
         (unsigned long)ms901m_bad_frames());
 
-    /* Stage 2.2：电机 / 电池 / 安全 / 平衡四件套依次 init。顺序敏感：
+    /* Stage 2.2：电机 / 电池初始化后先进入电机 demo。安全 / 平衡在装车
+     * 请求后再初始化，避免 demo 输出被 safety 的 DISARMED 状态覆盖。
+     *
      *   bsp_motor_init  必须在 bsp_gpio_init 之后（依赖 BSP_ENC_R_*_PIN 配置）
      *   bsp_battery_init 必须在 SYSCFG_DL_init 之后（依赖 ADC_BAT_INST 已配）
      *   app_safety_init 必须在 bsp_motor_init 之后（构造期会调 brake/enable）
      *   app_balance_init 任意位置都可以（纯 PID 数据结构初始化）。 */
     bsp_motor_init();
     bsp_battery_init();
-    app_safety_init();
-    app_balance_init();
 
     /* 启动正常：红灯灭、绿灯由心跳任务接管，蓝灯留给后续状态指示。
      * 注意：app_safety 状态显示也会写 LED_R（FALLEN / BAT_STOP 常亮、BAT_WARN 闪），
      *       这里清一下当作 "Boot OK" 视觉反馈，进入 run() 后由 5 Hz 任务接管。 */
     DL_GPIO_clearPins(BSP_LED_R_PORT, BSP_LED_R_PIN);
+
+    if (!app_motor_demo_run()) {
+        for (;;) { __WFI(); }
+    }
+
+    (void)printf("[boot] switching to load balance mode with test PID "
+                 "Kp=%ld Ki=%ld Kd=%ld (x100)\n",
+        (long)(LOAD_TEST_BALANCE_KP * 100.0f),
+        (long)(LOAD_TEST_BALANCE_KI * 100.0f),
+        (long)(LOAD_TEST_BALANCE_KD * 100.0f));
+
+    app_safety_init();
+    app_balance_init();
+    app_balance_set_balance_gains(LOAD_TEST_BALANCE_KP,
+        LOAD_TEST_BALANCE_KI, LOAD_TEST_BALANCE_KD);
+    app_balance_set_speed_gains(LOAD_TEST_SPEED_KP,
+        LOAD_TEST_SPEED_KI, LOAD_TEST_SPEED_KD);
+    (void)app_safety_arm();
 
     app_balance_run();
     return 0;

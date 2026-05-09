@@ -40,6 +40,18 @@ void bsp_log_uart_write(const uint8_t *data, size_t len)
     }
 }
 
+bool bsp_log_uart_read_byte(uint8_t *out)
+{
+    if (out == NULL) {
+        return false;
+    }
+    if (DL_UART_Main_isRXFIFOEmpty(UART_LOG_INST)) {
+        return false;
+    }
+    *out = DL_UART_Main_receiveData(UART_LOG_INST);
+    return true;
+}
+
 /* ---------------------------------------------------------------------------
  *  C 库 retarget —— 仅 AC6 (armclang) 需要这堆 stub
  *

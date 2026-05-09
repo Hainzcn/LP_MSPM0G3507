@@ -40,6 +40,8 @@ typedef struct {
     volatile int32_t  right_count;      /* 由 PA12 (X2 时) 或 PA12+PA13 (X4 时) ISR 维护 */
     volatile uint8_t  toggle_request;   /* S1 按键置位、消费时清零 */
     volatile uint32_t last_button_ms;   /* 用于 80 ms 去抖 */
+    volatile uint32_t button_irq_count;  /* S1 中断命中次数 */
+    volatile uint32_t button_poll_count; /* S1 轮询兜底命中次数 */
     volatile uint32_t enc_irq_count;    /* 右编码器 ISR 总进入次数（雪崩诊断） */
     volatile uint32_t enc_irq_window;   /* 1 ms 窗口内 ISR 进入次数 */
     volatile uint8_t  enc_irq_quench_remain_ms;  /* 雪崩兜底：剩余抑制毫秒数 */
@@ -63,6 +65,8 @@ typedef struct {
     uint16_t pwm_limit_pm;
     bool     invert_left;
     bool     invert_right;
+    bool     button_idle_high;
+    bool     button_was_pressed;
     bool     enabled;
 } motor_state_t;
 
@@ -242,19 +246,48 @@ static void on_right_encoder_edge(bool is_phase_a_edge)
     if (!is_phase_a_edge) {
         step = -step;
     }
-    /* 极性可被 invert_right 二次翻转，但 ISR 里不算极性 —— 极性是命令侧的事，
-     * 反馈侧保持原始物理符号，调用方按需自行处理。 */
+    /* 右轮编码器安装方向与左轮相反：正转命令下物理边沿给出负计数。
+     * 这里翻转反馈符号，让左右轮在同向命令下 cps / count 同号，便于速度环共用。 */
+    step = -step;
     s_motor.right_count += step;
 }
 
 static void on_start_button_edge(void)
 {
+    uint32_t pins = DL_GPIO_readPins(BSP_START_BTN_PORT, BSP_START_BTN_PIN);
+    bool level_high = ((pins & BSP_START_BTN_PIN) != 0u);
+    bool pressed = (level_high != s_motor.button_idle_high);
     uint32_t now_ms = bsp_systick_get_ms();
-    if ((now_ms - s_motor.last_button_ms) < BSP_MOTOR_BTN_DEBOUNCE_MS) {
+
+    if (!pressed) {
+        s_motor.button_was_pressed = false;
+        return;
+    }
+    if (s_motor.button_was_pressed ||
+        ((now_ms - s_motor.last_button_ms) < BSP_MOTOR_BTN_DEBOUNCE_MS)) {
+        s_motor.button_was_pressed = pressed;
         return;
     }
     s_motor.last_button_ms = now_ms;
+    s_motor.button_irq_count++;
+    s_motor.button_was_pressed = true;
     s_motor.toggle_request = 1u;
+}
+
+static void poll_start_button(void)
+{
+    uint32_t pins = DL_GPIO_readPins(BSP_START_BTN_PORT, BSP_START_BTN_PIN);
+    bool level_high = ((pins & BSP_START_BTN_PIN) != 0u);
+    bool pressed = (level_high != s_motor.button_idle_high);
+    uint32_t now_ms = bsp_systick_get_ms();
+
+    if (pressed && !s_motor.button_was_pressed &&
+        ((now_ms - s_motor.last_button_ms) >= BSP_MOTOR_BTN_DEBOUNCE_MS)) {
+        s_motor.last_button_ms = now_ms;
+        s_motor.button_poll_count++;
+        s_motor.toggle_request = 1u;
+    }
+    s_motor.button_was_pressed = pressed;
 }
 
 /* ========================================================================== */
@@ -286,6 +319,8 @@ void bsp_motor_init(void)
     s_motor.right_count            = 0;
     s_motor.toggle_request         = 0u;
     s_motor.last_button_ms         = 0u;
+    s_motor.button_irq_count       = 0u;
+    s_motor.button_poll_count      = 0u;
 
     s_motor.left_raw_prev          = (uint16_t)DL_TimerG_getTimerCount(QEI_LEFT_INST);
 
@@ -306,6 +341,10 @@ void bsp_motor_init(void)
     s_motor.pwm_limit_pm           = BSP_MOTOR_PWM_MAX_PERMILLE;
     s_motor.invert_left            = false;
     s_motor.invert_right           = false;
+    s_motor.button_idle_high       =
+        ((DL_GPIO_readPins(BSP_START_BTN_PORT, BSP_START_BTN_PIN) &
+            BSP_START_BTN_PIN) != 0u);
+    s_motor.button_was_pressed     = false;
     s_motor.enabled                = false;
 
     /* --- 2) 安全态：方向位清零 + PWM 占空 0 + STBY 拉低 -------------------- */
@@ -332,8 +371,9 @@ void bsp_motor_init(void)
         DL_GPIO_PIN_12_EDGE_RISE | DL_GPIO_PIN_12_EDGE_FALL);
     uint32_t enc_pins = BSP_ENC_R_A_PIN;
 #endif
+    /* S1 板级实际极性可能受 BSL/J8 走线影响，使用双沿 + 上电空闲电平判定。 */
     DL_GPIO_setUpperPinsPolarity(GPIOA,
-        DL_GPIO_PIN_18_EDGE_FALL);
+        DL_GPIO_PIN_18_EDGE_RISE | DL_GPIO_PIN_18_EDGE_FALL);
     DL_GPIO_clearInterruptStatus(GPIOA, enc_pins | BSP_START_BTN_PIN);
     DL_GPIO_enableInterrupt    (GPIOA, enc_pins | BSP_START_BTN_PIN);
 
@@ -630,6 +670,41 @@ bool bsp_motor_enc_irq_is_quenched(void)
     return (s_motor.enc_irq_quench_remain_ms != 0u);
 }
 
+uint32_t bsp_motor_get_button_irq_count(void)
+{
+    uint32_t v;
+    MOTOR_LOCK();
+    v = s_motor.button_irq_count;
+    MOTOR_UNLOCK();
+    return v;
+}
+
+uint32_t bsp_motor_get_button_poll_count(void)
+{
+    uint32_t v;
+    MOTOR_LOCK();
+    v = s_motor.button_poll_count;
+    MOTOR_UNLOCK();
+    return v;
+}
+
+bool bsp_motor_is_start_button_active(void)
+{
+    bool pressed;
+    MOTOR_LOCK();
+    uint32_t pins = DL_GPIO_readPins(BSP_START_BTN_PORT, BSP_START_BTN_PIN);
+    bool level_high = ((pins & BSP_START_BTN_PIN) != 0u);
+    pressed = (level_high != s_motor.button_idle_high);
+    MOTOR_UNLOCK();
+    return pressed;
+}
+
+bool bsp_motor_get_start_button_raw_level(void)
+{
+    return ((DL_GPIO_readPins(BSP_START_BTN_PORT, BSP_START_BTN_PIN) &
+        BSP_START_BTN_PIN) != 0u);
+}
+
 void bsp_motor_reset_encoders(void)
 {
     MOTOR_LOCK();
@@ -653,6 +728,9 @@ bool bsp_motor_consume_toggle_request(void)
 {
     bool pending;
     MOTOR_LOCK();
+    if (s_motor.toggle_request == 0u) {
+        poll_start_button();
+    }
     pending = (s_motor.toggle_request != 0u);
     s_motor.toggle_request = 0u;
     MOTOR_UNLOCK();
@@ -687,34 +765,32 @@ bool bsp_motor_consume_toggle_request(void)
 /*   `getPendingInterrupt` 分支（按 SDK gpio_simultaneous_interrupts 例程       */
 /*   "GPIOA 段 + GPIOB 段并列" 写法）。                                         */
 /*                                                                              */
-/*   ISR 单次化：每次进入只消费一次 IIDX。Cortex-M0+ 在 ISR 退出后 NVIC 会自动 */
-/*   重新评估 pending、立刻再次进入 ISR；不会丢边沿（IIDX 是 read-and-clear     */
-/*   排队寄存器），且每个边沿之间给主循环让出 ~12 cycles，避免循环消费 IIDX 的 */
-/*   雪崩死锁（早期 do-while 循环踩过的坑）。                                  */
-/*                                                                              */
-/*   `DL_GPIO_getPendingInterrupt(GPIOA)` 自动清返回事件的 RIS 位，无需再调    */
-/*   `DL_GPIO_clearInterruptStatus(...)`（SDK dl_gpio.h 内联实现可见）。       */
+/*   分发策略：按 TI `gpio_simultaneous_interrupts` 示例读取 MIS 位图，分别   */
+/*   处理 PA12 / PA13 / PA18 后逐 pin clear。这样 S1 与编码器同一拍 pending 时 */
+/*   不会被 IIDX 最高优先级选择吞掉，也方便后续扩展多 GPIO 源。                */
 /* ========================================================================== */
 
 void GROUP1_IRQHandler(void)
 {
-    /* GPIOA pending 事件分发（GPIOB 暂无沿中断，未来增加时在下方追加分支） */
-    DL_GPIO_IIDX pending_a = DL_GPIO_getPendingInterrupt(GPIOA);
-
-    switch ((uint32_t)pending_a) {
-    case (uint32_t)DL_GPIO_IIDX_DIO12:
-        on_right_encoder_edge(true);   /* PA12 (A 相) */
-        break;
+    uint32_t gpioa = DL_GPIO_getEnabledInterruptStatus(GPIOA,
+        BSP_ENC_R_A_PIN
 #if (BSP_MOTOR_RIGHT_DECODE_X == 4)
-    case (uint32_t)DL_GPIO_IIDX_DIO13:
-        on_right_encoder_edge(false);  /* PA13 (B 相) */
-        break;
+        | BSP_ENC_R_B_PIN
 #endif
-    case (uint32_t)DL_GPIO_IIDX_DIO18:
+        | BSP_START_BTN_PIN);
+
+    if ((gpioa & BSP_ENC_R_A_PIN) != 0u) {
+        on_right_encoder_edge(true);   /* PA12 (A 相) */
+        DL_GPIO_clearInterruptStatus(GPIOA, BSP_ENC_R_A_PIN);
+    }
+#if (BSP_MOTOR_RIGHT_DECODE_X == 4)
+    if ((gpioa & BSP_ENC_R_B_PIN) != 0u) {
+        on_right_encoder_edge(false);  /* PA13 (B 相) */
+        DL_GPIO_clearInterruptStatus(GPIOA, BSP_ENC_R_B_PIN);
+    }
+#endif
+    if ((gpioa & BSP_START_BTN_PIN) != 0u) {
         on_start_button_edge();
-        break;
-    default:
-        /* DL_GPIO_IIDX_NO_INTR 或未启用的引脚事件：无操作，IIDX 已被读清 */
-        break;
+        DL_GPIO_clearInterruptStatus(GPIOA, BSP_START_BTN_PIN);
     }
 }
