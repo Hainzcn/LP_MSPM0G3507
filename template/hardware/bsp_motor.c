@@ -37,9 +37,12 @@
 typedef struct {
     /* --- ISR 共享字段：访问必须 MOTOR_LOCK ----------------------------------- */
     volatile int32_t  left_count;       /* 由 update() 维护（QEI 软扩） */
-    volatile int32_t  right_count;      /* 由 PA12 ISR 维护 */
+    volatile int32_t  right_count;      /* 由 PA12 (X2 时) 或 PA12+PA13 (X4 时) ISR 维护 */
     volatile uint8_t  toggle_request;   /* S1 按键置位、消费时清零 */
     volatile uint32_t last_button_ms;   /* 用于 80 ms 去抖 */
+    volatile uint32_t enc_irq_count;    /* 右编码器 ISR 总进入次数（雪崩诊断） */
+    volatile uint32_t enc_irq_window;   /* 1 ms 窗口内 ISR 进入次数 */
+    volatile uint8_t  enc_irq_quench_remain_ms;  /* 雪崩兜底：剩余抑制毫秒数 */
 
     /* --- update() 私有：QEI 16-bit 上一拍原值 -------------------------------- */
     uint16_t left_raw_prev;
@@ -50,6 +53,9 @@ typedef struct {
     uint32_t speed_window_acc_ms;
     int32_t  left_speed_cps;
     int32_t  right_speed_cps;
+
+    /* --- 脉冲刹车定时（主循环私有，update() 内倒计时；0 = 无 pending） -------- */
+    uint32_t brake_pulse_remain_ms;
 
     /* --- 命令与配置 --------------------------------------------------------- */
     int16_t  left_cmd_pm;
@@ -211,19 +217,34 @@ static void commit_right(int16_t cmd_pm)
 /* ========================================================================== */
 
 /**
- * 右编码器 PA12 双沿中断触发。X2 解码：
- *   每次触发都计 1 步，方向由 PA13 与 PA12 当前电平异同判定。
- *   不开 PA13 中断（CPU 负担减半，分辨率 = 1320 / 2 = 660 cnt/rev）。
+ * 右编码器边沿中断触发：X2 时仅 PA12 双沿；X4 时 PA12 + PA13 都双沿。
+ *
+ * 标准正交解码状态机（X4）：
+ *   读出 (A, B) 当前电平，根据"哪个相刚刚跳变 + 跳变方向"得到 ±1 步。
+ *   实现等价表达式：A == B 则 +1 / != 则 -1（在"PA12 边沿事件"上等价于
+ *   X2 经典做法；在 X4 + PA13 边沿时也成立，但符号相反 —— 因为 PA13 跳变
+ *   时 A/B 异同关系正好是 PA12 跳变时的反相）。所以本函数把"哪根线触发"
+ *   作为参数，PA13 触发时步进取反。这样 X2 / X4 共用同一份解码代码。
+ *
+ *   X2 (默认 RIGHT_DECODE_X = 2)：only `is_phase_a_edge = true` 路径生效
+ *   X4 (RIGHT_DECODE_X = 4)：PA12 与 PA13 各自调用，分别 true / false
  */
-static void on_right_encoder_edge(void)
+static void on_right_encoder_edge(bool is_phase_a_edge)
 {
+    s_motor.enc_irq_count++;
+    s_motor.enc_irq_window++;
+
     uint32_t pins = DL_GPIO_readPins(GPIOA, BSP_ENC_R_A_PIN | BSP_ENC_R_B_PIN);
     bool phase_a = ((pins & BSP_ENC_R_A_PIN) != 0u);
     bool phase_b = ((pins & BSP_ENC_R_B_PIN) != 0u);
 
-    /* A == B → 计 +1，否则 -1（极性可被 invert_right 二次翻转，但在 ISR 里不算
-     * 极性 —— 极性是命令侧的事，反馈侧保持原始物理符号，调用方按需自行处理）。 */
-    s_motor.right_count += (phase_a != phase_b) ? 1 : -1;
+    int32_t step = (phase_a != phase_b) ? 1 : -1;
+    if (!is_phase_a_edge) {
+        step = -step;
+    }
+    /* 极性可被 invert_right 二次翻转，但 ISR 里不算极性 —— 极性是命令侧的事，
+     * 反馈侧保持原始物理符号，调用方按需自行处理。 */
+    s_motor.right_count += step;
 }
 
 static void on_start_button_edge(void)
@@ -242,6 +263,24 @@ static void on_start_button_edge(void)
 
 void bsp_motor_init(void)
 {
+    /* --- 0) 给左轮 QEI (PB15/PB16) 补内部上拉 + 施密特滞回 -------------------
+     *   SYSCFG_DL_GPIO_init() 已在 main 顶部把 PB15/PB16 mux 到 TIMG8_CCP0/1，
+     *   但 SDK 的 `DL_GPIO_initPeripheralInputFunction()` 不会配 pull/hyst，
+     *   PINCM32/33 默认 RESISTOR_NONE + HYSTERESIS_DISABLE → 编码器掉电或线
+     *   未接时 PB15/PB16 浮空 → AC 噪声让 QEI 计数器乱跳 / 不动；这里二次写
+     *   IOMUX 寄存器追加 PULL_UP + HYSTERESIS_ENABLE，与右轮 PA12/PA13（在
+     *   bsp_gpio.c 里已配过）保持一致的稳健度。
+     *   `DL_GPIO_initPeripheralInputFunctionFeatures` 与原 `*Function` 写同一
+     *   PINCM 槽，只是多带了 inversion/pull/hyst 字段。 */
+    DL_GPIO_initPeripheralInputFunctionFeatures(
+        GPIO_QEI_LEFT_PHA_IOMUX, GPIO_QEI_LEFT_PHA_IOMUX_FUNC,
+        DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_PULL_UP,
+        DL_GPIO_HYSTERESIS_ENABLE, DL_GPIO_WAKEUP_DISABLE);
+    DL_GPIO_initPeripheralInputFunctionFeatures(
+        GPIO_QEI_LEFT_PHB_IOMUX, GPIO_QEI_LEFT_PHB_IOMUX_FUNC,
+        DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_PULL_UP,
+        DL_GPIO_HYSTERESIS_ENABLE, DL_GPIO_WAKEUP_DISABLE);
+
     /* --- 1) 状态清零 ------------------------------------------------------- */
     s_motor.left_count             = 0;
     s_motor.right_count            = 0;
@@ -255,6 +294,12 @@ void bsp_motor_init(void)
     s_motor.speed_window_acc_ms    = 0u;
     s_motor.left_speed_cps         = 0;
     s_motor.right_speed_cps        = 0;
+
+    s_motor.brake_pulse_remain_ms  = 0u;
+
+    s_motor.enc_irq_count          = 0u;
+    s_motor.enc_irq_window         = 0u;
+    s_motor.enc_irq_quench_remain_ms = 0u;
 
     s_motor.left_cmd_pm            = 0;
     s_motor.right_cmd_pm           = 0;
@@ -270,16 +315,36 @@ void bsp_motor_init(void)
     set_pwm_duty(GPIO_PWM_MOTOR_C1_IDX, 0u);
     DL_GPIO_clearPins(BSP_STBY_PORT, BSP_STBY_PIN);
 
-    /* --- 3) PA12 双沿 + PA18 下降沿中断（PA13 不开中断，仅 ISR 内读电平） --
+    /* --- 3) PA12 双沿 (+ X4 时 PA13 双沿) + PA18 下降沿中断 --------------
      *   双沿：单独用 _EDGE_RISE 与 _EDGE_FALL 按位或；某些 SDK 版本没有
-     *   `_EDGE_RISE_FALL` 这个组合宏，按位或写法在所有 SDK 里都成立。 */
+     *   `_EDGE_RISE_FALL` 这个组合宏，按位或写法在所有 SDK 里都成立。
+     *
+     *   X4 模式（默认）：A、B 都开双沿，分辨率 1320 cnt/rev，与左轮一致；
+     *   X2 模式（编译期 -DBSP_MOTOR_RIGHT_DECODE_X=2）：只开 PA12 双沿，
+     *   分辨率 660 cnt/rev，CPU ISR 减半。 */
+#if (BSP_MOTOR_RIGHT_DECODE_X == 4)
+    DL_GPIO_setLowerPinsPolarity(GPIOA,
+        DL_GPIO_PIN_12_EDGE_RISE | DL_GPIO_PIN_12_EDGE_FALL |
+        DL_GPIO_PIN_13_EDGE_RISE | DL_GPIO_PIN_13_EDGE_FALL);
+    uint32_t enc_pins = BSP_ENC_R_A_PIN | BSP_ENC_R_B_PIN;
+#else
     DL_GPIO_setLowerPinsPolarity(GPIOA,
         DL_GPIO_PIN_12_EDGE_RISE | DL_GPIO_PIN_12_EDGE_FALL);
+    uint32_t enc_pins = BSP_ENC_R_A_PIN;
+#endif
     DL_GPIO_setUpperPinsPolarity(GPIOA,
         DL_GPIO_PIN_18_EDGE_FALL);
-    DL_GPIO_clearInterruptStatus(GPIOA, BSP_ENC_R_A_PIN | BSP_START_BTN_PIN);
-    DL_GPIO_enableInterrupt    (GPIOA, BSP_ENC_R_A_PIN | BSP_START_BTN_PIN);
+    DL_GPIO_clearInterruptStatus(GPIOA, enc_pins | BSP_START_BTN_PIN);
+    DL_GPIO_enableInterrupt    (GPIOA, enc_pins | BSP_START_BTN_PIN);
+
+    /* 把 GPIOA 中断设为最低优先级（MSPM0G3507 __NVIC_PRIO_BITS = 2 → 3 = 最低），
+     * 与 `bsp_systick.c` 把 SysTick 提到 0 = 最高 配套使用：
+     *   ─ 任何编码器噪声 / 按键弹跳引发的 GPIOA ISR 雪崩都不能阻断 SysTick；
+     *   ─ 主循环节拍、电池采样、心跳日志即使在 ISR 高频时也能正常推进。
+     * 副作用：编码器边沿与其他外设（UART/ADC）同时到达时，UART/ADC 优先服务，
+     *         编码器最多迟几微秒；对 1 kHz 控制环影响可忽略。 */
     NVIC_ClearPendingIRQ(GPIOA_INT_IRQn);
+    NVIC_SetPriority    (GPIOA_INT_IRQn, 3u);
     NVIC_EnableIRQ      (GPIOA_INT_IRQn);
 }
 
@@ -304,6 +369,7 @@ bool bsp_motor_is_enabled(void)
 
 void bsp_motor_set_output(int16_t left_permille, int16_t right_permille)
 {
+    s_motor.brake_pulse_remain_ms = 0u;   /* 任何新命令都取消未到期 pulse */
     s_motor.left_cmd_pm  = left_permille;
     s_motor.right_cmd_pm = right_permille;
     commit_left (left_permille);
@@ -312,18 +378,21 @@ void bsp_motor_set_output(int16_t left_permille, int16_t right_permille)
 
 void bsp_motor_set_left(int16_t left_permille)
 {
+    s_motor.brake_pulse_remain_ms = 0u;
     s_motor.left_cmd_pm = left_permille;
     commit_left(left_permille);
 }
 
 void bsp_motor_set_right(int16_t right_permille)
 {
+    s_motor.brake_pulse_remain_ms = 0u;
     s_motor.right_cmd_pm = right_permille;
     commit_right(right_permille);
 }
 
 void bsp_motor_stop(void)
 {
+    s_motor.brake_pulse_remain_ms = 0u;
     s_motor.left_cmd_pm  = 0;
     s_motor.right_cmd_pm = 0;
     set_dir_left (DIR_COAST);
@@ -334,12 +403,29 @@ void bsp_motor_stop(void)
 
 void bsp_motor_brake(void)
 {
+    s_motor.brake_pulse_remain_ms = 0u;   /* 持续模式，不会自动转 stop */
     s_motor.left_cmd_pm  = 0;
     s_motor.right_cmd_pm = 0;
     set_dir_left (DIR_BRAKE);
     set_dir_right(DIR_BRAKE);
     set_pwm_duty(GPIO_PWM_MOTOR_C0_IDX, BSP_MOTOR_PWM_MAX_PERMILLE);
     set_pwm_duty(GPIO_PWM_MOTOR_C1_IDX, BSP_MOTOR_PWM_MAX_PERMILLE);
+}
+
+void bsp_motor_brake_pulse_ms(uint32_t duration_ms)
+{
+    if (duration_ms == 0u) {
+        bsp_motor_stop();
+        return;
+    }
+    /* 与持续 brake 复用硬件命令，但置位计时器；update() 倒计时到 0 后自动转 stop */
+    s_motor.left_cmd_pm  = 0;
+    s_motor.right_cmd_pm = 0;
+    set_dir_left (DIR_BRAKE);
+    set_dir_right(DIR_BRAKE);
+    set_pwm_duty(GPIO_PWM_MOTOR_C0_IDX, BSP_MOTOR_PWM_MAX_PERMILLE);
+    set_pwm_duty(GPIO_PWM_MOTOR_C1_IDX, BSP_MOTOR_PWM_MAX_PERMILLE);
+    s_motor.brake_pulse_remain_ms = duration_ms;
 }
 
 /* ========================================================================== */
@@ -397,12 +483,59 @@ int16_t bsp_motor_get_right_cmd(void)
 
 void bsp_motor_update(void)
 {
+    /* --- 0) brake pulse 倒计时（先做，避免本拍命令到期后还多跑 1 ms 才转 stop） */
+    if (s_motor.brake_pulse_remain_ms != 0u) {
+        s_motor.brake_pulse_remain_ms--;
+        if (s_motor.brake_pulse_remain_ms == 0u) {
+            /* 到期：转 coast。直接调 stop 会清 brake_pulse 计数（已是 0，无影响） */
+            bsp_motor_stop();
+        }
+    }
+
+    /* --- 0.5) ISR 雪崩兜底：每毫秒检查窗口内 ISR 进入次数 -------------------
+     *   `BSP_MOTOR_ENC_IRQ_QUENCH_PER_MS`（默认 200）= 单毫秒边沿率上限。手动
+     *   转编码器极快也只会到几 kHz/ms，超过该阈值唯一可能是引脚浮空 + 噪声、
+     *   或编码器电源异常引发的中断雪崩；此时关闭 PA12/PA13 中断
+     *   `BSP_MOTOR_ENC_IRQ_QUENCH_DURATION_MS`（默认 50 ms），让 CPU 喘气。
+     *   到期后由 update() 重新打开（边沿丢失但不会饿死主循环）。 */
+    uint32_t window;
+    MOTOR_LOCK();
+    window = s_motor.enc_irq_window;
+    s_motor.enc_irq_window = 0u;
+    MOTOR_UNLOCK();
+
+    if (s_motor.enc_irq_quench_remain_ms != 0u) {
+        s_motor.enc_irq_quench_remain_ms--;
+        if (s_motor.enc_irq_quench_remain_ms == 0u) {
+            DL_GPIO_clearInterruptStatus(GPIOA,
+                BSP_ENC_R_A_PIN
+#if (BSP_MOTOR_RIGHT_DECODE_X == 4)
+                | BSP_ENC_R_B_PIN
+#endif
+            );
+            DL_GPIO_enableInterrupt(GPIOA,
+                BSP_ENC_R_A_PIN
+#if (BSP_MOTOR_RIGHT_DECODE_X == 4)
+                | BSP_ENC_R_B_PIN
+#endif
+            );
+        }
+    } else if (window > BSP_MOTOR_ENC_IRQ_QUENCH_PER_MS) {
+        DL_GPIO_disableInterrupt(GPIOA,
+            BSP_ENC_R_A_PIN
+#if (BSP_MOTOR_RIGHT_DECODE_X == 4)
+            | BSP_ENC_R_B_PIN
+#endif
+        );
+        s_motor.enc_irq_quench_remain_ms = BSP_MOTOR_ENC_IRQ_QUENCH_DURATION_MS;
+    }
+
     /* --- 1) 左轮 QEI 16-bit → 32-bit 软扩 --------------------------------- */
     uint16_t raw_now = (uint16_t)DL_TimerG_getTimerCount(QEI_LEFT_INST);
     int16_t  delta   = (int16_t)((uint16_t)(raw_now - s_motor.left_raw_prev));
     s_motor.left_raw_prev = raw_now;
     /* left_count 与 right_count 是 ISR 共享变量，但 update 只在主循环里跑、
-     * 而 PA12 ISR 只摸 right_count；左路写入这里其实无 race，无需关中断。
+     * 而 PA12/PA13 ISR 只摸 right_count；左路写入这里其实无 race，无需关中断。
      * 为了未来可能新增"在 ISR 里读 left_count"的场景，仍然短锁一下保平安。 */
     MOTOR_LOCK();
     s_motor.left_count += (int32_t)delta;
@@ -483,6 +616,20 @@ int32_t bsp_motor_get_right_count(void)
     return v;
 }
 
+uint32_t bsp_motor_get_enc_irq_count(void)
+{
+    uint32_t v;
+    MOTOR_LOCK();
+    v = s_motor.enc_irq_count;
+    MOTOR_UNLOCK();
+    return v;
+}
+
+bool bsp_motor_enc_irq_is_quenched(void)
+{
+    return (s_motor.enc_irq_quench_remain_ms != 0u);
+}
+
 void bsp_motor_reset_encoders(void)
 {
     MOTOR_LOCK();
@@ -513,22 +660,61 @@ bool bsp_motor_consume_toggle_request(void)
 }
 
 /* ========================================================================== */
-/* GPIOA 中断入口（PA12 = 右编码器 A 双沿；PA18 = S1 下降沿）                    */
+/* GROUP1 中断入口（GPIOA + GPIOB + TRNG + COMP0 共享）                          */
+/*                                                                              */
+/*   ⚠️ MSPM0G3507 NVIC 架构（极易踩坑）：                                       */
+/*      所有 GPIO 中断（GPIOA / GPIOB）+ TRNG + COMP0 共享 IRQn = 1 = "GROUP1",*/
+/*      vector table 入口名是 `GROUP1_IRQHandler`，**不是**                     */
+/*      `GPIOA_IRQHandler` / `GPIOB_IRQHandler`。                                */
+/*      `NVIC_EnableIRQ(GPIOA_INT_IRQn)` 实际是 `NVIC_EnableIRQ(1)` = 启用      */
+/*      GROUP1 整个组。                                                         */
+/*                                                                              */
+/*   历史踩坑（Stage 2.4 关键修复 / 2026-05-09）：                               */
+/*      本文件早期把 ISR 命名为 `void GPIOA_IRQHandler(void)`，编译链接都不报   */
+/*      错（这只是个普通的全局函数符号），但 vector 槽位 17 仍然指向 startup.s */
+/*      里 weak 默认 `GROUP1_IRQHandler`（`B .` 死循环）。                      */
+/*      症状：转动右轮时 PA12/PA13 沿事件触发 → NVIC 跳 GROUP1 → 死循环 →      */
+/*            MCU 整体卡死，串口 / SysTick / 业务全停（绿灯也不闪），即使把    */
+/*            SysTick 优先级提到最高、ENC 上拉 + 雪崩兜底全部启用都救不了。     */
+/*      正确名字 = `GROUP1_IRQHandler`，参考 SDK 例程                          */
+/*      `examples/nortos/LP_MSPM0G3507/driverlib/gpio_simultaneous_interrupts`. */
+/*                                                                              */
+/*   本工程 GROUP1 上启用的中断源（仅 GPIOA，GPIOB 暂未启用任何沿中断）：       */
+/*     PA12 = 右编码器 A 双沿（X2/X4 都开）                                     */
+/*     PA13 = 右编码器 B 双沿（仅 X4 开）                                       */
+/*     PA18 = S1 下降沿                                                         */
+/*   将来若新增 GPIOB 沿中断 / TRNG / COMP0 中断，需要在本函数内追加对应模块的 */
+/*   `getPendingInterrupt` 分支（按 SDK gpio_simultaneous_interrupts 例程       */
+/*   "GPIOA 段 + GPIOB 段并列" 写法）。                                         */
+/*                                                                              */
+/*   ISR 单次化：每次进入只消费一次 IIDX。Cortex-M0+ 在 ISR 退出后 NVIC 会自动 */
+/*   重新评估 pending、立刻再次进入 ISR；不会丢边沿（IIDX 是 read-and-clear     */
+/*   排队寄存器），且每个边沿之间给主循环让出 ~12 cycles，避免循环消费 IIDX 的 */
+/*   雪崩死锁（早期 do-while 循环踩过的坑）。                                  */
+/*                                                                              */
+/*   `DL_GPIO_getPendingInterrupt(GPIOA)` 自动清返回事件的 RIS 位，无需再调    */
+/*   `DL_GPIO_clearInterruptStatus(...)`（SDK dl_gpio.h 内联实现可见）。       */
 /* ========================================================================== */
 
-void GPIOA_IRQHandler(void)
+void GROUP1_IRQHandler(void)
 {
-    DL_GPIO_IIDX pending;
+    /* GPIOA pending 事件分发（GPIOB 暂无沿中断，未来增加时在下方追加分支） */
+    DL_GPIO_IIDX pending_a = DL_GPIO_getPendingInterrupt(GPIOA);
 
-    do {
-        pending = DL_GPIO_getPendingInterrupt(GPIOA);
-
-        if (pending == DL_GPIO_IIDX_DIO12) {
-            DL_GPIO_clearInterruptStatus(GPIOA, BSP_ENC_R_A_PIN);
-            on_right_encoder_edge();
-        } else if (pending == DL_GPIO_IIDX_DIO18) {
-            DL_GPIO_clearInterruptStatus(GPIOA, BSP_START_BTN_PIN);
-            on_start_button_edge();
-        }
-    } while (pending != DL_GPIO_IIDX_NO_INTR);
+    switch ((uint32_t)pending_a) {
+    case (uint32_t)DL_GPIO_IIDX_DIO12:
+        on_right_encoder_edge(true);   /* PA12 (A 相) */
+        break;
+#if (BSP_MOTOR_RIGHT_DECODE_X == 4)
+    case (uint32_t)DL_GPIO_IIDX_DIO13:
+        on_right_encoder_edge(false);  /* PA13 (B 相) */
+        break;
+#endif
+    case (uint32_t)DL_GPIO_IIDX_DIO18:
+        on_start_button_edge();
+        break;
+    default:
+        /* DL_GPIO_IIDX_NO_INTR 或未启用的引脚事件：无操作，IIDX 已被读清 */
+        break;
+    }
 }

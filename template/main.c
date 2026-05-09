@@ -1,7 +1,7 @@
 /**
  * @file    main.c
- * @brief   阶段 1 主入口：MSPM0G3507 自平衡瞄准小车
- *          —— 姿态遥测固件（Stage 1.5/1.6: MS901M 替代 MPU6050、蓝牙下线）。
+ * @brief   阶段 2.2 主入口：MSPM0G3507 自平衡瞄准小车 —— 上车基线固件
+ *          （姿态遥测 + 电机 + 编码器 + 电池 + 安全状态机 + 平衡 / 速度环骨架）。
  *
  *  调用链：
  *      SYSCFG_DL_init()      -- 由 SysConfig 自动生成，配置时钟 / peripheral pins
@@ -12,7 +12,11 @@
  *      bsp_imu_uart_init     -- UART3 (MS901M) RX 中断 + 256 B 环缓
  *      ms901m_init           -- 解析器状态机复位 + 量程系数（±4 g / ±2000 dps）
  *      wait_for_ms901m_*     -- 上电后 500 ms 内等到第一帧 0x01；超时报警
- *      app_telemetry_run     -- 永不返回的主循环
+ *      bsp_motor_init        -- TB6612 + QEI + S1 中断（X4 解码默认开 PA13 双沿）
+ *      bsp_battery_init      -- ADC0/PB24 触发首次软件转换
+ *      app_safety_init       -- 安全状态机置 DISARMED + 电机 brake + STBY 关
+ *      app_balance_init      -- 两路 PID 安全默认（增益 0 + 输出限幅 + D 滤波）
+ *      app_balance_run       -- 永不返回的主循环
  *
  *  失败处理：MS901M 上电后 500 ms 仍未收到 0x01 姿态帧 → LED_R 常亮 + 蜂鸣
  *            200 ms，然后死循环；不进入主循环以免上报无效数据。
@@ -29,17 +33,27 @@
  *  PB13（原蓝牙引脚），原因是 PA21 未引到 BoosterPack 需焊接；同期蓝牙
  *  HC-04 模块整体下线，遥测改走 1 Hz XDS-UART printf。详见
  *  docs/TaskLog/Stage1.5-IMU-Swap-MS901M.md §11 Stage 1.6 重排。
+ *
+ *  Stage 2.2 变更（2026-05-09）：上车基线固件就绪。原 `app_telemetry_run()`
+ *  入口被 `app_balance_run()` 取代，后者吸收了 telemetry 的 IMU drain + 1 Hz
+ *  心跳日志，同时新增 100 Hz 控制环（safety + balance step）+ LED 状态指示。
+ *  ⚠️ PID 增益默认 0，上电不会自己动；装车整定时通过串口注入即可。
+ *  详见 docs/TaskLog/Stage2-MotorDrive-Encoder.md §3.5 / §6.3。
  */
 
 #include "ti_msp_dl_config.h"
 
+#include "bsp_battery.h"
 #include "bsp_gpio.h"
-#include "bsp_systick.h"
-#include "bsp_log_uart.h"
-#include "bsp_k230_uart.h"
 #include "bsp_imu_uart.h"
+#include "bsp_k230_uart.h"
+#include "bsp_log_uart.h"
+#include "bsp_motor.h"
+#include "bsp_systick.h"
 #include "ms901m.h"
-#include "app_telemetry.h"
+
+#include "app_balance.h"
+#include "app_safety.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -109,7 +123,7 @@ int main(void)
     /* MS901M 出厂默认 ±4 g / ±2000 dps（与 ATK 上位机默认量程一致） */
     ms901m_init(4, 2000);
 
-    (void)printf("\n[boot] MSPM0G3507 stage1.6 telemetry start (MS901M / no BT)\n");
+    (void)printf("\n[boot] MSPM0G3507 stage2.2 balance baseline start (MS901M / TB6612 / safety)\n");
 
     int32_t rc = wait_for_ms901m_attitude(MS901M_BOOT_TIMEOUT_MS);
     if (rc != 0) {
@@ -120,9 +134,21 @@ int main(void)
         (unsigned long)ms901m_good_frames(),
         (unsigned long)ms901m_bad_frames());
 
-    /* 启动正常：红灯灭、绿灯由心跳任务接管，蓝灯留给后续状态指示 */
+    /* Stage 2.2：电机 / 电池 / 安全 / 平衡四件套依次 init。顺序敏感：
+     *   bsp_motor_init  必须在 bsp_gpio_init 之后（依赖 BSP_ENC_R_*_PIN 配置）
+     *   bsp_battery_init 必须在 SYSCFG_DL_init 之后（依赖 ADC_BAT_INST 已配）
+     *   app_safety_init 必须在 bsp_motor_init 之后（构造期会调 brake/enable）
+     *   app_balance_init 任意位置都可以（纯 PID 数据结构初始化）。 */
+    bsp_motor_init();
+    bsp_battery_init();
+    app_safety_init();
+    app_balance_init();
+
+    /* 启动正常：红灯灭、绿灯由心跳任务接管，蓝灯留给后续状态指示。
+     * 注意：app_safety 状态显示也会写 LED_R（FALLEN / BAT_STOP 常亮、BAT_WARN 闪），
+     *       这里清一下当作 "Boot OK" 视觉反馈，进入 run() 后由 5 Hz 任务接管。 */
     DL_GPIO_clearPins(BSP_LED_R_PORT, BSP_LED_R_PIN);
 
-    app_telemetry_run();
+    app_balance_run();
     return 0;
 }

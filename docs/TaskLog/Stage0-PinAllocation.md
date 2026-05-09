@@ -29,17 +29,16 @@
 | **IMU 接口** | **Stage 1.5 起改用 UART**；**Stage 1.6 起占用 UART3 (PB12 TX / PB13 RX, 115200 8N1, FIFO + RX 中断)** 主动上报姿态帧 | 占用 UART3 + PB12/PB13；释放 I2C1 + PB2/PB3/PB4 + UART2 + PA21/PA22。引脚集中化重排原因详见 [Stage1.5-IMU-Swap-MS901M.md §11](Stage1.5-IMU-Swap-MS901M.md) |
 | 蜂鸣器类型 | 有源（GPIO 高低电平直驱） | 不占 PWM 通道 |
 | 蓝牙串口 | **Stage 1.6 起整体下线** | 原占 UART3 (PB12/PB13)，引脚让给 IMU MS901M。无线遥测/可视化路径暂停（VOFA+ 二进制流），姿态数据改走 1 Hz XDS-UART (UART0) printf 文本日志；后续无线路径回归方案见 [Stage1.5-IMU-Swap-MS901M.md §11](Stage1.5-IMU-Swap-MS901M.md) |
-| 编码器 Z 相 | PB14 配为 TIMG8 IDX 输入（3 Pin Mode） | 编码器无 Z 相也不冲突，留作扩展 |
-| **左/右编码器解码方式** | **左 = 硬件 QEI（TIMG8）；右 = GPIO 双边沿中断（阶段 2 评估升级 CAPTURE）** | MSPM0G3507 仅 TIMG8 支持 SysConfig QEI 模块 |
+| 编码器 Z 相 | **不接（2 Pin Mode）**——GB370 编码器无 Z 相，PB14 进入预留池 | Stage 2.3 起取消 IDX；不影响 X4 解码精度 |
+| **左/右编码器解码方式** | **左 = 硬件 QEI（TIMG8 + PB15/PB16，2-Pin Mode，Stage 2.3 起从 J12 迁到 BP）；右 = GPIO 双边沿中断（Stage 2.2 起升 X4 解码，PA12/PA13 都开中断）** | MSPM0G3507 仅 TIMG8 支持 SysConfig QEI 模块 |
 | TB6612 控制方式 | 2 PWM + 4 方向 + 1 STBY | 共 7 根线 |
 | TB6612 PWM 频率 | 20 kHz（建议 15~25 kHz） | 避开人耳与 IMU 通带 |
 | K230 串口波特率 | 921600 8N1，TX/RX 双向 DMA | 占 UART1（PB6/PB7）+ 2 个 DMA 通道 |
 | XDS-UART0 | 保留为开发期日志 | J21/J22 保持 ON |
 
 > **架构变更说明**：原计划"双路硬件 QEI"经 SDK 源码核对（[QEIMSPM0.syscfg.js](file:///A:/Program%20Files/ti/mspm0_sdk_2_10_00_04/source/ti/driverlib/.meta/qei/QEIMSPM0.syscfg.js) 第 175 行 `TIMG(8|9|10|11)` 过滤器 + [Common.js](file:///A:/Program%20Files/ti/mspm0_sdk_2_10_00_04/source/ti/driverlib/.meta/Common.js) 第 1774 行 `getTimerInstances("QEI")`）确认 **MSPM0G3507 上只有 TIMG8 支持硬件 QEI**（TIMG9/10/11 该器件不存在）。因此：
-> - **左编码器**走硬件 QEI（TIMG8 + J12，3 Pin Mode），无丢脉冲。
-> - **右编码器**阶段 0 暂以 GPIO 双边沿中断方式接入 PA12/PA13，理论 X4 解码，但高速时 ISR 抖动可能丢脉冲。
-> - **阶段 2 决策点**：若实测发现右轮在最高速下丢脉冲超过 1 %，把右编码器升级为 CAPTURE 模式（占用 TIMA1/TIMG6/TIMG7 之一的 1 个捕获通道），并把 PA13 从纯 GPIO 升级为 CCP 输入。
+> - **左编码器**走硬件 QEI（TIMG8）。**Stage 2.3 起引脚由 J12 (PA29/PA30/PB14) 迁到 BoosterPack (PB15/PB16)，模式由 3-Pin 降为 2-Pin**（GB370 无 Z 相）；硬件 X4 精度 1320 cnt/rev 不变，无丢脉冲；数据手册 PINMUX 表证：`PB15 = TIMG8_C0 [func 5, PINCM32]`、`PB16 = TIMG8_C1 [func 5, PINCM33]`，二者均在 BP J4.34 / J4.40 上空闲。
+> - **右编码器**Stage 2.2 起升级为 X4 解码（PA12/PA13 都开 GPIO 双沿中断，1320 cnt/rev，与左轮一致）；硬件 CAPTURE 模式仍预留为高速失稳时的回退选项。
 
 ---
 
@@ -55,7 +54,7 @@
 | J7   | PB27 → RGB-Green | ON  | 保留 ON | 复用为状态指示绿灯 |
 | J8   | PA18 → S1 按键 + BSL | ON | 保留 ON | 板载 S1 直接当一键启动按键 |
 | J9   | PB24 → 热敏电阻  | (1)-(2) | **OFF** | PB24 释放给电池分压 ADC 输入 |
-| J12  | PA29 / PA30 / PB14 → QEI 接口 | 不适用 | **必须 ON** | 用作左编码器硬件 QEI |
+| J12  | PA29 / PA30 / PB14 → QEI 接口 | 不适用 | **OFF / 不再使用**（v0.9） | Stage 2.3 起左编码器迁到 BP 上的 PB15/PB16，J12 排针出厂未焊不再需要使用 |
 | J13  | 模拟域 3V3 → 热敏 / OPA2365 | ON | OFF（可选） | 不使用片上 OPA，可断电避免漏流 |
 | J14  | PB23 / PA9 → BP J1.3 | (1)-(2) PB23 | **(2)-(3) PA9** | Stage 1.6 起把 PWMB (PA9) 接到 BoosterPack J1.3，避免 PA9 焊接 |
 | J15  | PA16 → BP J3.29 | (1)-(2) PA16 | 保留默认 | 与 4.2 节 AIN2 复用，BoosterPack 排针上不要再连其他设备 |
@@ -92,9 +91,8 @@
 
 | 信号           | 引脚 | LQFP 引脚号 | 方向 | 外设                         | 备注 |
 |----------------|------|------------|------|------------------------------|------|
-| ENC_L_A        | PA29 | 36         | IN   | **TIMG8_CCP0** (QEI PHA)     | J12 ON，左轮硬件 QEI |
-| ENC_L_B        | PA30 | 37         | IN   | **TIMG8_CCP1** (QEI PHB)     | J12 ON，左轮硬件 QEI |
-| ENC_L_IDX      | PB14 | 2          | IN   | **TIMG8_IDX** (3 Pin Mode)   | J12 ON，预留 Z 相 |
+| ENC_L_A        | PB15 | 32         | IN   | **TIMG8_CCP0** (QEI PHA, mux f=5, PINCM32) | Stage 2.3 起从 J12/PA29 迁来；BP **J4.34** 直接接出 |
+| ENC_L_B        | PB16 | 33         | IN   | **TIMG8_CCP1** (QEI PHB, mux f=5, PINCM33) | Stage 2.3 起从 J12/PA30 迁来；BP **J4.40** 直接接出 |
 | ENC_R_A        | PA12 | 5          | IN   | **GPIO + 双边沿中断**         | 右轮，软件 X4 解码（阶段 2 拟升级 CAPTURE） |
 | ENC_R_B        | PA13 | 6          | IN   | **GPIO（无中断）**            | 右轮 B 相，仅在 ENC_R_A 中断 ISR 内读电平判方向 |
 | PWMA           | PA8  | 54         | OUT  | TIMA0_CCP0                   | TB6612 左电机 PWM，20 kHz |
@@ -122,7 +120,10 @@
 |-------------|------|------------|---------------------------|----------|
 | —           | PA21 | 17         | UART2_TX 候选 / VREF- 模式 | Stage 1.6 起释放（IMU 已迁到 UART3）；本工程内部 VREF，可作扩展 GPIO，但需焊接（不在 BoosterPack 上）|
 | —           | PA22 | 18         | UART2_RX 候选 / ADC0_7      | Stage 1.6 起释放（IMU 已迁到 UART3）；BP J3.14 开放，可作扩展 |
-| —           | UART2 整体 | — | 备用 UART 实例 | 蓝牙若回归且坚持单 pad，可走 PA21/PA22（PA21 焊接）或试验 PB15/PB16（multi-pad bug 风险未验） |
+| —           | PA29 | 36         | TIMG8_CCP0 候选 / J12 编码器 | Stage 2.3 起释放（左编码器 PHA 迁到 PB15）；J12 排针未焊，扩展需焊接 |
+| —           | PA30 | 37         | TIMG8_CCP1 候选 / J12 编码器 | Stage 2.3 起释放（左编码器 PHB 迁到 PB16）；J12 排针未焊，扩展需焊接 |
+| —           | PB14 | 2          | TIMG8_IDX 候选 / J12 编码器  | Stage 2.3 起释放（GB370 无 Z 相，QEI 已降为 2-Pin Mode）；J12 排针未焊 |
+| —           | UART2 整体 | — | 备用 UART 实例 | 若回归且坚持单 pad，可走 PA21/PA22（PA21 焊接）；**PB15/PB16 已被 Stage 2.3 占用为 TIMG8 QEI**，不再作 UART2 备选 |
 
 ### 3.4 禁用（硬件不可作通用 IO）
 
@@ -146,24 +147,24 @@
 > | BUZZER | PA0 | 33 | 板载 J4 跳线柱 PA0 端飞线 / 板底 J23-J28（J4 OFF + J19 OFF）|
 > | LASER_EN | PA1 | 34 | 板载 J20 跳线柱 PA1 端飞线 / 板底 J23-J28（J20 OFF）|
 >
-> 这两脚 LaunchPad 只引到板载 LED1 跳线柱与开漏上拉跳线柱，**没有引到 BoosterPack 排针**。其余所有业务引脚（PWMA/PWMB、TB6612 方向、IMU、K230、ADC、LOG、START_BTN、编码器）Stage 1.6 重排后**全部从 BoosterPack 排针 + J12 编码器接头直接接出，无焊接需求**。
+> 这两脚 LaunchPad 只引到板载 LED1 跳线柱与开漏上拉跳线柱，**没有引到 BoosterPack 排针**。其余所有业务引脚（PWMA/PWMB、TB6612 方向、IMU、K230、ADC、LOG、START_BTN、左/右编码器）Stage 1.6 / Stage 2.3 重排后**全部从 BoosterPack 排针直接接出，无焊接需求；J12 编码器接头出厂未焊但已不再使用**。
 
 ---
 
 ## 4. 按外设分组详表
 
-### 4.1 编码器解码（左：硬件 QEI；右：GPIO 中断软件 X4）
+### 4.1 编码器解码（左：硬件 QEI / 2-Pin Mode；右：GPIO 中断软件 X4）
 
 | 项目 | 左轮（硬件 QEI） | 右轮（软件 X4 ） |
 |------|------------------|-------------------|
-| 实现方式 | TIMG8 QEI（3 Pin Mode） | GPIO 双边沿中断 + 同向电平判方向 |
-| 定时器 / 资源 | TIMG8（PD0 域，BUSCLK = ULPCLK） | 不占定时器，占 1 个 EXTI 通道 |
-| PHA | PA29 = TIMG8_CCP0 | PA12 GPIO IN，RISE_FALL 中断 |
-| PHB | PA30 = TIMG8_CCP1 | PA13 GPIO IN，无中断（ISR 内 `DL_GPIO_readPinsIn` 读电平） |
-| INDEX | PB14 = TIMG8_IDX（预留 Z 相，电机无 Z 时软件忽略 LOAD 事件） | 无 |
-| 计数 | 硬件 X4，LOAD = 0xFFFF，硬件 16-bit 累加 | 软件 X4，32-bit `volatile int32_t enc_r_count` |
+| 实现方式 | TIMG8 QEI（**2 Pin Mode**，Stage 2.3 起） | GPIO 双边沿中断（**PA12 + PA13 都开沿中断**，Stage 2.2 起 X4） |
+| 定时器 / 资源 | TIMG8（PD0 域，BUSCLK = ULPCLK） | 不占定时器，占 2 个 GPIOA EXTI 通道（PINCM12 / PINCM13） |
+| PHA | **PB15 = TIMG8_CCP0**（mux f=5, PINCM32, BP **J4.34**） | PA12 GPIO IN，RISE_FALL 中断 |
+| PHB | **PB16 = TIMG8_CCP1**（mux f=5, PINCM33, BP **J4.40**） | PA13 GPIO IN，**RISE_FALL 中断**（X4，X2 兼容回退把 PA13 中断关掉即可） |
+| INDEX | **不接（GB370 编码器无 Z 相）** | 无 |
+| 计数 | 硬件 X4，LOAD = 0xFFFF，硬件 16-bit 累加，BSP 软扩 32-bit | 软件 X4，32-bit `volatile int32_t enc_r_count` |
 | 取数 | 100~1000 Hz 周期读取并差分 | 同左 |
-| 抗丢脉冲 | 硬件保证；MSPM0G3507 数字滤波 ≥ 4 BUSCLK | 受 ISR 抖动影响；高速实测后决定是否升 CAPTURE |
+| 抗丢脉冲 | 硬件保证；MSPM0G3507 数字滤波 ≥ 4 BUSCLK | 受 ISR 抖动影响；6.5 kHz 内可用，高速失稳时升 CAPTURE |
 
 > **架构依据**：[QEIMSPM0.syscfg.js](file:///A:/Program%20Files/ti/mspm0_sdk_2_10_00_04/source/ti/driverlib/.meta/qei/QEIMSPM0.syscfg.js) 第 175 行 QEI 过滤器只允许 `TIMG(8|9|10|11)`，MSPM0G3507 上唯一存在的 QEI 实例就是 TIMG8。**硬件上不存在第二路硬件 QEI 选项**，回退路径只能在"GPIO 中断"和"CAPTURE 模式"之间二选一。
 >
@@ -228,7 +229,7 @@
 | 替代方案 | 调试期：1 Hz XDS-UART (UART0) printf 文本日志（已实现）；运行期可视化：暂无；未来无线遥测可走 K230 BLE 透传或 USB CDC，不再占主控 UART |
 | 历史踩坑 | 原计划 UART2 + PB17/PB16（PINCM43/PINCM33）命中 SDK 2.10 multi-pad codegen bug，详见 [Stage1-IMU-BT-Telemetry.md §8](Stage1-IMU-BT-Telemetry.md) |
 
-> **如未来需要恢复无线遥测**：优先评估 K230 端 BLE 模块（K230 已通过 UART1/PB6/PB7 与主控通讯，加 BLE 模组即可在 K230 端转发 VOFA 流），或 USB Type-C HID/CDC（MSPM0G3507 自带 USB FS 控制器但本工程未启用）。**不推荐**重新占用主控 UART：UART2 单 pad 选项 PA21 仍需焊接，PB15/PB16 SDK bug 风险未验。
+> **如未来需要恢复无线遥测**：优先评估 K230 端 BLE 模块（K230 已通过 UART1/PB6/PB7 与主控通讯，加 BLE 模组即可在 K230 端转发 VOFA 流），或 USB Type-C HID/CDC（MSPM0G3507 自带 USB FS 控制器但本工程未启用）。**不推荐**重新占用主控 UART：UART2 单 pad 选项 PA21 仍需焊接，PB15/PB16 已在 Stage 2.3 被左编码器 QEI 占用。
 
 ### 4.6 ADC 电池分压
 
@@ -290,7 +291,8 @@
 ### 5.4 跳线核对
 
 - [ ] 第 2 节"跳线决策表"逐项核对，所有"OFF"项确认跳线帽已拔。
-- [ ] J12 三根线（PA29/PA30/PB14）与编码器 A/B/(Z) 走线一一对应（万用表蜂鸣档点测）。
+- [ ] **左编码器 A/B 接 BoosterPack J4.34 (PB15) / J4.40 (PB16)**（Stage 2.3 起）；J12 排针无需焊接、无需短接。
+- [ ] 万用表蜂鸣档点测：BP J4.34 ↔ 左编码器 A、BP J4.40 ↔ 左编码器 B；确认 J12 三脚（PA29/PA30/PB14）保持悬空进入预留池。
 
 ### 5.5 电机驱动空载
 
@@ -322,7 +324,7 @@
    - **Peripheral 引脚**（PWM/QEI/UART/ADC 的 ccp/tx/rx/adcPin 等；Stage 1.5 起本工程不再使用 I²C）：改 [`EIDE/LP_MSPM0G3507.syscfg`](../../EIDE/LP_MSPM0G3507.syscfg)，触发 `syscfg.bat` 重生 `ti_msp_dl_config.{c,h}`；这条路径走 SDK `getDualBondedPadFunction`，不踩 multi-pad bug。
 2. **改动需走 PR / 提交说明**：在 commit message 标 `[pin]` 标签，并在 [docs/Overview/Overview.md](../Overview/Overview.md) 引用。
 3. **跳线变化记入本文第 2 节**：不要散落在驱动文件注释里。
-4. **预留引脚不允许"借用"**：3.3 节预留的 PB16/PB17 在蓝牙到位前不得被其他模块占用；如确需占用，必须升级本表。
+4. **预留引脚不允许"借用"**：3.3 节预留的所有引脚在新增模块到位前不得被其他模块占用；如确需占用，必须升级本表。
 5. **fallback 必须落表**：第 4.1 节提到的 QEI / PWM 备选回退方案，一旦真的执行回退，必须把本表 3.2 节的右轮 / PWMA / PWMB 行同步改写。
 
 ---
@@ -339,3 +341,4 @@
 | 2026-04-30 | v0.6 | 第五轮编译彻底确认 SDK 2.10 GPIO module 在所有 multi-pad 引脚上 codegen 不可用（无 syntax workaround；详见 [Stage1-IMU-BT-Telemetry.md §8.5](Stage1-IMU-BT-Telemetry.md) 根因复盘）。**14 个业务 GPIO 由 [`template/hardware/bsp_gpio.{h,c}`](../../template/hardware/bsp_gpio.h) 接管**，syscfg 不再 addInstance() GPIO 模块。§4.7 表头补充 `BSP_<NAME>_*` 宏前缀列与中断说明（阶段 1 输入引脚均不开 NVIC，留给阶段 2）；§6 维护规则把"修引脚"流程拆成"业务 GPIO 走 BSP / Peripheral 引脚走 SysConfig"两条独立路径 | 主控团队 |
 | 2026-05-07 | v0.7 | **元件替换：MPU6050 → ATK-MS901M（Stage 1.5）**。开发板 PB2/PB3 未板载 4.7 kΩ I²C 上拉电阻、I2C1 总线全开路；为避免热风焊台修复风险，IMU 链路由 I²C 切换为 UART2 + ATK-MS901M（板载 EKF，主动按帧上报）。引脚 diff：① 释放 `PB2 (IMU_SCL) / PB3 (IMU_SDA) / PB4 (IMU_INT)` 三脚 + I2C1 实例；② 占用 `PA21 (UART2_TX, PINCM46) / PA22 (UART2_RX, PINCM47)`，二者均为单 pad；③ §3.4 禁用表把 PA21 移出（仅外部 VREF 模式占用，本工程内部 VREF），PA23 保留并备注"内部 VREF 实际可作扩展但未启用"；④ §4.3 IMU 详表整段重写为 MS901M（帧格式、量程 ±4 g/±2000 dps、上电 500 ms 检测、115200 8N1、不需上拉）；⑤ §4.7 GPIO 表删 IMU_INT 行（PB4 不再使用）；⑥ §5.6 上电验证清单中"I²C 扫地址 0x68"改为"USB-TTL 监听 PA22 应见 0x55 0x55 周期帧 + 1 Hz 日志 ms901m_good 递增"。详见 [Stage1.5-IMU-Swap-MS901M.md](Stage1.5-IMU-Swap-MS901M.md) | 主控团队 |
 | 2026-05-08 | v0.8 | **引脚集中化重排（Stage 1.6）+ 蓝牙整体下线**。复核 LaunchPad User's Guide 图 2-10 BoosterPack 引脚布局后，发现 v0.7 中 `IMU_TX = PA21` 不在 BP 排针上（仅板底 J23-J28 引脚扩展接头可达，需焊接），同时 `PWMB = PA9` 默认通过 J14 接 PB23 也不开放。引脚 diff：① IMU UART 整体由 UART2 迁到 UART3：`IMU_TX PA21 → PB12（BP J4.32，PINCM29 单 pad）`、`IMU_RX PA22 → PB13（BP J2.26，PINCM30 单 pad）`；② 蓝牙 HC-04 模块整体下线，UART_BT 实例从 syscfg 删除，`bsp_bt_uart.{c,h}` git rm，VOFA+ JustFloat 100 Hz 推送暂停（vofa.{c,h} 接口保留待无线路径回归后复用）；③ §1 决策行同步更新（IMU 接口/蓝牙串口）；④ §2 跳线表 J14 由 (1)-(2) PB23 改为 (2)-(3) PA9，让 PWMB 从 BP J1.3 直接接出（避免 PA9 焊接）；J16 备注更新（PA22 释放）；⑤ §3.2 业务表 IMU_TX/IMU_RX 引脚改 PB12/PB13；删 BT_TX/BT_RX 两行；⑥ §3.3 预留表加 PA21/PA22/UART2 备注；⑦ §3.4 禁用表追加"必须焊接清单"小节，明确 PA0(BUZZER)/PA1(LASER_EN) 是 LaunchPad 板载固有限制无法绕过，其余业务引脚 1.6 起全部从 BP/J12 直接接出；⑧ §4.3 IMU 详表更新外设/引脚/装车接线；⑨ §4.5 蓝牙详表整段改写为"已下线"+ 替代方案 + 历史踩坑保留；⑩ §5.6 上电验证清单中"USB-TTL 监听 PA22"改为"USB-TTL 监听 PB13"。详见 [Stage1.5-IMU-Swap-MS901M.md §11](Stage1.5-IMU-Swap-MS901M.md) | 主控团队 |
+| 2026-05-09 | v0.9 | **左编码器从 J12 迁到 BoosterPack（Stage 2.3）**。原方案 PHA/PHB/IDX = PA29/PA30/PB14 三脚全走 LaunchPad J12 QEI 接头，但板上 J12 排针**出厂未焊接**，无法直接接线。复核数据手册 PINMUX 表后发现 `PB15 = TIMG8_C0 [func 5, PINCM32]` / `PB16 = TIMG8_C1 [func 5, PINCM33]` 在 BP J4.34 / J4.40 上空闲（蓝牙 1.6 下线后释放进预留池），同时 GB370 编码器无 Z 相，IDX 可省，QEI 由 3-Pin Mode 降为 2-Pin Mode，X4 解码精度（1320 cnt/rev）不变。引脚 diff：① §1 决策行：解码方式行追加 "左 = TIMG8 + PB15/PB16，2-Pin Mode（Stage 2.3 起从 J12 迁到 BP）"；右轮注明 Stage 2.2 起升 X4；编码器 Z 相行整段改写"不接（2-Pin Mode），PB14 进入预留池"；② §2 跳线表：J12 由 "**必须 ON**" 改为 "**OFF / 不再使用**"；③ §3.2 业务表：删 ENC_L_IDX 行；ENC_L_A 改 `PA29/J12 ON` → `PB15/BP J4.34`；ENC_L_B 改 `PA30/J12 ON` → `PB16/BP J4.40`；④ §3.3 预留表新增 PA29/PA30/PB14 三行（从 J12 释放）；UART2 备选行去除 PB15/PB16 候选；⑤ §4.1 编码器表标题加 "/ 2-Pin Mode"；表内"实现方式 / 资源 / PHA / PHB / INDEX / 抗丢脉冲" 全部按 BP+2-Pin+X4 改写；⑥ §5.6 上电验证清单：J12 三线点测项改为 "万用表蜂鸣档点测 BP J4.34↔编码器 A、BP J4.40↔编码器 B"，并提示 J12 三脚保持悬空；⑦ §6 §3.3 引文 "PB16/PB17" 改为通用 "所有预留引脚"。SysConfig：`QEI_LEFT.enableIndexInput = false`，`peripheral.ccp0Pin.$assign = "PB15"`，`peripheral.ccp1Pin.$assign = "PB16"`，删除 `idxPin.$assign`；`ti_msp_dl_config.{c,h}` 由 EIDE build 自动重生（手工同步等价输出已落盘）。详见 [Stage2-MotorDrive-Encoder.md §7.2](Stage2-MotorDrive-Encoder.md) | 主控团队 |

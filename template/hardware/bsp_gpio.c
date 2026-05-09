@@ -57,22 +57,37 @@ static void init_outputs_portb(void)
 }
 
 /* -------------------------------------------------------------------------- */
-/* PORTA 输入：START_BTN（上拉）/ ENC_R_A / ENC_R_B（无上拉）                  */
-/*   不开 polarity / 不 enableInterrupt —— 阶段 2 各模块按需开                */
+/* PORTA 输入：START_BTN / ENC_R_A / ENC_R_B —— 全部启用内部上拉 + 施密特滞回 */
+/*                                                                              */
+/*   设计要点（Stage 2.4 / 2026-05-09 修复）：                                  */
+/*     原版本 ENC_R_A/B 用 RESISTOR_NONE + HYSTERESIS_DISABLE，引脚悬空时（如 */
+/*     编码器未上电、连接松动、调试期不接电机）会被 AC 噪声触发**雪崩中断**：  */
+/*     PA12/PA13 双沿中断 + 浮空噪声 → 数十 kHz 边沿率 → CPU 100% 占用在      */
+/*     `GROUP1_IRQHandler`（GPIO 中断在 MSPM0 上共享 GROUP1 入口，参考         */
+/*     bsp_motor.c 的 ISR 注释），主循环 / SysTick / printf 全部饿死。          */
+/*                                                                              */
+/*   修复策略（双保险）：                                                       */
+/*     ① RESISTOR_PULL_UP：引脚悬空 / 高阻态时被内部 ~32 kΩ 上拉到 VDD，电平  */
+/*        保持稳定高，不会被噪声拉到阈值附近；编码器主动驱动时（推挽 / 开漏    */
+/*        都行）能压过 32 kΩ 上拉，正常输出 0/1。                              */
+/*     ② HYSTERESIS_ENABLE：施密特触发器滞回 ~100 mV，进一步压制阈值附近的    */
+/*        噪声毛刺，避免边沿事件二次触发。                                     */
+/*                                                                              */
+/*   不开 polarity / 不 enableInterrupt —— 阶段 2 由 bsp_motor 按需开。       */
 /* -------------------------------------------------------------------------- */
 static void init_inputs_porta(void)
 {
     DL_GPIO_initDigitalInputFeatures(BSP_START_BTN_IOMUX,
         DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_PULL_UP,
-        DL_GPIO_HYSTERESIS_DISABLE, DL_GPIO_WAKEUP_DISABLE);
+        DL_GPIO_HYSTERESIS_ENABLE, DL_GPIO_WAKEUP_DISABLE);
 
     DL_GPIO_initDigitalInputFeatures(BSP_ENC_R_A_IOMUX,
-        DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_NONE,
-        DL_GPIO_HYSTERESIS_DISABLE, DL_GPIO_WAKEUP_DISABLE);
+        DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_PULL_UP,
+        DL_GPIO_HYSTERESIS_ENABLE, DL_GPIO_WAKEUP_DISABLE);
 
     DL_GPIO_initDigitalInputFeatures(BSP_ENC_R_B_IOMUX,
-        DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_NONE,
-        DL_GPIO_HYSTERESIS_DISABLE, DL_GPIO_WAKEUP_DISABLE);
+        DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_PULL_UP,
+        DL_GPIO_HYSTERESIS_ENABLE, DL_GPIO_WAKEUP_DISABLE);
 }
 
 /* PORTB 输入：Stage 1.5 后无业务输入；IMU_INT(PB4) 已随 MS901M 替换下线。

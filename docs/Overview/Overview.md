@@ -66,7 +66,7 @@
 1. 整理 LaunchPad 跳线现状（参考 `pin.md`）：
    - 板载 LED 占用 PA0 / PB22 / PB26 / PB27（J4~J7），按用途决定保留或断开。
    - XDS-UART0 默认接到 PA10 / PA11（J21 / J22），保留为开发日志口。
-   - **J12 已将 PA29 / PA30 / PB14 引到 QEI 接口，可直接复用作为一路硬件正交解码输入**，另一路 QEI 单独安排在另一组定时器通道。
+   - **左编码器走硬件 QEI（TIMG8）**：原计划复用 J12 → PA29/PA30/PB14，但 J12 排针出厂未焊；Stage 2.3 起改走 BoosterPack 上的 PB15 (J4.34, TIMG8_C0) / PB16 (J4.40, TIMG8_C1)，模式由 3-Pin 降为 2-Pin（GB370 编码器无 Z 相），硬件 X4 精度不变。**MSPM0G3507 仅 TIMG8 支持硬件 QEI**（详见 [Stage0-PinAllocation.md §1 决策表 / §4.1 编码器表](../TaskLog/Stage0-PinAllocation.md)），右编码器只能走 GPIO 中断软件 X4。
 2. 输出 **引脚分配表**（信号名 / 方向 / 外设 / 备注）作为唯一真源，至少覆盖：
    - 双路 **硬件 QEI**（左 / 右编码器，A / B 相）；
    - TB6612：4×PWM 或 2×PWM + 4×方向 + 1×STBY；

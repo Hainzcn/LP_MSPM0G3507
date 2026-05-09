@@ -103,20 +103,15 @@ extern "C" {
 #define QEI_LEFT_INST_IRQHandler                                TIMG8_IRQHandler
 #define QEI_LEFT_INST_INT_IRQN                                  (TIMG8_INT_IRQn)
 /* Pin configuration defines for QEI_LEFT PHA Pin */
-#define GPIO_QEI_LEFT_PHA_PORT                                             GPIOA
-#define GPIO_QEI_LEFT_PHA_PIN                                     DL_GPIO_PIN_29
-#define GPIO_QEI_LEFT_PHA_IOMUX                                   (IOMUX_PINCM4)
-#define GPIO_QEI_LEFT_PHA_IOMUX_FUNC                  IOMUX_PINCM4_PF_TIMG8_CCP0
+#define GPIO_QEI_LEFT_PHA_PORT                                             GPIOB
+#define GPIO_QEI_LEFT_PHA_PIN                                     DL_GPIO_PIN_15
+#define GPIO_QEI_LEFT_PHA_IOMUX                                  (IOMUX_PINCM32)
+#define GPIO_QEI_LEFT_PHA_IOMUX_FUNC                 IOMUX_PINCM32_PF_TIMG8_CCP0
 /* Pin configuration defines for QEI_LEFT PHB Pin */
-#define GPIO_QEI_LEFT_PHB_PORT                                             GPIOA
-#define GPIO_QEI_LEFT_PHB_PIN                                     DL_GPIO_PIN_30
-#define GPIO_QEI_LEFT_PHB_IOMUX                                   (IOMUX_PINCM5)
-#define GPIO_QEI_LEFT_PHB_IOMUX_FUNC                  IOMUX_PINCM5_PF_TIMG8_CCP1
-/* Pin configuration defines for QEI_LEFT IDX Pin */
-#define GPIO_QEI_LEFT_IDX_PORT                                             GPIOB
-#define GPIO_QEI_LEFT_IDX_PIN                                     DL_GPIO_PIN_14
-#define GPIO_QEI_LEFT_IDX_IOMUX                                  (IOMUX_PINCM31)
-#define GPIO_QEI_LEFT_IDX_IOMUX_FUNC                  IOMUX_PINCM31_PF_TIMG8_IDX
+#define GPIO_QEI_LEFT_PHB_PORT                                             GPIOB
+#define GPIO_QEI_LEFT_PHB_PIN                                     DL_GPIO_PIN_16
+#define GPIO_QEI_LEFT_PHB_IOMUX                                  (IOMUX_PINCM33)
+#define GPIO_QEI_LEFT_PHB_IOMUX_FUNC                 IOMUX_PINCM33_PF_TIMG8_CCP1
 
 
 /* Defines for UART_IMU */

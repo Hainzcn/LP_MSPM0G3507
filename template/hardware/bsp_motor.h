@@ -7,8 +7,9 @@
  *      period = 1599 → PWM 频率 = 32 MHz / 1600 ≈ 20 kHz（超出人耳范围）
  *   ─ 方向：PA15/PA16 (AIN1/AIN2)、PA26/PA27 (BIN1/BIN2)
  *   ─ STBY：PB0（高有效；上电默认低 → TB6612 待机 / 输出 Hi-Z）
- *   ─ 左轮编码器：TIMG8 硬件 QEI（A=PA29、B=PA30），mode 3 = X4 解码，
- *      16-bit 计数器（LOAD = 65535）由 `bsp_motor_update()` 软件扩为 32-bit
+ *   ─ 左轮编码器：TIMG8 硬件 QEI（A=PB15 / BP J4.34、B=PB16 / BP J4.40，
+ *      Stage 2.3 起从 J12 迁来；2-Pin Mode = X4 解码），16-bit 计数器
+ *      （LOAD = 65535）由 `bsp_motor_update()` 软件扩为 32-bit
  *   ─ 右轮编码器：PA12 双边沿中断 + PA13 ISR 内电平判方向（X2 解码）
  *   ─ 板载按键 S1：PA18，下降沿中断 + 80 ms 软件去抖
  *
@@ -57,8 +58,16 @@ extern "C" {
 
 /** 左轮 QEI mode 3 = X4 解码，每输出轴一圈的计数 */
 #define BSP_MOTOR_LEFT_DECODE_X                    (4)
-/** 右轮 PA12 双边沿中断 = X2 解码 */
-#define BSP_MOTOR_RIGHT_DECODE_X                   (2)
+
+/**
+ * 右轮解码倍率：默认 X4 (PA12 + PA13 都开双沿中断，与左轮分辨率一致 1320 cnt/rev)。
+ * 若 CPU 负担过大或高速漏脉冲明显，可切回 X2（仅 PA12 双沿，PA13 ISR 内读电平）。
+ *   X4 → 1320 cnt/rev，与左轮一致，平衡环左右系数可共用
+ *   X2 → 660  cnt/rev，CPU ISR 减半（推荐转速 > 1500 rpm 出轴侧时切此）
+ */
+#ifndef BSP_MOTOR_RIGHT_DECODE_X
+#define BSP_MOTOR_RIGHT_DECODE_X                   (4)
+#endif
 
 #define BSP_MOTOR_LEFT_COUNTS_PER_OUTPUT_REV \
     (BSP_MOTOR_GB370_GEAR_RATIO * BSP_MOTOR_GB370_HALL_PPR * BSP_MOTOR_LEFT_DECODE_X)
@@ -79,6 +88,23 @@ extern "C" {
 /** S1 按键去抖窗口（毫秒） */
 #ifndef BSP_MOTOR_BTN_DEBOUNCE_MS
 #define BSP_MOTOR_BTN_DEBOUNCE_MS                  (80u)
+#endif
+
+/**
+ * 右编码器 ISR 雪崩保护（Stage 2.4 新增）：
+ *   ─ `BSP_MOTOR_ENC_IRQ_QUENCH_PER_MS`：单毫秒边沿率上限。手动转编码器极快也只
+ *     会到几 kHz/ms 级别，超过该阈值唯一可能是引脚浮空 + 噪声 / 编码器电源异常
+ *     引发的 ISR 雪崩。默认 200 = 200 kHz 边沿率告警线，远高于实际机械极限。
+ *   ─ `BSP_MOTOR_ENC_IRQ_QUENCH_DURATION_MS`：触发后关闭 PA12/PA13 中断的毫秒数。
+ *     期间编码器边沿丢失，但主循环 / SysTick / printf 能正常推进；到期后由
+ *     `bsp_motor_update()` 重新打开。
+ */
+#ifndef BSP_MOTOR_ENC_IRQ_QUENCH_PER_MS
+#define BSP_MOTOR_ENC_IRQ_QUENCH_PER_MS            (200u)
+#endif
+
+#ifndef BSP_MOTOR_ENC_IRQ_QUENCH_DURATION_MS
+#define BSP_MOTOR_ENC_IRQ_QUENCH_DURATION_MS       (50u)
 #endif
 
 /* ========================================================================== */
@@ -155,9 +181,25 @@ void bsp_motor_stop(void);
 /**
  * @brief Brake (短刹车) 停止：AIN1=AIN2=1 / BIN1=BIN2=1、PWM = 满，
  *        TB6612 内部把电机两端短接 → 反电动势制动，停车比 stop 快但电流冲击大。
- *        STBY 保持原状态。仅在需要快速停车（如跌倒保护）时用。
+ *        STBY 保持原状态。**持续模式**：进入 brake 后保持，调用方负责按需切回 stop / set_output。
+ *        仅在需要快速停车（如跌倒保护）时用；对 TB6612 持续注入大电流可能发热，
+ *        100 ms 以内的脉冲式刹车请用 `bsp_motor_brake_pulse_ms()`。
  */
 void bsp_motor_brake(void);
+
+/**
+ * @brief 脉冲式短刹车：进入 brake 态 N ms 后由 `bsp_motor_update()` 自动转 stop (coast)。
+ *        N 由 SysTick 1 kHz 时基计时；调用本函数会立刻设 brake，不阻塞返回。
+ *        典型用法：跌倒检测、急停事件触发 → `bsp_motor_brake_pulse_ms(80)` →
+ *        80 ms 内电机已基本停下，转 coast 避免 brake 持续回灌大电流伤 TB6612。
+ *
+ *        本 API 与 `bsp_motor_brake()` (持续) 互斥：再调一次本函数会刷新计时器，
+ *        调用 `bsp_motor_brake() / bsp_motor_stop() / bsp_motor_set_output*()` 中
+ *        任意一个都会取消未到期的脉冲计时。
+ *
+ * @param duration_ms  brake 持续毫秒数，推荐 50~150；0 = 立即转 stop（等价 `bsp_motor_stop()`）
+ */
+void bsp_motor_brake_pulse_ms(uint32_t duration_ms);
 
 /* ========================================================================== */
 /* 极性 / 限幅（运行时可调，省去重新编译）                                       */
@@ -221,6 +263,17 @@ int32_t bsp_motor_get_left_count(void);
 
 /** 单独读右轮累计计数（int32，原子读） */
 int32_t bsp_motor_get_right_count(void);
+
+/**
+ * @brief 读取右编码器 ISR 累计进入次数（雪崩 / 噪声诊断）。
+ *        正常调用：1 Hz 心跳里 `cur = bsp_motor_get_enc_irq_count(); delta = cur - prev`，
+ *        delta 应等于 1 s 内编码器边沿数，远小于 BSP_MOTOR_ENC_IRQ_QUENCH_PER_MS × 1000。
+ *        若 delta 突然飙到几十万 / 雪崩兜底触发，说明引脚浮空或编码器电源问题。
+ */
+uint32_t bsp_motor_get_enc_irq_count(void);
+
+/** @return ISR 雪崩兜底当前是否激活（剩余抑制毫秒数 > 0 即为 true）。 */
+bool bsp_motor_enc_irq_is_quenched(void);
 
 /**
  * @brief 同时清零左右轮累计计数与速度差分窗口。常用于上电校准、调试归零、

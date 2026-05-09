@@ -53,7 +53,7 @@
 
 ---
 
-## LaunchPad 开放引脚说明
+## LaunchPad BoosterPack
 
 | NO. | Left1 | NO. | Left2 |      | NO. | Right1 | NO. | Right2 |
 | :-: | :---: | :-: | :---: | ---- | :-: | :----: | :-: | :----: |
@@ -67,3 +67,4 @@
 |  8  | PA27 | 18 | PA17 |      | 28 |  PA11  | 38 |  PB6  |
 |  9  |  PB2  | 19 |  SW2  |      | 29 |  PA12  | 39 |  PB0  |
 | 10 |  PB3  | 20 | PA15 |      | 30 |  PA13  | 40 |  PB16  |
+

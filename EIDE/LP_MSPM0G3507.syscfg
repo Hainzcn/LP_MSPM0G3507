@@ -92,21 +92,43 @@ PWM_MOTOR.PWM_CHANNEL_0.dutyCycle          = 0;
 PWM_MOTOR.PWM_CHANNEL_1.dutyCycle          = 0;
 
 /* ========================================================================== */
-/* TIMG8 QEI —— 左编码器 (复用 LaunchPad J12)                                  */
-/*   PHA   = PA29 = TIMG8_CCP0                                                 */
-/*   PHB   = PA30 = TIMG8_CCP1                                                 */
-/*   IDX   = PB14 = TIMG8_IDX  (3 Pin Mode 已开启，预留 Z 相)                  */
+/* TIMG8 QEI —— 左编码器 (Stage 2.3 起从 J12 迁到 BoosterPack 排针)            */
+/*   PHA   = PB15 (BP J4.34) = TIMG8_CCP0  (mux func 5, datasheet PINMUX 表)   */
+/*   PHB   = PB16 (BP J4.40) = TIMG8_CCP1  (mux func 5, datasheet PINMUX 表)   */
+/*   IDX   = (不接，2-Pin Mode)                                                */
+/*                                                                              */
+/*   迁移背景（Stage 2.3 / 2026-05-09）：                                       */
+/*     原方案 PA29/PA30/PB14 全部走 LaunchPad J12 QEI 接口排针，但 J12 排针    */
+/*     在板子上**未焊接**（出厂状态），无法直接插线；同时 PB14 不在 BP 上、    */
+/*     PA29/PA30 也不在 BP 上，三脚都需要焊接代价。                            */
+/*                                                                              */
+/*     Stage 2.3 评估发现 BoosterPack 上有空闲 PB15/PB16 可作 TIMG8_C0/C1：    */
+/*       · datasheet PINMUX 表：                                                */
+/*           PB15 = TIMG8_C0 [func 5]                                          */
+/*           PB16 = TIMG8_C1 [func 5]                                          */
+/*       · BP 排针位置：PB15 = J4.34、PB16 = J4.40（同列相邻）                 */
+/*       · 当前两根都空闲（蓝牙 Stage 1.6 下线后 PB15/PB16 进入预留池）        */
+/*     IDX 同步省略：GB370 编码器无 Z 相，DL_TIMER_QEI_MODE_2_INPUT 即可，      */
+/*     X4 解码精度（1320 cnt/rev）不变。                                       */
+/*                                                                              */
+/*   关于 multi-pad codegen bug：PB15/PB16 是 multi-pad 引脚，但 SDK bug 仅    */
+/*   影响 SysConfig GPIO 模块路径（详见本文 §"GPIO 由 BSP 接管"注释块），      */
+/*   peripheral 模块（QEI/PWM/UART/ADC）走 getDualBondedPadFunction 安全。      */
+/*                                                                              */
 /*   注：MSPM0G3507 上仅 TIMG8 支持硬件 QEI；右编码器只能软件模拟。            */
+/*                                                                              */
+/*   随之释放（不可再被 GPIO/外设占用前需更新 Stage0 §3.3 预留表）：           */
+/*     · J12 跳线：保留 OFF / 不再使用                                         */
+/*     · PA29 (LQFP 36) / PA30 (LQFP 37) / PB14 (LQFP 2) 进入预留              */
 /* ========================================================================== */
 const QEI_LEFT = QEI.addInstance();
 QEI_LEFT.$name                             = "QEI_LEFT";
-QEI_LEFT.enableIndexInput                  = true;
+QEI_LEFT.enableIndexInput                  = false;
 QEI_LEFT.loadValue                         = 0xFFFF;
 QEI_LEFT.timerStartTimer                   = true;
 QEI_LEFT.peripheral.$assign                = "TIMG8";
-QEI_LEFT.peripheral.ccp0Pin.$assign        = "PA29";
-QEI_LEFT.peripheral.ccp1Pin.$assign        = "PA30";
-QEI_LEFT.peripheral.idxPin.$assign         = "PB14";
+QEI_LEFT.peripheral.ccp0Pin.$assign        = "PB15";
+QEI_LEFT.peripheral.ccp1Pin.$assign        = "PB16";
 
 /* ========================================================================== */
 /* UART3 —— ATK-MS901M 姿态传感器 (Stage 1.6 引脚集中化重排)                   */
@@ -189,12 +211,23 @@ K230_UART.peripheral.rxPin.$assign         = "PB7";
 /* ========================================================================== */
 /* ADC0 —— 电池电压分压采样                                                    */
 /*   BAT_VSENSE = PB24 = ADC0_5                                                */
-/*   12-bit, 软件触发, 内部 VREF (2.5 V 默认)                                  */
+/*   12-bit, 软件触发, 参考 = VDDA (3.3 V)                                     */
+/*                                                                              */
+/*   重要（Stage 2.4 / 2026-05-09 修复）：                                       */
+/*     早期版本未显式设置 sampleTime，SDK 生成的 SCOMP0 默认 = 0 周期 → ADC   */
+/*     无法完成转换，`MEM0_RESULT_LOADED` 标志永不置位 → bsp_battery 永远拿不   */
+/*     到值、EMA 留在 0 mV → app_safety 进入 LOW_BAT_STOP 紧急停车。            */
+/*     现修正：sampleTime0 = 26 cycles（≈ 800 ns @ 32 MHz ULPCLK），单端 12-bit*/
+/*     最低需要 ~14 ULPCLK 周期采样 + 14 周期转换；26 周期裕度足够，整个 ADC    */
+/*     转换 ≤ 1.3 µs/次。                                                       */
+/*   参考：MSPM0G3507 datasheet §13.5 "ADC Acquisition Time" + SDK 例程         */
+/*         `adc12_single_conversion_LP_MSPM0G3507_nortos_ticlang/`              */
 /* ========================================================================== */
 const BAT_ADC = ADC12.addInstance();
 BAT_ADC.$name                              = "ADC_BAT";
 BAT_ADC.sampClkSrc                         = "DL_ADC12_CLOCK_ULPCLK";
 BAT_ADC.resolution                         = "DL_ADC12_SAMP_CONV_RES_12_BIT";
 BAT_ADC.adcMem0chansel                     = "DL_ADC12_INPUT_CHAN_5";
+BAT_ADC.sampleTime0                        = "1 us";
 BAT_ADC.peripheral.$assign                 = "ADC0";
 BAT_ADC.peripheral.adcPin5.$assign         = "PB24";
