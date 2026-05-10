@@ -1,0 +1,423 @@
+[cal] start dir=+1 steps=19 pm_start=100 pm_end=1000 step=50 dwell_ms=1500 settle_ms=500
+[cal] step dir=+1 idx=0/19 pm=100
+[cal] dir=+1 idx=0/19 pm=100 t=49939 vbat=5407 rpmL=22 rpmR=20 ctL=110758 ctR=113239
+[cal] dir=+1 idx=0/19 pm=100 t=50039 vbat=5407 rpmL=18 rpmR=20 ctL=110802 ctR=113284
+[cal] dir=+1 idx=0/19 pm=100 t=50139 vbat=5407 rpmL=18 rpmR=20 ctL=110846 ctR=113329
+[cal] dir=+1 idx=0/19 pm=100 t=50239 vbat=5407 rpmL=20 rpmR=20 ctL=110890 ctR=113374
+[cal] dir=+1 idx=0/19 pm=100 t=50339 vbat=5407 rpmL=20 rpmR=20 ctL=110934 ctR=113420
+[cal] dir=+1 idx=0/19 pm=100 t=50439 vbat=5407 rpmL=18 rpmR=20 ctL=110978 ctR=113465
+[cal] dir=+1 idx=0/19 pm=100 t=50539 vbat=5407 rpmL=18 rpmR=20 ctL=111021 ctR=113510
+[cal] dir=+1 idx=0/19 pm=100 t=50639 vbat=5407 rpmL=22 rpmR=22 ctL=111064 ctR=113555
+[cal] dir=+1 idx=0/19 pm=100 t=50739 vbat=5407 rpmL=18 rpmR=20 ctL=111108 ctR=113600
+[cal] dir=+1 idx=0/19 pm=100 t=50839 vbat=5407 rpmL=18 rpmR=20 ctL=111152 ctR=113646
+[cal] step dir=+1 idx=1/19 pm=150
+[cal] dir=+1 idx=1/19 pm=150 t=51439 vbat=5407 rpmL=31 rpmR=34 ctL=111546 ctR=114052
+[cal] dir=+1 idx=1/19 pm=150 t=51539 vbat=5407 rpmL=31 rpmR=34 ctL=111617 ctR=114126
+[cal] dir=+1 idx=1/19 pm=150 t=51639 vbat=5407 rpmL=31 rpmR=34 ctL=111688 ctR=114200
+[cal] dir=+1 idx=1/19 pm=150 t=51739 vbat=5407 rpmL=31 rpmR=31 ctL=111760 ctR=114273
+[cal] dir=+1 idx=1/19 pm=150 t=51839 vbat=5407 rpmL=31 rpmR=31 ctL=111830 ctR=114347
+[cal] dir=+1 idx=1/19 pm=150 t=51939 vbat=5407 rpmL=31 rpmR=34 ctL=111902 ctR=114420
+[cal] dir=+1 idx=1/19 pm=150 t=52039 vbat=5407 rpmL=34 rpmR=34 ctL=111973 ctR=114494
+[cal] dir=+1 idx=1/19 pm=150 t=52139 vbat=5407 rpmL=31 rpmR=34 ctL=112044 ctR=114568
+[cal] dir=+1 idx=1/19 pm=150 t=52239 vbat=5407 rpmL=34 rpmR=34 ctL=112116 ctR=114641
+[cal] dir=+1 idx=1/19 pm=150 t=52339 vbat=5407 rpmL=34 rpmR=34 ctL=112186 ctR=114715
+[cal] step dir=+1 idx=2/19 pm=200
+[cal] dir=+1 idx=2/19 pm=200 t=52939 vbat=5407 rpmL=45 rpmR=45 ctL=112744 ctR=115292
+[cal] dir=+1 idx=2/19 pm=200 t=53039 vbat=5407 rpmL=43 rpmR=45 ctL=112842 ctR=115394
+[cal] dir=+1 idx=2/19 pm=200 t=53139 vbat=5407 rpmL=45 rpmR=47 ctL=112941 ctR=115496
+[cal] dir=+1 idx=2/19 pm=200 t=53239 vbat=5407 rpmL=45 rpmR=47 ctL=113040 ctR=115598
+[cal] dir=+1 idx=2/19 pm=200 t=53339 vbat=5407 rpmL=45 rpmR=47 ctL=113138 ctR=115700
+[cal] dir=+1 idx=2/19 pm=200 t=53439 vbat=5407 rpmL=43 rpmR=47 ctL=113237 ctR=115802
+[cal] dir=+1 idx=2/19 pm=200 t=53539 vbat=5407 rpmL=43 rpmR=47 ctL=113336 ctR=115904
+[cal] dir=+1 idx=2/19 pm=200 t=53639 vbat=5407 rpmL=45 rpmR=47 ctL=113434 ctR=116006
+[cal] dir=+1 idx=2/19 pm=200 t=53739 vbat=5407 rpmL=45 rpmR=45 ctL=113532 ctR=116108
+[cal] dir=+1 idx=2/19 pm=200 t=53839 vbat=5407 rpmL=45 rpmR=47 ctL=113632 ctR=116210
+[cal] step dir=+1 idx=3/19 pm=250
+[cal] dir=+1 idx=3/19 pm=250 t=54439 vbat=5407 rpmL=56 rpmR=59 ctL=114352 ctR=116958
+[cal] dir=+1 idx=3/19 pm=250 t=54539 vbat=5407 rpmL=54 rpmR=59 ctL=114478 ctR=117088
+[cal] dir=+1 idx=3/19 pm=250 t=54639 vbat=5407 rpmL=59 rpmR=59 ctL=114604 ctR=117218
+[cal] dir=+1 idx=3/19 pm=250 t=54739 vbat=5407 rpmL=59 rpmR=59 ctL=114730 ctR=117349
+[cal] dir=+1 idx=3/19 pm=250 t=54839 vbat=5407 rpmL=59 rpmR=61 ctL=114856 ctR=117480
+[cal] dir=+1 idx=3/19 pm=250 t=54939 vbat=5407 rpmL=59 rpmR=59 ctL=114982 ctR=117610
+[cal] dir=+1 idx=3/19 pm=250 t=55039 vbat=5407 rpmL=59 rpmR=59 ctL=115108 ctR=117741
+[cal] dir=+1 idx=3/19 pm=250 t=55139 vbat=5407 rpmL=59 rpmR=59 ctL=115233 ctR=117871
+[cal] dir=+1 idx=3/19 pm=250 t=55239 vbat=5407 rpmL=54 rpmR=59 ctL=115359 ctR=118002
+[cal] dir=+1 idx=3/19 pm=250 t=55339 vbat=5407 rpmL=56 rpmR=59 ctL=115484 ctR=118132
+[cal] step dir=+1 idx=4/19 pm=300
+[cal] dir=+1 idx=4/19 pm=300 t=55939 vbat=5407 rpmL=72 rpmR=72 ctL=116369 ctR=119051
+[cal] dir=+1 idx=4/19 pm=300 t=56039 vbat=5407 rpmL=70 rpmR=72 ctL=116522 ctR=119210
+[cal] dir=+1 idx=4/19 pm=300 t=56139 vbat=5407 rpmL=68 rpmR=72 ctL=116675 ctR=119369
+[cal] dir=+1 idx=4/19 pm=300 t=56239 vbat=5407 rpmL=70 rpmR=72 ctL=116828 ctR=119528
+[cal] dir=+1 idx=4/19 pm=300 t=56339 vbat=5407 rpmL=70 rpmR=72 ctL=116982 ctR=119687
+[cal] dir=+1 idx=4/19 pm=300 t=56439 vbat=5407 rpmL=70 rpmR=72 ctL=117134 ctR=119846
+[cal] dir=+1 idx=4/19 pm=300 t=56539 vbat=5407 rpmL=68 rpmR=72 ctL=117288 ctR=120005
+[cal] dir=+1 idx=4/19 pm=300 t=56639 vbat=5407 rpmL=68 rpmR=72 ctL=117440 ctR=120164
+[cal] dir=+1 idx=4/19 pm=300 t=56739 vbat=5407 rpmL=70 rpmR=72 ctL=117594 ctR=120323
+[cal] dir=+1 idx=4/19 pm=300 t=56839 vbat=5407 rpmL=70 rpmR=72 ctL=117746 ctR=120482
+[cal] step dir=+1 idx=5/19 pm=350
+[cal] dir=+1 idx=5/19 pm=350 t=57439 vbat=5407 rpmL=81 rpmR=86 ctL=118794 ctR=121573
+[cal] dir=+1 idx=5/19 pm=350 t=57539 vbat=5407 rpmL=81 rpmR=86 ctL=118974 ctR=121760
+[cal] dir=+1 idx=5/19 pm=350 t=57639 vbat=5407 rpmL=81 rpmR=84 ctL=119154 ctR=121948
+[cal] dir=+1 idx=5/19 pm=350 t=57739 vbat=5407 rpmL=81 rpmR=86 ctL=119334 ctR=122136
+[cal] dir=+1 idx=5/19 pm=350 t=57839 vbat=5407 rpmL=81 rpmR=86 ctL=119515 ctR=122324
+[cal] dir=+1 idx=5/19 pm=350 t=57939 vbat=5407 rpmL=81 rpmR=86 ctL=119695 ctR=122511
+[cal] dir=+1 idx=5/19 pm=350 t=58039 vbat=5407 rpmL=81 rpmR=86 ctL=119876 ctR=122699
+[cal] dir=+1 idx=5/19 pm=350 t=58139 vbat=5407 rpmL=81 rpmR=86 ctL=120056 ctR=122886
+[cal] dir=+1 idx=5/19 pm=350 t=58239 vbat=5407 rpmL=81 rpmR=84 ctL=120236 ctR=123075
+[cal] dir=+1 idx=5/19 pm=350 t=58339 vbat=5407 rpmL=81 rpmR=86 ctL=120416 ctR=123262
+[cal] step dir=+1 idx=6/19 pm=400
+[cal] dir=+1 idx=6/19 pm=400 t=58939 vbat=5407 rpmL=93 rpmR=97 ctL=121626 ctR=124522
+[cal] dir=+1 idx=6/19 pm=400 t=59039 vbat=5407 rpmL=93 rpmR=97 ctL=121832 ctR=124738
+[cal] dir=+1 idx=6/19 pm=400 t=59139 vbat=5407 rpmL=90 rpmR=97 ctL=122040 ctR=124954
+[cal] dir=+1 idx=6/19 pm=400 t=59239 vbat=5407 rpmL=93 rpmR=97 ctL=122246 ctR=125170
+[cal] dir=+1 idx=6/19 pm=400 t=59339 vbat=5407 rpmL=93 rpmR=97 ctL=122454 ctR=125386
+[cal] dir=+1 idx=6/19 pm=400 t=59439 vbat=5407 rpmL=93 rpmR=97 ctL=122662 ctR=125602
+[cal] dir=+1 idx=6/19 pm=400 t=59539 vbat=5407 rpmL=93 rpmR=100 ctL=122868 ctR=125818
+[cal] dir=+1 idx=6/19 pm=400 t=59639 vbat=5407 rpmL=93 rpmR=100 ctL=123076 ctR=126034
+[cal] dir=+1 idx=6/19 pm=400 t=59739 vbat=5407 rpmL=93 rpmR=97 ctL=123283 ctR=126250
+[cal] dir=+1 idx=6/19 pm=400 t=59839 vbat=5407 rpmL=95 rpmR=100 ctL=123490 ctR=126466
+[cal] step dir=+1 idx=7/19 pm=450
+[cal] dir=+1 idx=7/19 pm=450 t=60439 vbat=5407 rpmL=104 rpmR=109 ctL=124861 ctR=127896
+[cal] dir=+1 idx=7/19 pm=450 t=60539 vbat=5407 rpmL=109 rpmR=111 ctL=125096 ctR=128141
+[cal] dir=+1 idx=7/19 pm=450 t=60639 vbat=5407 rpmL=109 rpmR=111 ctL=125330 ctR=128385
+[cal] dir=+1 idx=7/19 pm=450 t=60739 vbat=5407 rpmL=106 rpmR=109 ctL=125564 ctR=128630
+[cal] dir=+1 idx=7/19 pm=450 t=60839 vbat=5407 rpmL=104 rpmR=111 ctL=125798 ctR=128874
+[cal] dir=+1 idx=7/19 pm=450 t=60939 vbat=5407 rpmL=104 rpmR=111 ctL=126032 ctR=129119
+[cal] dir=+1 idx=7/19 pm=450 t=61039 vbat=5407 rpmL=109 rpmR=111 ctL=126267 ctR=129364
+[cal] dir=+1 idx=7/19 pm=450 t=61139 vbat=5407 rpmL=106 rpmR=111 ctL=126502 ctR=129608
+[cal] dir=+1 idx=7/19 pm=450 t=61239 vbat=5407 rpmL=109 rpmR=111 ctL=126736 ctR=129853
+[cal] dir=+1 idx=7/19 pm=450 t=61339 vbat=5407 rpmL=104 rpmR=111 ctL=126970 ctR=130097
+[cal] step dir=+1 idx=8/19 pm=500
+[cal] dir=+1 idx=8/19 pm=500 t=61939 vbat=5407 rpmL=118 rpmR=125 ctL=128502 ctR=131697
+[cal] dir=+1 idx=8/19 pm=500 t=62039 vbat=5407 rpmL=118 rpmR=125 ctL=128764 ctR=131969
+[cal] dir=+1 idx=8/19 pm=500 t=62139 vbat=5407 rpmL=120 rpmR=125 ctL=129026 ctR=132242
+[cal] dir=+1 idx=8/19 pm=500 t=62239 vbat=5407 rpmL=118 rpmR=122 ctL=129286 ctR=132514
+[cal] dir=+1 idx=8/19 pm=500 t=62339 vbat=5407 rpmL=118 rpmR=125 ctL=129548 ctR=132787
+[cal] dir=+1 idx=8/19 pm=500 t=62439 vbat=5407 rpmL=118 rpmR=122 ctL=129810 ctR=133060
+[cal] dir=+1 idx=8/19 pm=500 t=62539 vbat=5407 rpmL=120 rpmR=125 ctL=130071 ctR=133333
+[cal] dir=+1 idx=8/19 pm=500 t=62639 vbat=5407 rpmL=120 rpmR=125 ctL=130332 ctR=133605
+[cal] dir=+1 idx=8/19 pm=500 t=62739 vbat=5407 rpmL=118 rpmR=125 ctL=130594 ctR=133878
+[cal] dir=+1 idx=8/19 pm=500 t=62839 vbat=5407 rpmL=118 rpmR=122 ctL=130855 ctR=134151
+[cal] step dir=+1 idx=9/19 pm=550
+[cal] dir=+1 idx=9/19 pm=550 t=63439 vbat=5407 rpmL=131 rpmR=136 ctL=132548 ctR=135919
+[cal] dir=+1 idx=9/19 pm=550 t=63539 vbat=5407 rpmL=131 rpmR=136 ctL=132836 ctR=136220
+[cal] dir=+1 idx=9/19 pm=550 t=63639 vbat=5407 rpmL=131 rpmR=136 ctL=133124 ctR=136521
+[cal] dir=+1 idx=9/19 pm=550 t=63739 vbat=5407 rpmL=131 rpmR=138 ctL=133411 ctR=136822
+[cal] dir=+1 idx=9/19 pm=550 t=63839 vbat=5407 rpmL=131 rpmR=138 ctL=133699 ctR=137123
+[cal] dir=+1 idx=9/19 pm=550 t=63939 vbat=5407 rpmL=129 rpmR=136 ctL=133986 ctR=137424
+[cal] dir=+1 idx=9/19 pm=550 t=64039 vbat=5407 rpmL=131 rpmR=136 ctL=134274 ctR=137724
+[cal] dir=+1 idx=9/19 pm=550 t=64139 vbat=5407 rpmL=131 rpmR=136 ctL=134562 ctR=138025
+[cal] dir=+1 idx=9/19 pm=550 t=64239 vbat=5407 rpmL=127 rpmR=136 ctL=134850 ctR=138326
+[cal] dir=+1 idx=9/19 pm=550 t=64339 vbat=5407 rpmL=129 rpmR=136 ctL=135138 ctR=138627
+[cal] step dir=+1 idx=10/19 pm=600
+[cal] dir=+1 idx=10/19 pm=600 t=64939 vbat=5407 rpmL=143 rpmR=150 ctL=136990 ctR=140566
+[cal] dir=+1 idx=10/19 pm=600 t=65039 vbat=5407 rpmL=145 rpmR=150 ctL=137305 ctR=140895
+[cal] dir=+1 idx=10/19 pm=600 t=65139 vbat=5407 rpmL=143 rpmR=150 ctL=137620 ctR=141225
+[cal] dir=+1 idx=10/19 pm=600 t=65239 vbat=5407 rpmL=145 rpmR=150 ctL=137934 ctR=141554
+[cal] dir=+1 idx=10/19 pm=600 t=65339 vbat=5407 rpmL=140 rpmR=150 ctL=138248 ctR=141884
+[cal] dir=+1 idx=10/19 pm=600 t=65439 vbat=5407 rpmL=140 rpmR=147 ctL=138563 ctR=142213
+[cal] dir=+1 idx=10/19 pm=600 t=65539 vbat=5407 rpmL=140 rpmR=147 ctL=138878 ctR=142543
+[cal] dir=+1 idx=10/19 pm=600 t=65639 vbat=5407 rpmL=140 rpmR=150 ctL=139192 ctR=142872
+[cal] dir=+1 idx=10/19 pm=600 t=65739 vbat=5407 rpmL=145 rpmR=150 ctL=139506 ctR=143202
+[cal] dir=+1 idx=10/19 pm=600 t=65839 vbat=5407 rpmL=140 rpmR=150 ctL=139821 ctR=143532
+[cal] step dir=+1 idx=11/19 pm=650
+[cal] dir=+1 idx=11/19 pm=650 t=66439 vbat=5407 rpmL=154 rpmR=163 ctL=141834 ctR=145640
+[cal] dir=+1 idx=11/19 pm=650 t=66539 vbat=5407 rpmL=154 rpmR=163 ctL=142175 ctR=145997
+[cal] dir=+1 idx=11/19 pm=650 t=66639 vbat=5407 rpmL=156 rpmR=163 ctL=142516 ctR=146355
+[cal] dir=+1 idx=11/19 pm=650 t=66739 vbat=5407 rpmL=154 rpmR=161 ctL=142858 ctR=146713
+[cal] dir=+1 idx=11/19 pm=650 t=66839 vbat=5407 rpmL=156 rpmR=163 ctL=143200 ctR=147071
+[cal] dir=+1 idx=11/19 pm=650 t=66939 vbat=5407 rpmL=154 rpmR=161 ctL=143540 ctR=147429
+[cal] dir=+1 idx=11/19 pm=650 t=67039 vbat=5407 rpmL=154 rpmR=163 ctL=143882 ctR=147787
+[cal] dir=+1 idx=11/19 pm=650 t=67139 vbat=5407 rpmL=156 rpmR=161 ctL=144224 ctR=148144
+[cal] dir=+1 idx=11/19 pm=650 t=67239 vbat=5407 rpmL=154 rpmR=161 ctL=144565 ctR=148502
+[cal] dir=+1 idx=11/19 pm=650 t=67339 vbat=5407 rpmL=154 rpmR=161 ctL=144906 ctR=148860
+[cal] step dir=+1 idx=12/19 pm=700
+[cal] dir=+1 idx=12/19 pm=700 t=67939 vbat=5407 rpmL=168 rpmR=175 ctL=147080 ctR=151140
+[cal] dir=+1 idx=12/19 pm=700 t=68039 vbat=5407 rpmL=168 rpmR=175 ctL=147448 ctR=151526
+[cal] dir=+1 idx=12/19 pm=700 t=68139 vbat=5407 rpmL=168 rpmR=175 ctL=147816 ctR=151912
+[cal] dir=+1 idx=12/19 pm=700 t=68239 vbat=5407 rpmL=168 rpmR=177 ctL=148184 ctR=152298
+[cal] dir=+1 idx=12/19 pm=700 t=68339 vbat=5407 rpmL=168 rpmR=175 ctL=148552 ctR=152684
+[cal] dir=+1 idx=12/19 pm=700 t=68439 vbat=5407 rpmL=168 rpmR=175 ctL=148920 ctR=153070
+[cal] dir=+1 idx=12/19 pm=700 t=68539 vbat=5407 rpmL=168 rpmR=175 ctL=149288 ctR=153457
+[cal] dir=+1 idx=12/19 pm=700 t=68639 vbat=5407 rpmL=168 rpmR=177 ctL=149656 ctR=153843
+[cal] dir=+1 idx=12/19 pm=700 t=68739 vbat=5407 rpmL=168 rpmR=175 ctL=150024 ctR=154229
+[cal] dir=+1 idx=12/19 pm=700 t=68839 vbat=5407 rpmL=168 rpmR=175 ctL=150393 ctR=154615
+[cal] step dir=+1 idx=13/19 pm=750
+[cal] dir=+1 idx=13/19 pm=750 t=69439 vbat=5407 rpmL=177 rpmR=188 ctL=152724 ctR=157062
+[cal] dir=+1 idx=13/19 pm=750 t=69539 vbat=5407 rpmL=181 rpmR=186 ctL=153118 ctR=157476
+[cal] dir=+1 idx=13/19 pm=750 t=69639 vbat=5407 rpmL=181 rpmR=188 ctL=153513 ctR=157891
+[cal] dir=+1 idx=13/19 pm=750 t=69739 vbat=5407 rpmL=181 rpmR=188 ctL=153908 ctR=158305
+[cal] dir=+1 idx=13/19 pm=750 t=69839 vbat=5407 rpmL=177 rpmR=188 ctL=154302 ctR=158719
+[cal] dir=+1 idx=13/19 pm=750 t=69939 vbat=5407 rpmL=177 rpmR=188 ctL=154696 ctR=159134
+[cal] dir=+1 idx=13/19 pm=750 t=70039 vbat=5407 rpmL=181 rpmR=188 ctL=155090 ctR=159548
+[cal] dir=+1 idx=13/19 pm=750 t=70139 vbat=5407 rpmL=181 rpmR=188 ctL=155485 ctR=159962
+[cal] dir=+1 idx=13/19 pm=750 t=70239 vbat=5407 rpmL=181 rpmR=188 ctL=155880 ctR=160377
+[cal] dir=+1 idx=13/19 pm=750 t=70339 vbat=5407 rpmL=177 rpmR=186 ctL=156274 ctR=160791
+[cal] step dir=+1 idx=14/19 pm=800
+[cal] dir=+1 idx=14/19 pm=800 t=70939 vbat=5407 rpmL=190 rpmR=202 ctL=158762 ctR=163406
+[cal] dir=+1 idx=14/19 pm=800 t=71039 vbat=5407 rpmL=190 rpmR=202 ctL=159182 ctR=163848
+[cal] dir=+1 idx=14/19 pm=800 t=71139 vbat=5407 rpmL=190 rpmR=200 ctL=159603 ctR=164290
+[cal] dir=+1 idx=14/19 pm=800 t=71239 vbat=5407 rpmL=190 rpmR=200 ctL=160024 ctR=164732
+[cal] dir=+1 idx=14/19 pm=800 t=71339 vbat=5407 rpmL=190 rpmR=200 ctL=160444 ctR=165174
+[cal] dir=+1 idx=14/19 pm=800 t=71439 vbat=5407 rpmL=190 rpmR=200 ctL=160866 ctR=165616
+[cal] dir=+1 idx=14/19 pm=800 t=71539 vbat=5407 rpmL=190 rpmR=202 ctL=161286 ctR=166058
+[cal] dir=+1 idx=14/19 pm=800 t=71639 vbat=5407 rpmL=190 rpmR=202 ctL=161706 ctR=166500
+[cal] dir=+1 idx=14/19 pm=800 t=71739 vbat=5407 rpmL=190 rpmR=200 ctL=162128 ctR=166942
+[cal] dir=+1 idx=14/19 pm=800 t=71839 vbat=5407 rpmL=190 rpmR=200 ctL=162548 ctR=167384
+[cal] step dir=+1 idx=15/19 pm=850
+[cal] dir=+1 idx=15/19 pm=850 t=72439 vbat=5407 rpmL=202 rpmR=213 ctL=165192 ctR=170164
+[cal] dir=+1 idx=15/19 pm=850 t=72539 vbat=5407 rpmL=202 rpmR=215 ctL=165640 ctR=170634
+[cal] dir=+1 idx=15/19 pm=850 t=72639 vbat=5407 rpmL=202 rpmR=213 ctL=166086 ctR=171104
+[cal] dir=+1 idx=15/19 pm=850 t=72739 vbat=5407 rpmL=204 rpmR=213 ctL=166534 ctR=171574
+[cal] dir=+1 idx=15/19 pm=850 t=72839 vbat=5407 rpmL=204 rpmR=213 ctL=166980 ctR=172044
+[cal] dir=+1 idx=15/19 pm=850 t=72939 vbat=5407 rpmL=204 rpmR=213 ctL=167427 ctR=172514
+[cal] dir=+1 idx=15/19 pm=850 t=73039 vbat=5407 rpmL=202 rpmR=213 ctL=167874 ctR=172984
+[cal] dir=+1 idx=15/19 pm=850 t=73139 vbat=5407 rpmL=202 rpmR=215 ctL=168320 ctR=173454
+[cal] dir=+1 idx=15/19 pm=850 t=73239 vbat=5407 rpmL=204 rpmR=213 ctL=168768 ctR=173924
+[cal] dir=+1 idx=15/19 pm=850 t=73339 vbat=5407 rpmL=204 rpmR=213 ctL=169215 ctR=174394
+[cal] step dir=+1 idx=16/19 pm=900
+[cal] dir=+1 idx=16/19 pm=900 t=73939 vbat=5407 rpmL=215 rpmR=227 ctL=172016 ctR=177339
+[cal] dir=+1 idx=16/19 pm=900 t=74039 vbat=5407 rpmL=213 rpmR=225 ctL=172490 ctR=177836
+[cal] dir=+1 idx=16/19 pm=900 t=74139 vbat=5407 rpmL=213 rpmR=227 ctL=172962 ctR=178332
+[cal] dir=+1 idx=16/19 pm=900 t=74239 vbat=5407 rpmL=213 rpmR=225 ctL=173434 ctR=178829
+[cal] dir=+1 idx=16/19 pm=900 t=74339 vbat=5407 rpmL=215 rpmR=225 ctL=173908 ctR=179326
+[cal] dir=+1 idx=16/19 pm=900 t=74439 vbat=5407 rpmL=213 rpmR=225 ctL=174380 ctR=179822
+[cal] dir=+1 idx=16/19 pm=900 t=74539 vbat=5407 rpmL=213 rpmR=225 ctL=174852 ctR=180319
+[cal] dir=+1 idx=16/19 pm=900 t=74639 vbat=5407 rpmL=215 rpmR=225 ctL=175326 ctR=180816
+[cal] dir=+1 idx=16/19 pm=900 t=74739 vbat=5407 rpmL=215 rpmR=225 ctL=175798 ctR=181313
+[cal] dir=+1 idx=16/19 pm=900 t=74839 vbat=5407 rpmL=215 rpmR=225 ctL=176270 ctR=181809
+[cal] step dir=+1 idx=17/19 pm=950
+[cal] dir=+1 idx=17/19 pm=950 t=75439 vbat=5407 rpmL=227 rpmR=238 ctL=179222 ctR=184911
+[cal] dir=+1 idx=17/19 pm=950 t=75539 vbat=5407 rpmL=222 rpmR=238 ctL=179720 ctR=185435
+[cal] dir=+1 idx=17/19 pm=950 t=75639 vbat=5407 rpmL=227 rpmR=236 ctL=180218 ctR=185958
+[cal] dir=+1 idx=17/19 pm=950 t=75739 vbat=5407 rpmL=225 rpmR=236 ctL=180716 ctR=186482
+[cal] dir=+1 idx=17/19 pm=950 t=75839 vbat=5407 rpmL=227 rpmR=238 ctL=181214 ctR=187005
+[cal] dir=+1 idx=17/19 pm=950 t=75939 vbat=5407 rpmL=225 rpmR=238 ctL=181712 ctR=187528
+[cal] dir=+1 idx=17/19 pm=950 t=76039 vbat=5407 rpmL=227 rpmR=238 ctL=182210 ctR=188052
+[cal] dir=+1 idx=17/19 pm=950 t=76139 vbat=5407 rpmL=225 rpmR=238 ctL=182708 ctR=188575
+[cal] dir=+1 idx=17/19 pm=950 t=76239 vbat=5407 rpmL=227 rpmR=236 ctL=183206 ctR=189098
+[cal] dir=+1 idx=17/19 pm=950 t=76339 vbat=5407 rpmL=225 rpmR=236 ctL=183704 ctR=189622
+[cal] step dir=+1 idx=18/19 pm=1000
+[cal] dir=+1 idx=18/19 pm=1000 t=76939 vbat=5407 rpmL=238 rpmR=252 ctL=186822 ctR=192902
+[cal] dir=+1 idx=18/19 pm=1000 t=77039 vbat=5407 rpmL=238 rpmR=252 ctL=187348 ctR=193457
+[cal] dir=+1 idx=18/19 pm=1000 t=77139 vbat=5407 rpmL=240 rpmR=252 ctL=187875 ctR=194011
+[cal] dir=+1 idx=18/19 pm=1000 t=77239 vbat=5407 rpmL=240 rpmR=252 ctL=188402 ctR=194566
+[cal] dir=+1 idx=18/19 pm=1000 t=77339 vbat=5407 rpmL=240 rpmR=250 ctL=188928 ctR=195121
+[cal] dir=+1 idx=18/19 pm=1000 t=77439 vbat=5407 rpmL=240 rpmR=252 ctL=189455 ctR=195675
+[cal] dir=+1 idx=18/19 pm=1000 t=77539 vbat=5407 rpmL=240 rpmR=252 ctL=189982 ctR=196230
+[cal] dir=+1 idx=18/19 pm=1000 t=77639 vbat=5407 rpmL=240 rpmR=252 ctL=190508 ctR=196785
+[cal] dir=+1 idx=18/19 pm=1000 t=77739 vbat=5407 rpmL=236 rpmR=252 ctL=191036 ctR=197339
+[cal] dir=+1 idx=18/19 pm=1000 t=77839 vbat=5407 rpmL=240 rpmR=252 ctL=191562 ctR=197894
+[cal] done dir=+1 next=reverse
+[cal] start dir=-1 steps=19 pm_start=100 pm_end=1000 step=50 dwell_ms=1500 settle_ms=500
+[cal] step dir=-1 idx=0/19 pm=-100
+[cal] dir=-1 idx=0/19 pm=-100 t=78439 vbat=5407 rpmL=-18 rpmR=-20 ctL=192068 ctR=198430
+[cal] dir=-1 idx=0/19 pm=-100 t=78539 vbat=5407 rpmL=-20 rpmR=-18 ctL=192026 ctR=198386
+[cal] dir=-1 idx=0/19 pm=-100 t=78639 vbat=5407 rpmL=-18 rpmR=-20 ctL=191984 ctR=198341
+[cal] dir=-1 idx=0/19 pm=-100 t=78739 vbat=5407 rpmL=-20 rpmR=-20 ctL=191941 ctR=198297
+[cal] dir=-1 idx=0/19 pm=-100 t=78839 vbat=5407 rpmL=-20 rpmR=-20 ctL=191898 ctR=198253
+[cal] dir=-1 idx=0/19 pm=-100 t=78939 vbat=5407 rpmL=-20 rpmR=-20 ctL=191856 ctR=198209
+[cal] dir=-1 idx=0/19 pm=-100 t=79039 vbat=5407 rpmL=-18 rpmR=-20 ctL=191813 ctR=198165
+[cal] dir=-1 idx=0/19 pm=-100 t=79139 vbat=5407 rpmL=-18 rpmR=-18 ctL=191770 ctR=198120
+[cal] dir=-1 idx=0/19 pm=-100 t=79239 vbat=5407 rpmL=-20 rpmR=-20 ctL=191728 ctR=198076
+[cal] dir=-1 idx=0/19 pm=-100 t=79339 vbat=5407 rpmL=-20 rpmR=-18 ctL=191684 ctR=198032
+[cal] step dir=-1 idx=1/19 pm=-150
+[cal] dir=-1 idx=1/19 pm=-150 t=79939 vbat=5407 rpmL=-31 rpmR=-31 ctL=191295 ctR=197635
+[cal] dir=-1 idx=1/19 pm=-150 t=80039 vbat=5407 rpmL=-31 rpmR=-31 ctL=191224 ctR=197563
+[cal] dir=-1 idx=1/19 pm=-150 t=80139 vbat=5407 rpmL=-31 rpmR=-31 ctL=191154 ctR=197491
+[cal] dir=-1 idx=1/19 pm=-150 t=80239 vbat=5407 rpmL=-31 rpmR=-31 ctL=191082 ctR=197419
+[cal] dir=-1 idx=1/19 pm=-150 t=80339 vbat=5407 rpmL=-31 rpmR=-34 ctL=191012 ctR=197347
+[cal] dir=-1 idx=1/19 pm=-150 t=80439 vbat=5407 rpmL=-31 rpmR=-34 ctL=190940 ctR=197276
+[cal] dir=-1 idx=1/19 pm=-150 t=80539 vbat=5407 rpmL=-31 rpmR=-31 ctL=190870 ctR=197204
+[cal] dir=-1 idx=1/19 pm=-150 t=80639 vbat=5407 rpmL=-34 rpmR=-34 ctL=190798 ctR=197132
+[cal] dir=-1 idx=1/19 pm=-150 t=80739 vbat=5407 rpmL=-34 rpmR=-34 ctL=190728 ctR=197060
+[cal] dir=-1 idx=1/19 pm=-150 t=80839 vbat=5407 rpmL=-34 rpmR=-31 ctL=190656 ctR=196989
+[cal] step dir=-1 idx=2/19 pm=-200
+[cal] dir=-1 idx=2/19 pm=-200 t=81439 vbat=5407 rpmL=-45 rpmR=-45 ctL=190098 ctR=196427
+[cal] dir=-1 idx=2/19 pm=-200 t=81539 vbat=5407 rpmL=-45 rpmR=-45 ctL=190000 ctR=196327
+[cal] dir=-1 idx=2/19 pm=-200 t=81639 vbat=5407 rpmL=-45 rpmR=-45 ctL=189900 ctR=196228
+[cal] dir=-1 idx=2/19 pm=-200 t=81739 vbat=5407 rpmL=-45 rpmR=-45 ctL=189802 ctR=196128
+[cal] dir=-1 idx=2/19 pm=-200 t=81839 vbat=5407 rpmL=-45 rpmR=-45 ctL=189702 ctR=196029
+[cal] dir=-1 idx=2/19 pm=-200 t=81939 vbat=5407 rpmL=-45 rpmR=-45 ctL=189604 ctR=195930
+[cal] dir=-1 idx=2/19 pm=-200 t=82039 vbat=5407 rpmL=-45 rpmR=-43 ctL=189504 ctR=195831
+[cal] dir=-1 idx=2/19 pm=-200 t=82139 vbat=5407 rpmL=-45 rpmR=-45 ctL=189406 ctR=195731
+[cal] dir=-1 idx=2/19 pm=-200 t=82239 vbat=5407 rpmL=-45 rpmR=-43 ctL=189307 ctR=195632
+[cal] dir=-1 idx=2/19 pm=-200 t=82339 vbat=5407 rpmL=-43 rpmR=-45 ctL=189208 ctR=195533
+[cal] step dir=-1 idx=3/19 pm=-250
+[cal] dir=-1 idx=3/19 pm=-250 t=82939 vbat=5407 rpmL=-59 rpmR=-59 ctL=188482 ctR=194806
+[cal] dir=-1 idx=3/19 pm=-250 t=83039 vbat=5407 rpmL=-59 rpmR=-56 ctL=188356 ctR=194679
+[cal] dir=-1 idx=3/19 pm=-250 t=83139 vbat=5407 rpmL=-59 rpmR=-56 ctL=188228 ctR=194554
+[cal] dir=-1 idx=3/19 pm=-250 t=83239 vbat=5407 rpmL=-56 rpmR=-56 ctL=188102 ctR=194427
+[cal] dir=-1 idx=3/19 pm=-250 t=83339 vbat=5407 rpmL=-59 rpmR=-56 ctL=187975 ctR=194302
+[cal] dir=-1 idx=3/19 pm=-250 t=83439 vbat=5407 rpmL=-56 rpmR=-56 ctL=187848 ctR=194175
+[cal] dir=-1 idx=3/19 pm=-250 t=83539 vbat=5407 rpmL=-54 rpmR=-59 ctL=187722 ctR=194047
+[cal] dir=-1 idx=3/19 pm=-250 t=83639 vbat=5407 rpmL=-54 rpmR=-59 ctL=187594 ctR=193921
+[cal] dir=-1 idx=3/19 pm=-250 t=83739 vbat=5407 rpmL=-56 rpmR=-56 ctL=187468 ctR=193794
+[cal] dir=-1 idx=3/19 pm=-250 t=83839 vbat=5407 rpmL=-56 rpmR=-59 ctL=187341 ctR=193667
+[cal] step dir=-1 idx=4/19 pm=-300
+[cal] dir=-1 idx=4/19 pm=-300 t=84439 vbat=5407 rpmL=-72 rpmR=-70 ctL=186448 ctR=192777
+[cal] dir=-1 idx=4/19 pm=-300 t=84539 vbat=5407 rpmL=-70 rpmR=-70 ctL=186294 ctR=192623
+[cal] dir=-1 idx=4/19 pm=-300 t=84639 vbat=5407 rpmL=-72 rpmR=-68 ctL=186140 ctR=192469
+[cal] dir=-1 idx=4/19 pm=-300 t=84739 vbat=5407 rpmL=-70 rpmR=-68 ctL=185985 ctR=192315
+[cal] dir=-1 idx=4/19 pm=-300 t=84839 vbat=5407 rpmL=-68 rpmR=-70 ctL=185830 ctR=192161
+[cal] dir=-1 idx=4/19 pm=-300 t=84939 vbat=5407 rpmL=-70 rpmR=-70 ctL=185676 ctR=192007
+[cal] dir=-1 idx=4/19 pm=-300 t=85039 vbat=5407 rpmL=-68 rpmR=-70 ctL=185522 ctR=191853
+[cal] dir=-1 idx=4/19 pm=-300 t=85139 vbat=5407 rpmL=-70 rpmR=-68 ctL=185366 ctR=191699
+[cal] dir=-1 idx=4/19 pm=-300 t=85239 vbat=5407 rpmL=-68 rpmR=-70 ctL=185212 ctR=191545
+[cal] dir=-1 idx=4/19 pm=-300 t=85339 vbat=5407 rpmL=-70 rpmR=-70 ctL=185058 ctR=191391
+[cal] step dir=-1 idx=5/19 pm=-350
+[cal] dir=-1 idx=5/19 pm=-350 t=85939 vbat=5407 rpmL=-81 rpmR=-81 ctL=184000 ctR=190337
+[cal] dir=-1 idx=5/19 pm=-350 t=86039 vbat=5407 rpmL=-81 rpmR=-81 ctL=183818 ctR=190156
+[cal] dir=-1 idx=5/19 pm=-350 t=86139 vbat=5407 rpmL=-84 rpmR=-81 ctL=183636 ctR=189975
+[cal] dir=-1 idx=5/19 pm=-350 t=86239 vbat=5407 rpmL=-81 rpmR=-84 ctL=183453 ctR=189793
+[cal] dir=-1 idx=5/19 pm=-350 t=86339 vbat=5407 rpmL=-84 rpmR=-84 ctL=183271 ctR=189612
+[cal] dir=-1 idx=5/19 pm=-350 t=86439 vbat=5407 rpmL=-81 rpmR=-84 ctL=183088 ctR=189431
+[cal] dir=-1 idx=5/19 pm=-350 t=86539 vbat=5407 rpmL=-81 rpmR=-84 ctL=182906 ctR=189249
+[cal] dir=-1 idx=5/19 pm=-350 t=86639 vbat=5407 rpmL=-84 rpmR=-81 ctL=182724 ctR=189068
+[cal] dir=-1 idx=5/19 pm=-350 t=86739 vbat=5407 rpmL=-81 rpmR=-84 ctL=182542 ctR=188887
+[cal] dir=-1 idx=5/19 pm=-350 t=86839 vbat=5407 rpmL=-81 rpmR=-81 ctL=182360 ctR=188705
+[cal] step dir=-1 idx=6/19 pm=-400
+[cal] dir=-1 idx=6/19 pm=-400 t=87439 vbat=5407 rpmL=-95 rpmR=-93 ctL=181137 ctR=187488
+[cal] dir=-1 idx=6/19 pm=-400 t=87539 vbat=5407 rpmL=-95 rpmR=-95 ctL=180927 ctR=187279
+[cal] dir=-1 idx=6/19 pm=-400 t=87639 vbat=5407 rpmL=-95 rpmR=-93 ctL=180718 ctR=187071
+[cal] dir=-1 idx=6/19 pm=-400 t=87739 vbat=5407 rpmL=-95 rpmR=-93 ctL=180508 ctR=186862
+[cal] dir=-1 idx=6/19 pm=-400 t=87839 vbat=5407 rpmL=-95 rpmR=-95 ctL=180298 ctR=186653
+[cal] dir=-1 idx=6/19 pm=-400 t=87939 vbat=5407 rpmL=-95 rpmR=-93 ctL=180088 ctR=186445
+[cal] dir=-1 idx=6/19 pm=-400 t=88039 vbat=5407 rpmL=-95 rpmR=-95 ctL=179878 ctR=186236
+[cal] dir=-1 idx=6/19 pm=-400 t=88139 vbat=5407 rpmL=-95 rpmR=-95 ctL=179668 ctR=186027
+[cal] dir=-1 idx=6/19 pm=-400 t=88239 vbat=5407 rpmL=-95 rpmR=-95 ctL=179458 ctR=185819
+[cal] dir=-1 idx=6/19 pm=-400 t=88339 vbat=5407 rpmL=-95 rpmR=-95 ctL=179248 ctR=185610
+[cal] step dir=-1 idx=7/19 pm=-450
+[cal] dir=-1 idx=7/19 pm=-450 t=88939 vbat=5407 rpmL=-109 rpmR=-106 ctL=177859 ctR=184229
+[cal] dir=-1 idx=7/19 pm=-450 t=89039 vbat=5407 rpmL=-109 rpmR=-106 ctL=177621 ctR=183993
+[cal] dir=-1 idx=7/19 pm=-450 t=89139 vbat=5407 rpmL=-106 rpmR=-106 ctL=177384 ctR=183757
+[cal] dir=-1 idx=7/19 pm=-450 t=89239 vbat=5407 rpmL=-109 rpmR=-106 ctL=177146 ctR=183521
+[cal] dir=-1 idx=7/19 pm=-450 t=89339 vbat=5407 rpmL=-109 rpmR=-109 ctL=176908 ctR=183285
+[cal] dir=-1 idx=7/19 pm=-450 t=89439 vbat=5407 rpmL=-106 rpmR=-106 ctL=176670 ctR=183049
+[cal] dir=-1 idx=7/19 pm=-450 t=89539 vbat=5407 rpmL=-106 rpmR=-106 ctL=176432 ctR=182813
+[cal] dir=-1 idx=7/19 pm=-450 t=89639 vbat=5407 rpmL=-109 rpmR=-106 ctL=176194 ctR=182577
+[cal] dir=-1 idx=7/19 pm=-450 t=89739 vbat=5407 rpmL=-109 rpmR=-109 ctL=175957 ctR=182341
+[cal] dir=-1 idx=7/19 pm=-450 t=89839 vbat=5407 rpmL=-106 rpmR=-106 ctL=175719 ctR=182105
+[cal] step dir=-1 idx=8/19 pm=-500
+[cal] dir=-1 idx=8/19 pm=-500 t=90439 vbat=5407 rpmL=-122 rpmR=-120 ctL=174164 ctR=180561
+[cal] dir=-1 idx=8/19 pm=-500 t=90539 vbat=5407 rpmL=-118 rpmR=-120 ctL=173898 ctR=180298
+[cal] dir=-1 idx=8/19 pm=-500 t=90639 vbat=5407 rpmL=-120 rpmR=-120 ctL=173632 ctR=180035
+[cal] dir=-1 idx=8/19 pm=-500 t=90739 vbat=5407 rpmL=-120 rpmR=-120 ctL=173368 ctR=179771
+[cal] dir=-1 idx=8/19 pm=-500 t=90839 vbat=5407 rpmL=-118 rpmR=-120 ctL=173102 ctR=179508
+[cal] dir=-1 idx=8/19 pm=-500 t=90939 vbat=5407 rpmL=-118 rpmR=-120 ctL=172837 ctR=179245
+[cal] dir=-1 idx=8/19 pm=-500 t=91039 vbat=5407 rpmL=-120 rpmR=-120 ctL=172572 ctR=178982
+[cal] dir=-1 idx=8/19 pm=-500 t=91139 vbat=5407 rpmL=-120 rpmR=-118 ctL=172306 ctR=178719
+[cal] dir=-1 idx=8/19 pm=-500 t=91239 vbat=5407 rpmL=-118 rpmR=-120 ctL=172042 ctR=178455
+[cal] dir=-1 idx=8/19 pm=-500 t=91339 vbat=5407 rpmL=-122 rpmR=-118 ctL=171776 ctR=178192
+[cal] step dir=-1 idx=9/19 pm=-550
+[cal] dir=-1 idx=9/19 pm=-550 t=91939 vbat=5407 rpmL=-131 rpmR=-134 ctL=170058 ctR=176487
+[cal] dir=-1 idx=9/19 pm=-550 t=92039 vbat=5407 rpmL=-134 rpmR=-131 ctL=169766 ctR=176198
+[cal] dir=-1 idx=9/19 pm=-550 t=92139 vbat=5407 rpmL=-134 rpmR=-131 ctL=169474 ctR=175907
+[cal] dir=-1 idx=9/19 pm=-550 t=92239 vbat=5407 rpmL=-131 rpmR=-131 ctL=169182 ctR=175618
+[cal] dir=-1 idx=9/19 pm=-550 t=92339 vbat=5407 rpmL=-134 rpmR=-129 ctL=168890 ctR=175328
+[cal] dir=-1 idx=9/19 pm=-550 t=92439 vbat=5407 rpmL=-136 rpmR=-131 ctL=168597 ctR=175038
+[cal] dir=-1 idx=9/19 pm=-550 t=92539 vbat=5407 rpmL=-131 rpmR=-131 ctL=168304 ctR=174748
+[cal] dir=-1 idx=9/19 pm=-550 t=92639 vbat=5407 rpmL=-131 rpmR=-131 ctL=168012 ctR=174458
+[cal] dir=-1 idx=9/19 pm=-550 t=92739 vbat=5407 rpmL=-136 rpmR=-131 ctL=167720 ctR=174168
+[cal] dir=-1 idx=9/19 pm=-550 t=92839 vbat=5407 rpmL=-131 rpmR=-131 ctL=167428 ctR=173878
+[cal] step dir=-1 idx=10/19 pm=-600
+[cal] dir=-1 idx=10/19 pm=-600 t=93439 vbat=5407 rpmL=-145 rpmR=-145 ctL=165547 ctR=172012
+[cal] dir=-1 idx=10/19 pm=-600 t=93539 vbat=5407 rpmL=-145 rpmR=-143 ctL=165228 ctR=171695
+[cal] dir=-1 idx=10/19 pm=-600 t=93639 vbat=5407 rpmL=-145 rpmR=-145 ctL=164908 ctR=171379
+[cal] dir=-1 idx=10/19 pm=-600 t=93739 vbat=5407 rpmL=-143 rpmR=-143 ctL=164588 ctR=171062
+[cal] dir=-1 idx=10/19 pm=-600 t=93839 vbat=5407 rpmL=-145 rpmR=-143 ctL=164269 ctR=170745
+[cal] dir=-1 idx=10/19 pm=-600 t=93939 vbat=5407 rpmL=-145 rpmR=-143 ctL=163949 ctR=170428
+[cal] dir=-1 idx=10/19 pm=-600 t=94039 vbat=5407 rpmL=-145 rpmR=-145 ctL=163630 ctR=170111
+[cal] dir=-1 idx=10/19 pm=-600 t=94139 vbat=5407 rpmL=-145 rpmR=-143 ctL=163310 ctR=169795
+[cal] dir=-1 idx=10/19 pm=-600 t=94239 vbat=5407 rpmL=-145 rpmR=-145 ctL=162990 ctR=169478
+[cal] dir=-1 idx=10/19 pm=-600 t=94339 vbat=5407 rpmL=-145 rpmR=-143 ctL=162670 ctR=169161
+[cal] step dir=-1 idx=11/19 pm=-650
+[cal] dir=-1 idx=11/19 pm=-650 t=94939 vbat=5407 rpmL=-159 rpmR=-156 ctL=160626 ctR=167133
+[cal] dir=-1 idx=11/19 pm=-650 t=95039 vbat=5407 rpmL=-159 rpmR=-154 ctL=160278 ctR=166789
+[cal] dir=-1 idx=11/19 pm=-650 t=95139 vbat=5407 rpmL=-159 rpmR=-156 ctL=159931 ctR=166445
+[cal] dir=-1 idx=11/19 pm=-650 t=95239 vbat=5407 rpmL=-156 rpmR=-154 ctL=159584 ctR=166101
+[cal] dir=-1 idx=11/19 pm=-650 t=95339 vbat=5407 rpmL=-159 rpmR=-156 ctL=159236 ctR=165758
+[cal] dir=-1 idx=11/19 pm=-650 t=95439 vbat=5407 rpmL=-156 rpmR=-156 ctL=158888 ctR=165414
+[cal] dir=-1 idx=11/19 pm=-650 t=95539 vbat=5407 rpmL=-154 rpmR=-156 ctL=158542 ctR=165070
+[cal] dir=-1 idx=11/19 pm=-650 t=95639 vbat=5407 rpmL=-156 rpmR=-156 ctL=158194 ctR=164726
+[cal] dir=-1 idx=11/19 pm=-650 t=95739 vbat=5407 rpmL=-156 rpmR=-156 ctL=157846 ctR=164382
+[cal] dir=-1 idx=11/19 pm=-650 t=95839 vbat=5407 rpmL=-156 rpmR=-159 ctL=157500 ctR=164037
+[cal] step dir=-1 idx=12/19 pm=-700
+[cal] dir=-1 idx=12/19 pm=-700 t=96439 vbat=5407 rpmL=-170 rpmR=-170 ctL=155288 ctR=161848
+[cal] dir=-1 idx=12/19 pm=-700 t=96539 vbat=5407 rpmL=-170 rpmR=-168 ctL=154913 ctR=161477
+[cal] dir=-1 idx=12/19 pm=-700 t=96639 vbat=5407 rpmL=-170 rpmR=-168 ctL=154538 ctR=161106
+[cal] dir=-1 idx=12/19 pm=-700 t=96739 vbat=5407 rpmL=-170 rpmR=-168 ctL=154164 ctR=160735
+[cal] dir=-1 idx=12/19 pm=-700 t=96839 vbat=5407 rpmL=-170 rpmR=-170 ctL=153788 ctR=160364
+[cal] dir=-1 idx=12/19 pm=-700 t=96939 vbat=5407 rpmL=-170 rpmR=-168 ctL=153414 ctR=159994
+[cal] dir=-1 idx=12/19 pm=-700 t=97039 vbat=5407 rpmL=-170 rpmR=-170 ctL=153040 ctR=159623
+[cal] dir=-1 idx=12/19 pm=-700 t=97139 vbat=5407 rpmL=-170 rpmR=-168 ctL=152664 ctR=159252
+[cal] dir=-1 idx=12/19 pm=-700 t=97239 vbat=5407 rpmL=-170 rpmR=-168 ctL=152290 ctR=158882
+[cal] dir=-1 idx=12/19 pm=-700 t=97339 vbat=5407 rpmL=-170 rpmR=-168 ctL=151914 ctR=158511
+[cal] step dir=-1 idx=13/19 pm=-750
+[cal] dir=-1 idx=13/19 pm=-750 t=97939 vbat=5407 rpmL=-181 rpmR=-179 ctL=149542 ctR=156162
+[cal] dir=-1 idx=13/19 pm=-750 t=98039 vbat=5407 rpmL=-181 rpmR=-179 ctL=149140 ctR=155765
+[cal] dir=-1 idx=13/19 pm=-750 t=98139 vbat=5407 rpmL=-181 rpmR=-179 ctL=148738 ctR=155368
+[cal] dir=-1 idx=13/19 pm=-750 t=98239 vbat=5407 rpmL=-184 rpmR=-181 ctL=148336 ctR=154970
+[cal] dir=-1 idx=13/19 pm=-750 t=98339 vbat=5407 rpmL=-181 rpmR=-179 ctL=147936 ctR=154573
+[cal] dir=-1 idx=13/19 pm=-750 t=98439 vbat=5407 rpmL=-181 rpmR=-179 ctL=147534 ctR=154176
+[cal] dir=-1 idx=13/19 pm=-750 t=98539 vbat=5407 rpmL=-181 rpmR=-181 ctL=147132 ctR=153778
+[cal] dir=-1 idx=13/19 pm=-750 t=98639 vbat=5407 rpmL=-184 rpmR=-179 ctL=146730 ctR=153381
+[cal] dir=-1 idx=13/19 pm=-750 t=98739 vbat=5407 rpmL=-184 rpmR=-181 ctL=146328 ctR=152983
+[cal] dir=-1 idx=13/19 pm=-750 t=98839 vbat=5407 rpmL=-181 rpmR=-181 ctL=145927 ctR=152586
+[cal] step dir=-1 idx=14/19 pm=-800
+[cal] dir=-1 idx=14/19 pm=-800 t=99439 vbat=5407 rpmL=-195 rpmR=-193 ctL=143391 ctR=150078
+[cal] dir=-1 idx=14/19 pm=-800 t=99539 vbat=5407 rpmL=-193 rpmR=-193 ctL=142962 ctR=149654
+[cal] dir=-1 idx=14/19 pm=-800 t=99639 vbat=5407 rpmL=-195 rpmR=-193 ctL=142533 ctR=149230
+[cal] dir=-1 idx=14/19 pm=-800 t=99739 vbat=5407 rpmL=-193 rpmR=-193 ctL=142104 ctR=148806
+[cal] dir=-1 idx=14/19 pm=-800 t=99839 vbat=5407 rpmL=-195 rpmR=-190 ctL=141676 ctR=148382
+[cal] dir=-1 idx=14/19 pm=-800 t=99939 vbat=5407 rpmL=-195 rpmR=-190 ctL=141246 ctR=147958
+[cal] dir=-1 idx=14/19 pm=-800 t=100039 vbat=5407 rpmL=-195 rpmR=-193 ctL=140818 ctR=147534
+[cal] dir=-1 idx=14/19 pm=-800 t=100139 vbat=5407 rpmL=-195 rpmR=-193 ctL=140388 ctR=147110
+[cal] dir=-1 idx=14/19 pm=-800 t=100239 vbat=5407 rpmL=-193 rpmR=-193 ctL=139959 ctR=146686
+[cal] dir=-1 idx=14/19 pm=-800 t=100339 vbat=5407 rpmL=-195 rpmR=-193 ctL=139530 ctR=146262
+[cal] step dir=-1 idx=15/19 pm=-850
+[cal] dir=-1 idx=15/19 pm=-850 t=100939 vbat=5407 rpmL=-206 rpmR=-204 ctL=136834 ctR=143594
+[cal] dir=-1 idx=15/19 pm=-850 t=101039 vbat=5407 rpmL=-209 rpmR=-204 ctL=136378 ctR=143143
+[cal] dir=-1 idx=15/19 pm=-850 t=101139 vbat=5407 rpmL=-206 rpmR=-206 ctL=135923 ctR=142692
+[cal] dir=-1 idx=15/19 pm=-850 t=101239 vbat=5407 rpmL=-206 rpmR=-204 ctL=135468 ctR=142242
+[cal] dir=-1 idx=15/19 pm=-850 t=101339 vbat=5407 rpmL=-204 rpmR=-204 ctL=135012 ctR=141791
+[cal] dir=-1 idx=15/19 pm=-850 t=101439 vbat=5407 rpmL=-209 rpmR=-204 ctL=134556 ctR=141340
+[cal] dir=-1 idx=15/19 pm=-850 t=101539 vbat=5407 rpmL=-209 rpmR=-206 ctL=134102 ctR=140889
+[cal] dir=-1 idx=15/19 pm=-850 t=101639 vbat=5407 rpmL=-206 rpmR=-204 ctL=133646 ctR=140438
+[cal] dir=-1 idx=15/19 pm=-850 t=101739 vbat=5407 rpmL=-206 rpmR=-204 ctL=133191 ctR=139988
+[cal] dir=-1 idx=15/19 pm=-850 t=101839 vbat=5407 rpmL=-206 rpmR=-204 ctL=132736 ctR=139537
+[cal] step dir=-1 idx=16/19 pm=-900
+[cal] dir=-1 idx=16/19 pm=-900 t=102439 vbat=5407 rpmL=-220 rpmR=-218 ctL=129888 ctR=136712
+[cal] dir=-1 idx=16/19 pm=-900 t=102539 vbat=5407 rpmL=-218 rpmR=-215 ctL=129407 ctR=136235
+[cal] dir=-1 idx=16/19 pm=-900 t=102639 vbat=5407 rpmL=-218 rpmR=-215 ctL=128926 ctR=135758
+[cal] dir=-1 idx=16/19 pm=-900 t=102739 vbat=5407 rpmL=-218 rpmR=-215 ctL=128446 ctR=135281
+[cal] dir=-1 idx=16/19 pm=-900 t=102839 vbat=5407 rpmL=-218 rpmR=-215 ctL=127964 ctR=134804
+[cal] dir=-1 idx=16/19 pm=-900 t=102939 vbat=5407 rpmL=-218 rpmR=-218 ctL=127484 ctR=134327
+[cal] dir=-1 idx=16/19 pm=-900 t=103039 vbat=5407 rpmL=-218 rpmR=-215 ctL=127002 ctR=133850
+[cal] dir=-1 idx=16/19 pm=-900 t=103139 vbat=5407 rpmL=-220 rpmR=-215 ctL=126522 ctR=133373
+[cal] dir=-1 idx=16/19 pm=-900 t=103239 vbat=5407 rpmL=-218 rpmR=-218 ctL=126040 ctR=132896
+[cal] dir=-1 idx=16/19 pm=-900 t=103339 vbat=5407 rpmL=-218 rpmR=-215 ctL=125559 ctR=132418
+[cal] step dir=-1 idx=17/19 pm=-950
+[cal] dir=-1 idx=17/19 pm=-950 t=103939 vbat=5407 rpmL=-231 rpmR=-227 ctL=122554 ctR=129434
+[cal] dir=-1 idx=17/19 pm=-950 t=104039 vbat=5407 rpmL=-229 rpmR=-229 ctL=122046 ctR=128931
+[cal] dir=-1 idx=17/19 pm=-950 t=104139 vbat=5407 rpmL=-229 rpmR=-229 ctL=121539 ctR=128427
+[cal] dir=-1 idx=17/19 pm=-950 t=104239 vbat=5407 rpmL=-229 rpmR=-229 ctL=121032 ctR=127924
+[cal] dir=-1 idx=17/19 pm=-950 t=104339 vbat=5407 rpmL=-229 rpmR=-229 ctL=120524 ctR=127420
+[cal] dir=-1 idx=17/19 pm=-950 t=104439 vbat=5407 rpmL=-229 rpmR=-229 ctL=120018 ctR=126917
+[cal] dir=-1 idx=17/19 pm=-950 t=104539 vbat=5407 rpmL=-229 rpmR=-229 ctL=119510 ctR=126413
+[cal] dir=-1 idx=17/19 pm=-950 t=104639 vbat=5407 rpmL=-231 rpmR=-229 ctL=119002 ctR=125909
+[cal] dir=-1 idx=17/19 pm=-950 t=104739 vbat=5407 rpmL=-229 rpmR=-229 ctL=118496 ctR=125406
+[cal] dir=-1 idx=17/19 pm=-950 t=104839 vbat=5407 rpmL=-231 rpmR=-227 ctL=117988 ctR=124902
+[cal] step dir=-1 idx=18/19 pm=-1000
+[cal] dir=-1 idx=18/19 pm=-1000 t=105439 vbat=5407 rpmL=-245 rpmR=-243 ctL=114814 ctR=121748
+[cal] dir=-1 idx=18/19 pm=-1000 t=105539 vbat=5407 rpmL=-245 rpmR=-240 ctL=114278 ctR=121215
+[cal] dir=-1 idx=18/19 pm=-1000 t=105639 vbat=5407 rpmL=-245 rpmR=-243 ctL=113742 ctR=120682
+[cal] dir=-1 idx=18/19 pm=-1000 t=105739 vbat=5407 rpmL=-243 rpmR=-243 ctL=113206 ctR=120150
+[cal] dir=-1 idx=18/19 pm=-1000 t=105839 vbat=5407 rpmL=-245 rpmR=-240 ctL=112670 ctR=119617
+[cal] dir=-1 idx=18/19 pm=-1000 t=105939 vbat=5407 rpmL=-243 rpmR=-240 ctL=112134 ctR=119085
+[cal] dir=-1 idx=18/19 pm=-1000 t=106039 vbat=5407 rpmL=-243 rpmR=-240 ctL=111597 ctR=118552
+[cal] dir=-1 idx=18/19 pm=-1000 t=106139 vbat=5407 rpmL=-245 rpmR=-243 ctL=111060 ctR=118019
+[cal] dir=-1 idx=18/19 pm=-1000 t=106239 vbat=5407 rpmL=-245 rpmR=-243 ctL=110524 ctR=117486
+[cal] dir=-1 idx=18/19 pm=-1000 t=106339 vbat=5407 rpmL=-243 rpmR=-243 ctL=109988 ctR=116954
+[cal] done dir=-1
+[cal] calibration complete
