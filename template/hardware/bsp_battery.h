@@ -77,6 +77,14 @@ extern "C" {
 #endif
 
 /**
+ * LOW_STOP 连续确认拍数。电池采样 100 Hz，20 拍约 200 ms。
+ * 用于过滤上电首拍 ADC / 分压电容 / 接插件瞬态，不让单次低采样直接锁死急停态。
+ */
+#ifndef BSP_BATTERY_LOW_STOP_DEBOUNCE_SAMPLES
+#define BSP_BATTERY_LOW_STOP_DEBOUNCE_SAMPLES    (20u)
+#endif
+
+/**
  * 断线 / 未接电池 阈值（毫伏）。
  *   PB24 浮空 / 电池分压电路未焊 / 电池未插的情况下，ADC raw ≈ 0，换算电池
  *   mv 约 0~几百，会被旧版 classify() 判为 `LOW_STOP` 触发 app_safety 急停，

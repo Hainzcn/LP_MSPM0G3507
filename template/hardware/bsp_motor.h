@@ -11,7 +11,6 @@
  *      Stage 2.3 起从 J12 迁来；2-Pin Mode = X4 解码），16-bit 计数器
  *      （LOAD = 65535）由 `bsp_motor_update()` 软件扩为 32-bit
  *   ─ 右轮编码器：PA12 双边沿中断 + PA13 ISR 内电平判方向（X2 解码）
- *   ─ 板载按键 S1：PA18，双沿中断 + 上电空闲电平判定 + 80 ms 软件去抖
  *
  * 接口约定：
  *   ─ 速度命令使用 permille（千分比），范围 [-1000, 1000]，
@@ -69,6 +68,24 @@ extern "C" {
 #define BSP_MOTOR_RIGHT_DECODE_X                   (4)
 #endif
 
+/**
+ * 右路正转静态补偿：校准显示同一 PWM 下右路正转约快 5.22%，因此在 BSP 层
+ * 对右路正向命令统一按 95% 输出。放在 BSP 而非 app 层，避免 demo / balance /
+ * K230 等不同业务路径漏补偿或重复造轮子。
+ */
+#ifndef BSP_MOTOR_RIGHT_FORWARD_SCALE_X1000
+#define BSP_MOTOR_RIGHT_FORWARD_SCALE_X1000        (950)
+#endif
+
+/**
+ * 电机静摩擦死区补偿（permille）。
+ * 标定数据：±20/±40‰ 均不转，±60‰ 已稳定起转，因此取中点 50‰。
+ * BSP 会把非零逻辑命令映射到 [±50‰, 当前 PWM limit]，0 仍保持 coast。
+ */
+#ifndef BSP_MOTOR_DEADZONE_COMP_PM
+#define BSP_MOTOR_DEADZONE_COMP_PM                (50)
+#endif
+
 #define BSP_MOTOR_LEFT_COUNTS_PER_OUTPUT_REV \
     (BSP_MOTOR_GB370_GEAR_RATIO * BSP_MOTOR_GB370_HALL_PPR * BSP_MOTOR_LEFT_DECODE_X)
 #define BSP_MOTOR_RIGHT_COUNTS_PER_OUTPUT_REV \
@@ -83,11 +100,6 @@ extern "C" {
  */
 #ifndef BSP_MOTOR_SPEED_WINDOW_MS
 #define BSP_MOTOR_SPEED_WINDOW_MS                  (20u)
-#endif
-
-/** S1 按键去抖窗口（毫秒） */
-#ifndef BSP_MOTOR_BTN_DEBOUNCE_MS
-#define BSP_MOTOR_BTN_DEBOUNCE_MS                  (80u)
 #endif
 
 /**
@@ -137,9 +149,9 @@ typedef struct {
 /* ========================================================================== */
 
 /**
- * @brief 初始化电机驱动：清零计数与命令、STBY 拉低（待机）、注册 PA12/PA18 中断。
+ * @brief 初始化电机驱动：清零计数与命令、STBY 拉低（待机）、注册右编码器中断。
  *
- * 前提：`bsp_gpio_init()` 已配好 AIN/BIN/STBY/PA12/PA13/PA18 的方向与上拉，
+ * 前提：`bsp_gpio_init()` 已配好 AIN/BIN/STBY/PA12/PA13 的方向与上拉，
  *       `SYSCFG_DL_init()` 已配好 PWM (TIMA0) 与左轮 QEI (TIMG8)。
  */
 void bsp_motor_init(void);
@@ -275,37 +287,11 @@ uint32_t bsp_motor_get_enc_irq_count(void);
 /** @return ISR 雪崩兜底当前是否激活（剩余抑制毫秒数 > 0 即为 true）。 */
 bool bsp_motor_enc_irq_is_quenched(void);
 
-/** 读取 S1(PA18) 中断命中次数，用于诊断 J8 / GROUP1 / polarity 配置。 */
-uint32_t bsp_motor_get_button_irq_count(void);
-
-/** 读取 S1(PA18) 轮询兜底命中次数；非 0 说明按键可读但中断路径未命中。 */
-uint32_t bsp_motor_get_button_poll_count(void);
-
-/** 按上电空闲电平判定 S1 当前是否处于按下态。 */
-bool bsp_motor_is_start_button_active(void);
-
-/** 直接读取 S1(PA18) 原始电平：true = 高，false = 低。 */
-bool bsp_motor_get_start_button_raw_level(void);
-
 /**
  * @brief 同时清零左右轮累计计数与速度差分窗口。常用于上电校准、调试归零、
  *        或上一次跑车结束后准备下一次试跑。不影响命令与 STBY 状态。
  */
 void bsp_motor_reset_encoders(void);
-
-/* ========================================================================== */
-/* 板载按键 S1：上一次按下后是否有未消费的请求？                                 */
-/* ========================================================================== */
-
-/**
- * @brief 取出 S1(PA18) 按键置位的 toggle 请求。读后自动清零。
- *        典型用法：业务层把它当作 "急刹 / 启动 / 模式切换" 的边沿事件源。
- *        中断与轮询兜底都会按上电空闲电平判定按下态，并做 80 ms 软件去抖。
- *
- * @return true  = 上一次调用以来 S1 至少按下过一次
- *         false = 没有新事件
- */
-bool bsp_motor_consume_toggle_request(void);
 
 #ifdef __cplusplus
 }

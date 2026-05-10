@@ -1,6 +1,6 @@
 /**
  * @file    app_safety.h
- * @brief   安全状态机：跌倒检测 + 电池保护 + S1 重启
+ * @brief   安全状态机：跌倒检测 + 电池保护。
  *
  * 这是一个"被动监督"模块：业务循环（如平衡环）每拍调一次 `app_safety_tick()`，
  * 函数内部判定是否触发跌倒 / 低压并主动操作电机 BSP（brake_pulse_ms / enable(false)
@@ -15,10 +15,6 @@
  *   ─ 低压急停：`bsp_battery_get_state() == LOW_STOP`
  *      → 立即 `bsp_motor_brake_pulse_ms(120)` + `bsp_motor_enable(false)`
  *      → 进 LOW_BAT_STOP 态，业务侧 PID 应停止
- *   ─ 重启：S1 toggle 请求（`bsp_motor_consume_toggle_request()`）
- *      → 任意 STOP / FALLEN 态都能恢复到 ARMED
- *      → 但若当前仍为 LOW_STOP（低压未恢复），重启会被拒绝并蜂鸣告警
- *
  * 状态优先级（高优先抢占低优先）：
  *   LOW_BAT_STOP  >  FALLEN  >  LOW_BAT_WARN  >  ARMED
  *
@@ -63,12 +59,28 @@ extern "C" {
 #define APP_SAFETY_LOW_BAT_PWM_LIMIT            (600u)
 #endif
 
+/**
+ * 上电姿态静默窗口：MS901M 刚启动时可能先吐出未稳定姿态，窗口内不做跌倒判定。
+ * 平衡层会同步禁止 PID 输出，等待姿态模块稳定后再允许驱动。
+ */
+#ifndef APP_SAFETY_STARTUP_FALL_MUTE_MS
+#define APP_SAFETY_STARTUP_FALL_MUTE_MS         (2500u)
+#endif
+
+/**
+ * 跌倒确认拍数。app_balance 以 100 Hz 调用 safety，5 拍约 50 ms。
+ * 目的不是延迟真正跌倒保护，而是滤掉 MS901M 初始化期 / 串口解析期的单帧毛刺。
+ */
+#ifndef APP_SAFETY_FALL_DEBOUNCE_TICKS
+#define APP_SAFETY_FALL_DEBOUNCE_TICKS          (5u)
+#endif
+
 /* ========================================================================== */
 /* 状态机                                                                       */
 /* ========================================================================== */
 
 typedef enum {
-    APP_SAFETY_DISARMED     = 0,    /* 上电默认；S1 一键启动前主动停在此态 */
+    APP_SAFETY_DISARMED     = 0,    /* 上电默认；业务侧 arm 前主动停在此态 */
     APP_SAFETY_ARMED        = 1,    /* 正常允许电机输出 */
     APP_SAFETY_LOW_BAT_WARN = 2,    /* 电池告警；电机已被限速但仍可走 */
     APP_SAFETY_FALLEN       = 3,    /* 跌倒；电机已急停 */
@@ -92,7 +104,7 @@ typedef struct {
 void app_safety_init(void);
 
 /**
- * @brief 业务侧"准备就绪"指令（如已完成 IMU 校准、对零位）。等价于按一次 S1：
+ * @brief 业务侧"准备就绪"指令（如已完成 IMU 校准、对零位）：
  *        若当前不在 LOW_BAT_STOP，把状态切到 ARMED 并 `bsp_motor_enable(true)`。
  *        若当前是 LOW_BAT_STOP，调用被拒绝，返回 false（业务侧应蜂鸣告警）。
  *
@@ -109,10 +121,9 @@ void app_safety_disarm(void);
 
 /**
  * @brief 业务循环周期任务（建议 100~1000 Hz 调用）：
- *          ① 读 S1 toggle 请求 → 在 STOP / FALLEN 态尝试自动 arm
- *          ② 读 attitude → 触发跌倒检测
- *          ③ 读 bsp_battery_get_state() → 触发低压告警 / 急停
- *          ④ 按状态优先级合成最终输出，更新 PWM 限幅 / brake / enable
+ *          ① 读 attitude → 触发跌倒检测
+ *          ② 读 bsp_battery_get_state() → 触发低压告警 / 急停
+ *          ③ 按状态优先级合成最终输出，更新 PWM 限幅 / brake / enable
  *
  *        本函数会主动调 BSP（不需要业务再去 set_output 时担心权限），
  *        业务层应在进入 ARMED 时才允许 PID 输出（调用方根据返回值判断）。
@@ -127,6 +138,9 @@ app_safety_state_t app_safety_get_state(void);
 
 /** 当前状态是否允许业务下发电机命令（仅 ARMED / LOW_BAT_WARN 返回 true） */
 bool app_safety_can_drive(void);
+
+/** 上电姿态静默窗口是否仍在生效。true 时业务层应保持电机无输出。 */
+bool app_safety_is_startup_grace_active(void);
 
 #ifdef __cplusplus
 }

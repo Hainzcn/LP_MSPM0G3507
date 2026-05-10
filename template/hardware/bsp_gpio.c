@@ -6,7 +6,7 @@
  * 拆分为 3 个静态函数让阅读更清晰：
  *   · init_outputs_porta() —— PORTA 的 6 路输出
  *   · init_outputs_portb() —— PORTB 的 4 路输出
- *   · init_inputs_porta()  —— PORTA 的 3 路输入（START_BTN / ENC_R_A / ENC_R_B）
+ *   · init_inputs_porta()  —— PORTA 的 2 路输入（ENC_R_A / ENC_R_B）
  *
  * Stage 1.5 后 PORTB 不再有业务输入：IMU_INT(PB4) 随 MPU6050→MS901M 切换下线。
  *
@@ -57,7 +57,7 @@ static void init_outputs_portb(void)
 }
 
 /* -------------------------------------------------------------------------- */
-/* PORTA 输入：START_BTN / ENC_R_A / ENC_R_B —— 全部启用内部上拉 + 施密特滞回 */
+/* PORTA 输入：ENC_R_A / ENC_R_B —— 全部启用内部上拉 + 施密特滞回 */
 /*                                                                              */
 /*   设计要点（Stage 2.4 / 2026-05-09 修复）：                                  */
 /*     原版本 ENC_R_A/B 用 RESISTOR_NONE + HYSTERESIS_DISABLE，引脚悬空时（如 */
@@ -77,10 +77,6 @@ static void init_outputs_portb(void)
 /* -------------------------------------------------------------------------- */
 static void init_inputs_porta(void)
 {
-    DL_GPIO_initDigitalInputFeatures(BSP_START_BTN_IOMUX,
-        DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_PULL_UP,
-        DL_GPIO_HYSTERESIS_ENABLE, DL_GPIO_WAKEUP_DISABLE);
-
     DL_GPIO_initDigitalInputFeatures(BSP_ENC_R_A_IOMUX,
         DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_PULL_UP,
         DL_GPIO_HYSTERESIS_ENABLE, DL_GPIO_WAKEUP_DISABLE);

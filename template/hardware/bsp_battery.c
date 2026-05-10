@@ -20,6 +20,7 @@ typedef struct {
     uint32_t            ema_mv;          /* 滤波后电池电压（mV） */
     uint16_t            last_raw;        /* 最近一次 ADC 原始值 */
     uint8_t             primed;          /* 0 = 还没攒够第一次有效采样 */
+    uint8_t             low_stop_count;  /* 连续低于 STOP 的确认计数 */
     bsp_battery_state_t state;
 } batt_state_t;
 
@@ -116,6 +117,7 @@ void bsp_battery_init(void)
     s_batt.ema_mv   = 0u;
     s_batt.last_raw = 0u;
     s_batt.primed   = 0u;
+    s_batt.low_stop_count = 0u;
     s_batt.state    = BSP_BATT_STATE_UNKNOWN;
 
     /* 清掉可能的脏中断标志，触发首次转换；下次 update 调用时即可读到结果 */
@@ -164,7 +166,19 @@ void bsp_battery_update(void)
         s_batt.ema_mv = ((a * mv_now) + ((256u - a) * s_batt.ema_mv) + 128u) >> 8;
     }
 
-    s_batt.state = classify(s_batt.ema_mv, s_batt.state);
+    bsp_battery_state_t next = classify(s_batt.ema_mv, s_batt.state);
+    if ((next == BSP_BATT_STATE_LOW_STOP) &&
+        (s_batt.state != BSP_BATT_STATE_LOW_STOP)) {
+        if (s_batt.low_stop_count < BSP_BATTERY_LOW_STOP_DEBOUNCE_SAMPLES) {
+            s_batt.low_stop_count++;
+        }
+        if (s_batt.low_stop_count < BSP_BATTERY_LOW_STOP_DEBOUNCE_SAMPLES) {
+            next = BSP_BATT_STATE_LOW_WARN;
+        }
+    } else if (next != BSP_BATT_STATE_LOW_STOP) {
+        s_batt.low_stop_count = 0u;
+    }
+    s_batt.state = next;
 
     trigger_conversion();   /* 为下一拍预备 */
 }

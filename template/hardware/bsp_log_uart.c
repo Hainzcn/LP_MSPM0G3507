@@ -20,11 +20,29 @@
 #include <stdio.h>
 #include <time.h>
 
+#define LOG_RX_BUF_SIZE   128u
+#define LOG_RX_BUF_MASK   (LOG_RX_BUF_SIZE - 1u)
+
+static volatile uint8_t  s_log_rx_buf[LOG_RX_BUF_SIZE];
+static volatile uint16_t s_log_rx_head = 0u;
+static volatile uint16_t s_log_rx_tail = 0u;
+static volatile uint32_t s_log_rx_overrun = 0u;
+
 void bsp_log_uart_init(void)
 {
-    /* SysConfig 已配好引脚 / 波特率 / 时钟 / FIFO；这里只清一次 IT 防误触发 */
+    /* SysConfig 已配好引脚 / 波特率 / 时钟。日志口也承担调参命令输入，
+     * 必须用 RX 中断环缓冲，否则主循环被 printf 阻塞发送时容易漏掉短命令。 */
+    s_log_rx_head = 0u;
+    s_log_rx_tail = 0u;
+    s_log_rx_overrun = 0u;
+
     DL_UART_Main_clearInterruptStatus(UART_LOG_INST,
         DL_UART_MAIN_INTERRUPT_RX | DL_UART_MAIN_INTERRUPT_TX);
+    DL_UART_Main_enableInterrupt(UART_LOG_INST, DL_UART_MAIN_INTERRUPT_RX);
+    DL_UART_Main_enableFIFOs(UART_LOG_INST);
+    DL_UART_Main_setRXFIFOThreshold(UART_LOG_INST, DL_UART_MAIN_RX_FIFO_LEVEL_ONE_ENTRY);
+    DL_UART_Main_setTXFIFOThreshold(UART_LOG_INST, DL_UART_TX_FIFO_LEVEL_1_2_EMPTY);
+    NVIC_EnableIRQ(UART_LOG_INST_INT_IRQN);
 }
 
 void bsp_log_uart_write(const uint8_t *data, size_t len)
@@ -45,11 +63,38 @@ bool bsp_log_uart_read_byte(uint8_t *out)
     if (out == NULL) {
         return false;
     }
-    if (DL_UART_Main_isRXFIFOEmpty(UART_LOG_INST)) {
+    if (s_log_rx_head == s_log_rx_tail) {
         return false;
     }
-    *out = DL_UART_Main_receiveData(UART_LOG_INST);
+    *out = s_log_rx_buf[s_log_rx_tail];
+    s_log_rx_tail = (uint16_t)((s_log_rx_tail + 1u) & LOG_RX_BUF_MASK);
     return true;
+}
+
+uint32_t bsp_log_uart_rx_overrun(void)
+{
+    return s_log_rx_overrun;
+}
+
+void UART0_IRQHandler(void)
+{
+    switch (DL_UART_Main_getPendingInterrupt(UART_LOG_INST)) {
+        case DL_UART_MAIN_IIDX_RX: {
+            while (DL_UART_Main_isRXFIFOEmpty(UART_LOG_INST) == false) {
+                uint8_t b = (uint8_t)DL_UART_Main_receiveData(UART_LOG_INST);
+                uint16_t next = (uint16_t)((s_log_rx_head + 1u) & LOG_RX_BUF_MASK);
+                if (next == s_log_rx_tail) {
+                    s_log_rx_overrun++;
+                } else {
+                    s_log_rx_buf[s_log_rx_head] = b;
+                    s_log_rx_head = next;
+                }
+            }
+            break;
+        }
+        default:
+            break;
+    }
 }
 
 /* ---------------------------------------------------------------------------

@@ -30,7 +30,7 @@ void bsp_imu_uart_init(void)
      * 设外设 IMSC，**不**会自动 NVIC_EnableIRQ；NVIC 必须由用户代码显式开启，
      * 否则 RX FIFO 半满中断永远不会进入 CPU 调度（症状：MS901M 数据流到达
      * 串口但 UART3_IRQHandler 永不触发，环缓 head 不前进，ms901m_has_attitude
-     * 永 false → main 500 ms 超时 fatal）。
+     * 永 false → main 等待窗口超时 fatal）。
      *
      * 参考对照：bsp_k230_uart.c:bsp_k230_uart_init() 同样显式调用
      * NVIC_EnableIRQ(DMA_INT_IRQn) 才能让 K230 RX DMA 完成中断生效。 */

@@ -179,7 +179,7 @@
 | 全局 | STBY = PB0 |
 | PWM 频率 | 20 kHz |
 | PWM 分辨率 | 1000（10-bit 等效），由 TIMA0 LOAD = (40 MHz / 20 kHz) - 1 = 1999 决定 |
-| 死区 | 不需要（TB6612 内部已处理） |
+| 死区 | 实测电机静摩擦死区约 `50‰`：`±40‰` 不转、`±60‰` 起转；由 `BSP_MOTOR_DEADZONE_COMP_PM` 在 BSP 层补偿 |
 | 真值表 | AIN1/AIN2 = 10 → 正转；01 → 反转；11 → 短路刹车；00 → 滑行 |
 
 ### 4.3 IMU ATK-MS901M（Stage 1.5 替代原 MPU6050；Stage 1.6 引脚集中化重排）
@@ -194,9 +194,9 @@
 | 帧格式 | `0x55 0x55 <ID> <LEN> <DATA[LEN]> <CHECKSUM>`，`CHECKSUM = sum(除最后字节) & 0xFF` |
 | 帧组（默认上报） | 0x01 姿态 (RPY) / 0x02 四元数 / 0x03 raw gyro+accel / 0x04 mag+temp / 0x05 baro+alt |
 | 量程 | ±4 g / ±2000 dps（与上位机默认一致；与 [ms901m.h](../../template/middle/ms901m.h) 中 `ms901m_init(4, 2000)` 强绑定） |
-| 主控用法 | UART RX 中断 → 256 B 环缓 → 主循环 1 kHz drain → `ms901m_feed_bytes` 状态机 → `ms901m_get_snapshot`；姿态 pitch 直接采纳 0x01 帧（板载 EKF 输出），不在主控做互补滤波 |
+| 主控用法 | UART RX 中断 → 256 B 环缓 → 主循环 1 kHz drain → `ms901m_feed_bytes` 状态机 → `ms901m_get_snapshot`；解析层保留 0x01 姿态帧（板载 EKF 输出），装车平衡层再做轻量一阶低通 |
 | 期望频率 | MS901M 默认 200 Hz 主动上报；主控 1 kHz drain 足够覆盖 |
-| 上电检测 | 上电后 500 ms 内若仍未收到 0x01 → 视为 IMU 未在线，主控进入 fatal handler（LED_R 常亮 + 蜂鸣 200 ms + 死循环） |
+| 上电检测 | 上电后 3000 ms 内若仍未收到 0x01 → 视为 IMU 未在线，主控进入 fatal handler（LED_R 常亮 + 蜂鸣 200 ms + 死循环）；进入装车模式后另有 2500 ms 姿态静默窗口 |
 | 上拉电阻 | UART 不需要外部上拉电阻（区别于原 I²C 方案）——这是切换到 MS901M 的核心动机 |
 | 接线（装车）| MS901M VCC → 主控 5V；MS901M GND → 共地；MS901M TX → 主控 PB13（J2.26）；MS901M RX → 主控 PB12（J4.32）；交叉接（模块 TX 接主控 RX）|
 
@@ -259,7 +259,6 @@
 | LED_STATUS_R | PB26 | OUT | 1（起播红灯，提示未就绪）| — | `BSP_LED_R_*` | bsp_gpio_init 设 SET，IMU init 完成后由 main.c 拉低 |
 | LED_STATUS_G | PB27 | OUT | 0 | — | `BSP_LED_G_*` | 5 Hz 心跳由 app_telemetry 翻转 |
 | LED_STATUS_B | PB22 | OUT | 0 | — | `BSP_LED_B_*` | 留作业务状态指示 |
-| START_BTN | PA18 | IN | — | 下降沿（**阶段 1 不开 NVIC**） | `BSP_START_BTN_*` | S1 按下时拉低，bsp_gpio_init 已配内部上拉 |
 | ENC_R_A | PA12 | IN | — | 双边沿（**阶段 1 不开 NVIC**） | `BSP_ENC_R_A_*` | 右编码器 A 相，阶段 2 拟开中断或升 CAPTURE |
 | ENC_R_B | PA13 | IN | — | 无中断 | `BSP_ENC_R_B_*` | 右编码器 B 相，ISR 内读电平判方向 |
 

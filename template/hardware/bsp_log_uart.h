@@ -31,6 +31,9 @@ void bsp_log_uart_write(const uint8_t *data, size_t len);
  */
 bool bsp_log_uart_read_byte(uint8_t *out);
 
+/** @return XDS-UART RX 环形缓冲溢出次数；非 0 表示 PC 命令发送过快或主循环未及时消费。 */
+uint32_t bsp_log_uart_rx_overrun(void);
+
 #ifdef __cplusplus
 }
 #endif

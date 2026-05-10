@@ -6,13 +6,13 @@
  *   · 本工程所有业务 GPIO 都不走 SysConfig（详见 EIDE/LP_MSPM0G3507.syscfg 头部注释、
  *     docs/TaskLog/Stage1-IMU-BT-Telemetry.md §8.5）。
  *   · 引脚分配真值表见 docs/TaskLog/Stage0-PinAllocation.md，本头文件中
- *     14 个 BSP_*_PORT/PIN/IOMUX 宏与该表保持一致；任何引脚改动必须先改文档。
+ *     12 个 BSP_*_PORT/PIN/IOMUX 宏与该表保持一致；任何引脚改动必须先改文档。
  *   · IOMUX_PINCMxx 与 DL_GPIO_PIN_<bit> 直接来自 ti/devices/msp/peripherals/
  *     hw_iomux.h、ti/driverlib/dl_gpio.h，不依赖 SysConfig 生成的 _PIN/_PORT 宏。
  *   · `bsp_gpio_init()` 由 `main.c` 在 `SYSCFG_DL_init()` 之后立即调用。
  *
  * 注：阶段 1 仅业务上需要 LED / BUZZER / STBY / 电机方向（默认低，安全态），
- *     输入引脚（START_BTN / ENC_R_* / IMU_INT）只做方向与上拉配置，
+ *     输入引脚（ENC_R_* / IMU_INT）只做方向与上拉配置，
  *     **不**开 NVIC 中断——中断由阶段 2 各自模块在使用前 enable，避免
  *     当前阶段没有 ISR 时触发默认 fault handler。
  */
@@ -72,14 +72,6 @@
 #define BSP_BIN2_PIN            DL_GPIO_PIN_27
 #define BSP_BIN2_IOMUX          IOMUX_PINCM60
 
-/* ========================================================================== */
-/* 输入 —— 阶段 1 仅配方向，不开 NVIC                                          */
-/* ========================================================================== */
-/* S1 一键启动键，板载，下拉到 GND（低有效），需内部上拉 */
-#define BSP_START_BTN_PORT      GPIOA
-#define BSP_START_BTN_PIN       DL_GPIO_PIN_18
-#define BSP_START_BTN_IOMUX     IOMUX_PINCM40
-
 /* 右编码器 A 相 —— 阶段 2 拟双边沿中断 / capture，阶段 1 只配方向 */
 #define BSP_ENC_R_A_PORT        GPIOA
 #define BSP_ENC_R_A_PIN         DL_GPIO_PIN_12
@@ -100,10 +92,10 @@
 /**
  * @brief 初始化所有业务 GPIO（输出 + 输入），由 main.c 在 SYSCFG_DL_init() 之后
  *        立即调用。函数内部：
- *          ① 11 个输出 pin 全部 initDigitalOutput()；
+ *          ① 10 个输出 pin 全部 initDigitalOutput()；
  *          ② STBY/AIN/BIN/BUZZER/LASER_EN/LED_G/LED_B 初值 CLEARED；
  *          ③ LED_R 初值 SET（开机点亮一颗，便于直观判断 init 完成）；
- *          ④ 3 个输入 pin initDigitalInputFeatures()，仅 START_BTN 上拉；
+ *          ④ 2 个输入 pin initDigitalInputFeatures()，均启用上拉；
  *          ⑤ **不**调用 NVIC_EnableIRQ —— 中断在阶段 2 各模块按需开启。
  *
  *  Stage 1.5 后：原 PORTB 输入 IMU_INT(PB4) 已下线，PORTB 不再有业务输入。

@@ -12,9 +12,11 @@
 >
 > **🧭 Stage 2.5 电机测速 / 同步 / 校准服务（2026-05-10，本文 v0.7）**：当前 `main.c` 已接入 [app\_motor\_demo.c](../../template/app/app_motor_demo.c) 作为上电默认入口，保留 `app_balance_run()` 装车入口但暂不依赖板载 S2（LaunchPad `SW2/J15` 默认落在 PA16，与 TB6612 `AIN2` 冲突）。本轮把演示固件从“固定 PWM + S1 正反转”升级为“XDS-UART 可调目标转速 + S1 急刹/启动 + 双轮同步闭环 + PWM 扫描校准”：① 目标转速按 GB370 额定 `620 rpm` 钳位并换算 PWM，串口 `+/-` 或数字回车可在线调速；② S1 改为急刹/启动，PA18 采用双沿 + 上电空闲电平判定 + 轮询兜底，并在日志打印 `raw/active/btn_irq/btn_poll` 诊断；③ 右编码器反馈符号翻正，使同向命令下左右计数同号；④ 新增 `app_motor_demo_set_sync_*` / `get_sync_diag` 双轮同步服务，默认 50 ms 一拍，按 `rpmR-rpmL` 做 PI 差分 PWM 补偿；⑤ 新增 `app_motor_demo_cal_*` PWM 正/反向扫描校准，串口 `c` 触发、`x` 中止，输出 `[cal]` 稳态样本；⑥ 新增 [tools/motor\_calib](../../tools/motor_calib/README.md) 离线分析脚本，用日志拟合 PWM→RPM 与绕组/电压塌陷误差模型。详见 §3.6 / §4.4 / §5 / §6.4 / §9 修订历史 v0.7。
 >
-> **📐 Stage 2.6 右电机前馈补偿（2026-05-10，本文 v0.8）**：基于 Stage 2.5 校准扫描数据（正向 PWM→RPM 线性拟合：左 `0.2432 rpm/‰`、右 `0.2559 rpm/‰`，斜率比 **1.0522**），确认 TB6612 B 通道比 A 通道在正转方向固有快 **5.22%**，反转方向两路近乎对称（仅 0.83% 差异）。根本原因为 TB6612 两路 H 桥正向导通路径参数差异，非绕组不对称（方向相关性可排除纯绕组因素）。修复策略：在 `apply_motor_output` 中对右轮 PWM 施加与 `target_pm` 成比例的**静态前馈**（仅正转方向）：`right_pm = target_pm - ff_pm - correction_pm`，`ff_pm = target_pm × FF_RIGHT_X1000 / 1000`。配套将同步环 Kp 从 8 降到 4、Ki 从 1 降到 0、限幅从 350 收到 200，使 PI 专注处理瞬态与反转残差、不再追赶稳态积分。新增 UART 命令 `f<value><Enter>` 运行时调前馈系数、`p` 命令输出 `ff_pm / ff_x1000` 诊断字段。详见 §3.6 / §4.4 / §5 / §6.4 / §9 修订历史 v0.8。
+> **📐 Stage 2.6 右电机基础补偿（2026-05-10，本文 v0.8）**：基于 Stage 2.5 校准扫描数据（正向 PWM→RPM 线性拟合：左 `0.2432 rpm/‰`、右 `0.2559 rpm/‰`，斜率比 **1.0522**），确认 TB6612 B 通道比 A 通道在正转方向固有快 **5.22%**，反转方向两路近乎对称（仅 0.83% 差异）。该偏差属于硬件通道基础特性，应在 `bsp_motor` 统一补偿，而不是分散在 demo / balance 应用层。当前 `commit_right()` 对右路正向命令固定乘 `BSP_MOTOR_RIGHT_FORWARD_SCALE_X1000=950`，所有业务路径共用；同步环只处理剩余动态误差。
 >
-> 文档定位：本轮交付 `TB6612 + GB370` 电机驱动演示固件，覆盖 PWM 输出、速度反馈、双轮同步、校准扫描、编码器角度累计、板载 `S1(PA18)` 按键诊断，以及 XDS 调试串口日志 / 命令控制。Stage 2.1 起底层 BSP 升级为"平衡环 / 速度环可直接接入"的完备模块；Stage 2.2 起补齐安全 + 电池 + PID + 平衡骨架，业务层一行 `set_balance_gains` 即可启动整定；Stage 2.3 起左编码器从 J12 迁到 BP，全车不再依赖未焊跳线排针。
+> **🧭 Stage 2.7 默认装车模式入口调整（2026-05-10，本文 v0.9）**：`main.c` 上电默认进入 `app_balance_run()` 装车模式；仅在装车模式收到 UART `t` / `test` 后切入 `app_motor_demo_run()` 电机演示模式。电机演示中继续使用 UART `l` / `load` 返回装车模式。板载 S1/S2 已退出业务定义。
+>
+> 文档定位：本轮交付 `TB6612 + GB370` 电机驱动演示固件，覆盖 PWM 输出、速度反馈、双轮同步、校准扫描、编码器角度累计，以及 XDS 调试串口日志 / 命令控制。默认入口为装车模式，电机演示仅作为 UART 触发的测试模式。Stage 2.1 起底层 BSP 升级为"平衡环 / 速度环可直接接入"的完备模块；Stage 2.2 起补齐安全 + 电池 + PID + 平衡骨架，业务层一行 `set_balance_gains` 即可启动整定；Stage 2.3 起左编码器从 J12 迁到 BP，全车不再依赖未焊跳线排针。
 >
 > 关联文件：
 >
@@ -31,14 +33,14 @@
 
 | # | 需求                                                          | 落地结果                                                                 |
 | - | ----------------------------------------------------------- | -------------------------------------------------------------------- |
-| 1 | `S1(PA18)` 电机演示人工控制                                      | Stage 2.0 为正反转切换；Stage 2.5 改为急刹 / 启动，并增加 `raw/active/irq/poll` 诊断 |
+| 1 | 模式切换与电机演示人工控制                                             | 上电默认装车模式；UART `t` / `test` 进入电机演示，UART `l` / `load` 返回装车模式 |
 | 2 | 接收编码器信号并主动更新角度到调试串口                                         | 已完成，左轮硬件 QEI，右轮 GPIO 中断，100 ms 打印一次                                  |
 | 3 | 形成任务日志文档并给出接线指导                                             | 已完成，见本文 §7                                                           |
 | 4 | **【Stage 2.1】驱动 API 重写**：把"够 demo 跑"的最小集升级为平衡环 / 速度环可直接接入 | 已完成，新增 13 个 API（单轮 / brake / invert / pwm\_limit / 编码器原始 / 速度反馈），见 §3 |
 | 5 | **【Stage 2.2】上车准备**：补齐右轮 X4 解码 + 脉冲刹车 + 电池保护 + 安全状态机 + 通用 PID + 平衡骨架 | 已完成，新增 4 个模块 8 个文件（`bsp_battery` / `pid` / `app_safety` / `app_balance`），见 §3.5 + §4.3 |
-| 6 | **【Stage 2.5】电机测速调试入口**：上电进入 demo，可串口调速 / 急刹 / 启动 / 查看同步诊断 | 已完成，XDS-UART 命令 `+/-`、`<rpm><Enter>`、`b/r/s/p/c/x/h`，见 §5 |
+| 6 | **【Stage 2.5】电机测速调试入口**：装车模式下按需切入 demo，可串口调速 / 急刹 / 启动 / 查看同步诊断 / 返回装车模式 | 已完成，装车模式 UART `t/test` 进入 demo；demo 支持 `+/-`、`<rpm><Enter>`、`b/r/s/p/c/x/l/load/h`，见 §5 |
 | 7 | **【Stage 2.5】双轮同步 + 校准扫描**：解决左右电机绕组差异 / 电源电压不足导致同 PWM 不同速 | 已完成，新增同步 PI 差分补偿、`[cal]` 扫描日志和 `tools/motor_calib` 离线拟合，见 §3.6 / §6.4 |
-| 8 | **【Stage 2.6】右电机静态前馈补偿**：消除 TB6612 B 通道固有 5.22% 速度差，去掉积分抖动 | 已完成，`APP_MOTOR_SYNC_FF_RIGHT_X1000=50`，运行时 `f<val>` 可调，见 §3.6 / §4.4 |
+| 8 | **【Stage 2.6】右路基础 5% 补偿**：消除 TB6612 B 通道固有 5.22% 正转速度差，避免各应用层重复补偿 | 已完成，`BSP_MOTOR_RIGHT_FORWARD_SCALE_X1000=950` 写入 `bsp_motor`，见 §4.1 |
 
 ***
 
@@ -51,14 +53,12 @@
   - `TIMA0` 双路 PWM 占空比设置（PWM 频率 ≈ 20 kHz，超出人耳）
   - 左轮 `TIMG8 QEI` mode 3 (X4) 16-bit 计数扩展为 32-bit
   - 右轮 `PA12/PA13` 双边沿中断（X4 解码），反馈符号按实车安装翻正
-  - `S1(PA18)` 双沿中断 + 上电空闲电平判定 + 轮询兜底 + 80 ms 去抖
   - 速度差分窗口（默认 20 ms ⇒ 50 Hz 速度反馈刷新率）
 - [`app_motor_demo.c`](../../template/app/app_motor_demo.c) 负责演示 / 调试逻辑：
   - 上电后默认两轮同向运行，目标转速按 `620 rpm` 满量程换算为 PWM
-  - XDS-UART 支持在线调速、急刹 / 启动、同步开关、同步诊断、校准扫描
-  - S1 作为急刹 / 启动入口；PA18 若板级无电平变化，日志会通过 `raw/active/btn_irq/btn_poll` 暴露
+  - XDS-UART 支持在线调速、急刹 / 启动、同步开关、同步诊断、校准扫描、进入装车模式
   - 双轮同步服务默认开启，按 `rpmR-rpmL` 做左右 PWM 差分补偿
-  - 每 `100 ms` 打印累计计数、角度、rpm、同步误差、左右命令与按键诊断
+  - 每 `100 ms` 打印累计计数、角度、rpm、同步误差与左右命令
   - 每 `250 ms` 翻转一次绿灯，作为循环心跳
 
 ### 2.2 编码器策略
@@ -122,7 +122,6 @@ Cortex-M0+ 没有 FPU，软浮点单次乘除 ≈ 50~150 cycles。原 `bsp_motor
 | **反馈快照**        | `bsp_motor_get_feedback(*fb)`                                                      | 业务节拍（10~100 ms 典型）                | 一次性快照 10 个字段，含浮点角度 / dps / rpm      |
 | **编码器原始**       | `bsp_motor_get_left_count()` / `bsp_motor_get_right_count()`                       | 速度环 / 里程估算                        | 单字段原子读，省去整结构体                       |
 |                 | `bsp_motor_reset_encoders()`                                                       | 上电校准 / 试跑前                        | 同步清零 count + 速度窗口；不影响 STBY 与命令      |
-| **S1 toggle**   | `bsp_motor_consume_toggle_request()`                                               | 主循环                               | 边沿事件源，读后清零；ISR 内已做 80 ms 去抖         |
 
 ### 3.2 反馈结构体 `bsp_motor_feedback_t`（Stage 2.1 扩展）
 
@@ -214,14 +213,14 @@ for (;;) {
 | `app_safety_init()` | 状态置 DISARMED + 电机 brake + STBY 关 |
 | `app_safety_arm()` | 切到 ARMED + 电机 enable；`LOW_BAT_STOP` 态拒绝并返回 false |
 | `app_safety_disarm()` | 主动切 DISARMED + brake_pulse + enable(false)（人工急停） |
-| `app_safety_tick(*att)` | 周期任务（建议 100 Hz）：S1 重启 + 跌倒检测 + 电池状态合成；返回最新状态 |
+| `app_safety_tick(*att)` | 周期任务（建议 100 Hz）：跌倒检测 + 电池状态合成；返回最新状态 |
 | `app_safety_get_state()` | 仅查询状态枚举 |
 | `app_safety_can_drive()` | 当前是否允许业务下发电机命令（`ARMED` 或 `LOW_BAT_WARN`） |
 
 **5 态状态机**：`DISARMED` / `ARMED` / `LOW_BAT_WARN` / `FALLEN` / `LOW_BAT_STOP`，优先级 `LOW_BAT_STOP > FALLEN > LOW_BAT_WARN > ARMED`。
 **跌倒判据**：`|pitch_deg| > APP_SAFETY_FALL_PITCH_DEG`（默认 60°，与 Overview §4.1 一致）→ `bsp_motor_brake_pulse_ms(80)` + `bsp_motor_enable(false)`。
-**低压急停**：`bsp_battery_get_state() == LOW_STOP` → `bsp_motor_brake_pulse_ms(120)` + `enable(false)`，且**不会自动恢复**：电池升回 LOW_WARN 后状态降到 LOW_BAT_WARN 但保持 STBY 关，必须人工按 S1 重启。
-**S1 二态重启**：DISARMED / FALLEN / LOW_BAT_WARN 按 S1 → ARMED；ARMED 按 S1 → DISARMED（人工急停）。
+**低压急停**：`bsp_battery_get_state() == LOW_STOP` → `bsp_motor_brake_pulse_ms(120)` + `enable(false)`，且**不会自动恢复**：电池升回 LOW_WARN 后状态降到 LOW_BAT_WARN 但保持 STBY 关，必须由上层再次调用 `app_safety_arm()`。
+**重启策略**：DISARMED / FALLEN / LOW_BAT_WARN 仅由上层显式 `app_safety_arm()` 恢复；低压未恢复时 arm 会被拒绝。
 
 #### 3.5.4 `app_balance.{c,h}` —— 平衡车双环骨架
 
@@ -230,14 +229,18 @@ for (;;) {
 | `app_balance_init()` | 初始化两路 PID（输出限幅 + D 滤波系数已写入；增益默认 0） |
 | `app_balance_reset()` | 清两路 PID 内部历史，不动增益 |
 | `app_balance_set_pitch_offset(deg)` | 设置静态俯仰零点（让车在地面"标准直立"姿态下读 1 s 平均 pitch 填入） |
+| `app_balance_set_pitch_inverted(bool)` | 软件翻转俯仰角极性；MS901M 前后装反时无需改解析层 |
+| `app_balance_get_pitch_inverted()` | 查询当前俯仰角是否启用软件翻转 |
 | `app_balance_set_balance_gains(kp, ki, kd)` | 平衡内环：输入 tilt 误差 deg，输出 PWM permille |
 | `app_balance_set_speed_gains(kp, ki, kd)` | 速度外环：输入 cps 误差，输出目标 tilt deg |
 | `app_balance_set_yaw_kp(kp_yaw)` | 转向开环系数（`left -= yaw·k, right += yaw·k`） |
-| `app_balance_step(*att, *cmd)` | 跑一拍控制环（建议 100 Hz）：safety tick + 速度外环 + 平衡内环 + 转向叠加 + `bsp_motor_set_output()` |
-| `app_balance_get_diag(*out)` | 拷贝本拍诊断（target_tilt / pitch_meas / pwm_out / left/right_cmd / speed / driving） |
+| `app_balance_step(*att, *cmd)` | 跑一拍控制环（建议 100 Hz）：safety tick + 速度外环 + 平衡内环 + 转向叠加 + 直行双轮同步 + `bsp_motor_set_output()` |
+| `app_balance_get_diag(*out)` | 拷贝本拍诊断（target_tilt / pitch_meas / pwm_out / sync / left/right_cmd / speed / driving） |
 
-**控制结构**：速度外环（输入 cps，输出目标 tilt deg，限幅 ±10°） → 平衡内环（输入 tilt 误差 deg，输出 PWM permille，限幅 ±1000）→ 转向叠加 → `bsp_motor_set_output(left, right)`。
+**控制结构**：速度外环（输入 cps，输出目标 tilt deg，限幅 ±10°） → 平衡内环（输入 tilt 误差 deg，输出 PWM permille，限幅 ±1000）→ 转向叠加 + 直行双轮同步 → `bsp_motor_set_output(left, right)`。
 **与 safety 集成**：`app_balance_step()` 内部调 `app_safety_tick()`；不允许驱动时**不调** `set_output`（保留 safety 的 brake 命令），同时 reset PID 历史。
+**姿态极性与滤波**：`pitch_meas = LPF((raw_pitch - offset) * pitch_sign)`；当前装车传感器前后方向与车体坐标相反，默认 `APP_BALANCE_PITCH_INVERT=1`。MS901M 解析层保留模块 EKF 原始输出，`app_balance` 额外使用 `APP_BALANCE_PITCH_LPF_ALPHA` 做主控侧一阶低通，抑制单帧抖动。
+**直行同步补偿**：仅 `target_yaw_pm == 0` 时启用，误差 `sync_error_cps = right_speed_cps - left_speed_cps`，输出 `sync_correction_pm` 并按 `left += sync / right -= sync` 叠加；转向时自动暂停并清积分。
 **默认增益 0** = 上电不会自己动；业务侧调 `set_*_gains()` 注入后才工作；详细整定流程见 [`app_balance.h`](../../template/app/app_balance.h) 顶部注释（4 步级联 PID 整定法）。
 
 ### 3.6 `app_motor_demo` 调速 / 同步 / 校准服务（Stage 2.5）
@@ -254,24 +257,15 @@ Stage 2.5 后，演示层不再只是固定 PWM 验证，而是承担电机空�
 | `app_motor_demo_cal_start()` | 启动 PWM 正向 + 反向扫描校准；自动关闭同步环并输出 `[cal]` 日志 |
 | `app_motor_demo_cal_abort()` | 中止校准，立即 brake 并恢复 demo 状态 |
 | `app_motor_demo_cal_is_active()` | 查询校准状态，主循环据此跳过普通同步 / `[enc]` 日志 |
-| `app_motor_demo_set_ff_right(ff_x1000)` | 设置右电机正转前馈系数（× 1000，范围 0~200）；默认 `50`（= 5.0%） |
-| `app_motor_demo_get_ff_right()` | 读取当前右电机前馈系数 |
-
-**`app_motor_demo_sync_diag_t` 结构体新增字段（Stage 2.6）**：
-
-| 新增字段 | 类型 | 含义 |
-| --- | --- | --- |
-| `ff_pm` | int16 | 本拍实际施加给右轮的前馈量（permille）；正转时 = `target_pm × ff_x1000 / 1000`，反转时恒为 0 |
-
 同步环策略（Stage 2.6 更新）：
 
 ```
 left_pm  = target_pm + correction_pm
-right_pm = target_pm − ff_pm − correction_pm
+right_pm = target_pm − correction_pm
 ```
 
-- **前馈项**（Stage 2.6 新增）：仅在正转（`target_pm > 0`）时生效。校准数据显示正转斜率比 = `0.2559 / 0.2432 = 1.0522`，右轮需少输出约 `4.96% ≈ 50‰/1000‰`；反转时两路接近对称（差 0.83%），前馈归零由 PI 处理残差。
-- **PI 项**：50 ms 一拍读取 `left/right_speed_rpm`，误差 = `rpmR - rpmL`。前馈接管稳态后 PI 仅处理瞬态，默认 `Kp=4 pm/rpm`、`Ki=0`、`corr` 限幅 `±200‰`（均比 Stage 2.5 下调）。
+- **基础补偿**（Stage 2.6 更新）：右路正转 5% 补偿已下沉到 `bsp_motor` 的 `commit_right()`，demo 同步环不再重复施加静态补偿。
+- **PI 项**：50 ms 一拍读取 `left/right_speed_rpm`，误差 = `rpmR - rpmL`。底层基础补偿接管稳态后 PI 仅处理瞬态，默认 `Kp=4 pm/rpm`、`Ki=0`、`corr` 限幅 `±200‰`（均比 Stage 2.5 下调）。
 
 校准扫描策略：串口 `c` 触发后，PWM 从 `100‰` 到 `1000‰` 以 `50‰` 步进，每档驻留 `1500 ms`，跳过前 `500 ms` 瞬态后每 `100 ms` 输出一次 `[cal]` 稳态样本；正向完成后自动做负向扫描。扫描完成后恢复进入校准前的同步开关和目标 PWM。离线脚本见 [tools/motor_calib](../../tools/motor_calib/README.md)。
 
@@ -288,10 +282,11 @@ right_pm = target_pm − ff_pm − correction_pm
 | `BSP_MOTOR_GB370_HALL_PPR`              | `11`     | 电机霍尔每转脉冲数（A 相单沿）                                                                |
 | `BSP_MOTOR_LEFT_DECODE_X`               | `4`      | 左轮 QEI mode 3 = X4 解码                                                           |
 | `BSP_MOTOR_RIGHT_DECODE_X`              | **`4` (Stage 2.2)** | 右轮 PA12 + PA13 都开双沿中断 = X4 解码，与左轮分辨率一致；可 `-DBSP_MOTOR_RIGHT_DECODE_X=2` 退回 X2 减半 ISR 频次 |
+| `BSP_MOTOR_RIGHT_FORWARD_SCALE_X1000`   | `950`    | 右路正向基础补偿；同一逻辑 PWM 下右路实测约快 5.22%，BSP 层统一按 95% 输出 |
+| `BSP_MOTOR_DEADZONE_COMP_PM`            | `50`     | 电机静摩擦死区补偿；标定显示 ±40‰ 不转、±60‰ 起转，取中点 50‰ 作为非零命令最小物理输出 |
 | `BSP_MOTOR_LEFT_COUNTS_PER_OUTPUT_REV`  | `1320`   | 自动 = `GEAR × PPR × LEFT_DECODE_X`                                               |
 | `BSP_MOTOR_RIGHT_COUNTS_PER_OUTPUT_REV` | **`1320` (Stage 2.2)** | 自动 = `GEAR × PPR × RIGHT_DECODE_X`；X4 后与左轮一致，平衡环左右系数可共用                              |
 | `BSP_MOTOR_SPEED_WINDOW_MS`             | `20`     | 速度差分窗口；50 Hz 速度刷新率，最低分辨速度 ≈ 2.3 rpm（左）/ 4.6 rpm（右）。支持 `-D` 命令行覆盖              |
-| `BSP_MOTOR_BTN_DEBOUNCE_MS`             | `80`     | S1(PA18) 软件去抖窗口。支持 `-D` 命令行覆盖                                                   |
 | `APP_MOTOR_DEMO_MAX_RPM`                | `620`    | Stage 2.5：GB370 空载最大转速，用于目标 rpm → PWM permille 换算（[`app_motor_demo.c`](../../template/app/app_motor_demo.c) 内宏） |
 | `APP_MOTOR_DEMO_DEFAULT_RPM`            | `620`    | Stage 2.5：demo 上电默认目标转速 |
 
@@ -320,19 +315,30 @@ right_pm = target_pm − ff_pm − correction_pm
 | | `BSP_BATTERY_WARN_MV` | `9500` | 低压告警阈值；触发 PWM 限幅降级 |
 | | `BSP_BATTERY_STOP_MV` | `9000` | 安全停车阈值；触发 brake + STBY |
 | | `BSP_BATTERY_HYSTERESIS_MV` | `200` | 状态回滞，避免阈值附近抖动 |
+| | `BSP_BATTERY_LOW_STOP_DEBOUNCE_SAMPLES` | `20` | LOW_STOP 连续确认拍数；100 Hz 下约 200 ms，滤掉上电 ADC 瞬态 |
 | **app_safety** | `APP_SAFETY_FALL_PITCH_DEG` | `60.0f` | 跌倒判据；与 Overview §4.1 一致 |
 | | `APP_SAFETY_FALL_BRAKE_MS` | `80` | 跌倒急停 brake 脉冲毫秒 |
 | | `APP_SAFETY_LOW_BAT_BRAKE_MS` | `120` | 低压急停 brake 脉冲毫秒 |
 | | `APP_SAFETY_LOW_BAT_PWM_LIMIT` | `600` | 低压告警时 PWM 限幅（permille） |
+| | `APP_SAFETY_STARTUP_FALL_MUTE_MS` | `2500` | 上电姿态静默窗口；等待 MS901M 输出稳定，期间不判跌倒且平衡层不输出 PID |
+| | `APP_SAFETY_FALL_DEBOUNCE_TICKS` | `5` | 跌倒连续确认拍数；100 Hz 下约 50 ms，滤掉单帧姿态毛刺 |
 | **app_balance** | `APP_BALANCE_CONTROL_PERIOD_MS` | `10` | 控制环周期；100 Hz |
 | | `APP_BALANCE_MAX_TILT_DEG` | `10.0f` | 速度外环输出"目标 tilt"绝对值上限 |
 | | `APP_BALANCE_MAX_PWM_PERMILLE` | `1000` | 平衡内环输出 PWM 绝对值上限 |
 | | `APP_BALANCE_SPEED_D_FILTER_ALPHA` | `0.20f` | 速度外环 D 项 EMA；速度环噪声大需要滤 |
 | | `APP_BALANCE_BALANCE_D_FILTER_ALPHA` | `0.10f` | 平衡内环 D 项 EMA |
+| | `APP_BALANCE_PITCH_LPF_ALPHA` | `0.35f` | 俯仰角一阶低通系数；100 Hz 下约 18 ms 时间常数，兼顾去抖与低延迟 |
+| | `APP_BALANCE_PITCH_INVERT` | `1` | 俯仰角软件极性翻转；MS901M 前后装反时保持默认，安装方向正确可设 0 |
+| | `APP_BALANCE_SYNC_ENABLED` | `1` | 装车模式直行双轮同步服务开关 |
+| | `APP_BALANCE_SYNC_KP_PM_PER_CPS_X100` | `20` | 同步比例项，0.01 permille/cps；20≈0.20 pm/cps≈4.4 pm/rpm |
+| | `APP_BALANCE_SYNC_KI_PM_PER_CPS_STEP_X100` | `0` | 同步积分项，默认关闭以避免与平衡内环互相积分 |
+| | `APP_BALANCE_SYNC_MAX_CORRECTION_PM` | `200` | 同步差分补偿限幅 |
+| | `APP_BALANCE_SYNC_MIN_DRIVE_PM` | `30` | 同步环启用的最小平衡输出；PID 输出接近 0 时暂停，平衡环发力时恢复同步以抑制原地打转 |
 
 > **运行时可调（无需重新编译）**：
 >
 > - `app_balance_set_pitch_offset(deg)` — 静态俯仰零点
+> - `app_balance_set_pitch_inverted(bool)` — 运行时切换俯仰角软件翻转
 > - `app_balance_set_balance_gains(kp, ki, kd)` — 平衡内环增益
 > - `app_balance_set_speed_gains(kp, ki, kd)` — 速度外环增益
 > - `app_balance_set_yaw_kp(k)` — 转向开环系数
@@ -346,13 +352,12 @@ right_pm = target_pm − ff_pm − correction_pm
 | --- | --- | --- |
 | `APP_MOTOR_DEMO_MAX_RPM` | `620` | GB370 最大空载转速；所有目标 rpm 按此钳位并映射到 `1000‰` PWM |
 | `APP_MOTOR_DEMO_DEFAULT_RPM` | `620` | 上电默认目标转速 |
-| `APP_MOTOR_DEMO_BRAKE_MS` | `120` | S1 / 串口 `b` 急刹脉冲时长 |
+| `APP_MOTOR_DEMO_BRAKE_MS` | `120` | 串口 `b` 急刹脉冲时长 |
 | `APP_MOTOR_DEMO_RPM_STEP` | `20` | 串口 `+/-` 每次调速步进 |
 | `APP_MOTOR_SYNC_PERIOD_MS` | `50` | 双轮同步闭环周期 |
-| `APP_MOTOR_SYNC_KP_PM_PER_RPM` | **`4`**（Stage 2.6 由 8 降低） | 同步环比例项：前馈接管稳态后 PI 仅需处理瞬态，增益可减半 |
-| `APP_MOTOR_SYNC_KI_PM_PER_RPM_STEP` | **`0`**（Stage 2.6 由 1 降低） | 同步环积分项：前馈已消除稳态误差，积分暂关闭 |
+| `APP_MOTOR_SYNC_KP_PM_PER_RPM` | **`4`**（Stage 2.6 由 8 降低） | 同步环比例项：底层基础补偿接管稳态后 PI 仅需处理瞬态，增益可减半 |
+| `APP_MOTOR_SYNC_KI_PM_PER_RPM_STEP` | **`0`**（Stage 2.6 由 1 降低） | 同步环积分项：底层基础补偿已消除主要稳态误差，积分暂关闭 |
 | `APP_MOTOR_SYNC_MAX_CORRECTION_PM` | **`200`**（Stage 2.6 由 350 收窄） | 同步差分补偿限幅 |
-| `APP_MOTOR_SYNC_FF_RIGHT_X1000` | `50` | Stage 2.6：右电机正转前馈系数 × 1000；校准值 ≈ 50（= 5.0%），运行时可由串口 `f<val>` 覆盖 |
 | `APP_MOTOR_CAL_PWM_START_PM` | `100` | 校准扫描起始 PWM |
 | `APP_MOTOR_CAL_PWM_END_PM` | `1000` | 校准扫描终止 PWM |
 | `APP_MOTOR_CAL_PWM_STEP_PM` | `50` | 校准扫描步进 |
@@ -364,34 +369,43 @@ right_pm = target_pm − ff_pm − correction_pm
 
 ## 5. 串口日志格式
 
-日志与控制命令均走板载 `UART0(XDS-UART)`，波特率保持 `115200 8N1`。Stage 2.5 后，PC 端串口终端既能看日志，也能直接发送单字符命令调试电机。
+日志与控制命令均走板载 `UART0(XDS-UART)`，波特率保持 `115200 8N1`。`bsp_log_uart` 使用 UART0 RX 中断环形缓冲接收命令，避免 `printf` 阻塞发送期间丢失短命令。当前主程序上电默认进入装车模式；在装车模式发送 `t` 或 `test` 切入电机演示模式（`t` 单字符立即生效，`test` 兼容回车），演示模式发送 `l` 或 `load` 返回装车模式。
 
-上电后会看到：
+上电进入装车模式后会看到：
 
 ```text
 [boot] MSPM0G3507 stage2.2 balance baseline start (MS901M / TB6612 / safety)
 [boot] MS901M attitude online, ...
+[boot] entering load balance mode; inject PID by UART
+[pid] UART commands: bp <kp_x1000> <ki_x1000> <kd_x1000>, sp <kp_x1000> <ki_x1000> <kd_x1000>, pid?, pid0, t/test
+[pid] example: bp 8000 0 1000 ; sp 2 0 0
+[pid] balance kp=+0.000 ki=+0.000 kd=+0.000 (x1000=0,0,0)
+[pid] speed kp=+0.000 ki=+0.000 kd=+0.000 (x1000=0,0,0)
+[hb] t=1s state=ARMED pitch=... inv=1 tilt*=... pwm=... syncErr=... syncCorr=... log_ovr=0 ...
+```
+
+进入电机演示模式后会看到：
+
+```text
 [boot] stage2 motor demo start
 [boot] target=620rpm pwm=1000/1000 max=620rpm
 [boot] motor sync enabled kp=4 ki=0 maxCorr=200 period=50ms
-[boot] ff_right=50/1000 (5.0% forward feedfwd on right motor)
-[boot] press S1(PA18) to brake/start both motors
-[boot] S2 load-mode request is disabled until its GPIO is rerouted from PA16/AIN2
+[boot] send 'l' or 'load' on UART to enter load balance mode
 [ctrl] UART commands: '+'/'-' step 20rpm, '<rpm><Enter>' set speed, 'b' brake, 'r' run,
        's' sync on/off, 'p' print sync, 'c' calib sweep, 'x' abort calib,
-       'f<val><Enter>' set ff_right (0-200), 'h' help
+       'l'/'load' enter load mode, 'h' help
 ```
 
 运行中每 `100 ms` 输出：
 
 ```text
-[enc] t=1200ms L=158(43.09 deg) R=164(44.73 deg) rpmL=86 rpmR=90 target=620rpm state=run sync=1 err=4 corr=33 cmdL=1000 cmdR=967 btn_irq=0 btn_poll=0 raw=1 active=0
+[enc] t=1200ms L=158(43.09 deg) R=164(44.73 deg) rpmL=86 rpmR=90 target=620rpm state=run sync=1 err=4 corr=33 cmdL=1000 cmdR=967
 ```
 
-`p` 命令输出同步 / 前馈快照（Stage 2.6 新增 `ff_pm / ff_x1000`）：
+`p` 命令输出同步快照：
 
 ```text
-[sync] enabled=1 kp=4 ki=0 maxCorr=200 err=2 corr=8 cmdL=1008 cmdR=942 ff_pm=50 ff_x1000=50
+[ctrl] sync=on err=2 corr=8 cmdL=1008 cmdR=992 kp=4 ki=0
 ```
 
 控制命令：
@@ -403,19 +417,21 @@ right_pm = target_pm − ff_pm − correction_pm
 | `b` | 急刹，执行 `bsp_motor_brake_pulse_ms(APP_MOTOR_DEMO_BRAKE_MS)` |
 | `r` | 启动，恢复当前目标转速输出 |
 | `s` | 开关双轮同步服务 |
-| `p` | 打印同步 + 前馈诊断：`err / corr / cmdL / cmdR / kp / ki / ff_pm / ff_x1000` |
+| `p` | 打印同步诊断：`err / corr / cmdL / cmdR / kp / ki` |
 | `c` | 启动 PWM 校准扫描，输出 `[cal]` 日志 |
 | `x` | 中止校准扫描并急刹 |
-| `f<数字><Enter>` | 运行时设置右电机前馈系数（0~200），例如 `f50` 回车；立即生效 |
+| `l` / `load` | 停止 demo 输出并返回 `true`，由 `main.c` 切入 `app_balance_run()` 装车模式 |
 | `h` / `?` | 打印帮助 |
 
-按下 `S1` 后输出（若 PA18 电气路径有效）：
+装车模式命令：
 
-```text
-[btn] S1 pressed (irq=1 poll=0 raw=0 active=1)
-[btn] S1: brake
-[motor] state=brake target=620rpm pwm=1000/1000
-```
+| 命令 | 行为 |
+| --- | --- |
+| `bp <kp> <ki> <kd>` | 设置平衡内环 PID，参数为 x1000 定点整数；例 `bp 8000 0 1000` = `8.000 / 0 / 1.000` |
+| `sp <kp> <ki> <kd>` | 设置速度外环 PID，参数为 x1000 定点整数；例 `sp 2 0 0` = `0.002 / 0 / 0` |
+| `pid?` | 打印当前平衡环 / 速度环 PID 参数 |
+| `pid0` | 清零两路 PID 增益并 reset 内部状态 |
+| `t` / `test` | 停止装车控制输出并返回 `true`，由 `main.c` 切入电机演示模式 |
 
 校准扫描日志示例：
 
@@ -433,7 +449,6 @@ right_pm = target_pm − ff_pm − correction_pm
 - `deg` 是基于编码器参数换算出的输出轴机械角
 - `rpmL` / `rpmR` 来自 `bsp_motor_feedback_t.left/right_speed_rpm`，窗口由 `BSP_MOTOR_SPEED_WINDOW_MS` 决定
 - `err = rpmR - rpmL`；`corr` 是同步环输出的差分 PWM 补偿；`cmdL/cmdR` 是最终写入 TB6612 的左右 PWM permille
-- `raw/active` 用于 S1 诊断：若按下 S1 时 `raw` 完全不变，说明 PA18 没有被板载按键拉动，软件中断 / 轮询均无法触发
 - 若正反方向和实物相反，**Stage 2.1 起改为运行时调** `bsp_motor_set_invert(invL, invR)`（[`bsp_motor.h`](../../template/hardware/bsp_motor.h)），不必重新编译；该函数返回前会立刻按新极性重发当前命令
 - Stage 2.5 右编码器反馈符号已按实物安装翻正，同向命令下左右计数 / rpm 应同号
 
@@ -461,9 +476,9 @@ right_pm = target_pm − ff_pm − correction_pm
    - 发送 `b`，两轮应急刹；发送 `r`，两轮恢复运行
    - 发送 `180` 回车，日志 `target` 应变成 `180rpm`
    - 发送 `s`，日志 `sync` 应在 `0/1` 间切换；发送 `p` 打印同步诊断
-5. **验 S1 诊断**
-   - 按下 S1 时若 `raw/active` 有变化，应触发急刹 / 启动
-   - 若 `raw` 始终不变，说明 PA18 电气路径未被板载按钮拉动，按键问题按硬件链路排查
+5. **验模式切换**
+   - 上电默认应进入装车模式；发送 `t` 或 `test` 后应切入电机演示
+   - 在电机演示中发送 `l` 或 `load`，应打印 load mode requested，并回到装车模式
 6. **验双轮同步**
    - 在 `620rpm` 目标下观察 `rpmL/rpmR`
    - 若右轮更快，应看到 `err > 0`、`corr > 0`、`cmdR < cmdL`
@@ -491,8 +506,8 @@ right_pm = target_pm − ff_pm − correction_pm
 | --- | --- | --- | --- |
 | 1 | **右轮 X4 解码上线** | 手动拨右轮一圈，对比 `feedback.right_count` 增量 | 一圈应 ≈ 1320 ± 5（与左轮一致）；从 660 升 1320 = X4 已生效 |
 | 2 | **bsp_battery 采样链路** | `bsp_battery_init()` + 100 Hz 调 `bsp_battery_update()`，1 Hz 打印 `get_mv()` / `get_state()` | 12V 满电时显示 ≈ 12000~12700 mV，状态 `NORMAL`；用电源拉到 9.4V 后状态变 `LOW_WARN` |
-| 3 | **app_safety 跌倒触发** | `app_safety_init()` + `arm()`，手动倾斜 IMU > 60° | 状态变 `FALLEN`，电机 STBY 变低；按 S1 后状态回 `ARMED` |
-| 4 | **app_safety 低压急停** | 把 `BSP_BATTERY_STOP_MV` 临时改 11500（高于现实电压），`tick()` | 状态立刻变 `LOW_BAT_STOP`，按 S1 被拒绝 |
+| 3 | **app_safety 跌倒触发** | `app_safety_init()` + `arm()`，手动倾斜 IMU > 60° | 状态变 `FALLEN`，电机 STBY 变低；需由上层再次调用 `app_safety_arm()` 才能恢复 |
+| 4 | **app_safety 低压急停** | 把 `BSP_BATTERY_STOP_MV` 临时改 11500（高于现实电压），连续运行 `tick()` | 约 20 个电池采样确认后变 `LOW_BAT_STOP`，低压未恢复时 `app_safety_arm()` 被拒绝 |
 | 5 | **brake_pulse_ms 自动转 stop** | `bsp_motor_set_output(800,800)` → 1 s 后 `bsp_motor_brake_pulse_ms(80)` | 80 ms 内电机急停，之后转 coast（手拨能转）；不像持续 brake 一直锁住 |
 | 6 | **PID 单元自测**（不上车） | 单跑 `pid_step()` 多个目标，画响应曲线 | 阶跃响应有上升 + 收敛；增益全 0 时输出恒 0；积分饱和后撤回不再继续累加 |
 | 7 | **平衡内环单环（车轮离地）** | `app_balance_set_balance_gains(Kp, 0, Kd)`（小 Kp 起步），手摇车体 | 电机出现"反向纠偏"PWM；从弱到强，找出"反应明显但不振"的最大 Kp |
@@ -507,12 +522,12 @@ right_pm = target_pm − ff_pm − correction_pm
 | 串口调速 | 发送 `100` / `300` / `620` 回车 | `[enc] target=` 随命令变化，`cmdL/cmdR` 随目标变化 |
 | 同步开关 | 发送 `s` 关闭同步，再发送 `s` 打开同步 | `sync=0` 时 `cmdL≈cmdR≈base`；`sync=1` 时出现 `corr/cmdL/cmdR` 差分 |
 | 同步效果 | 在 `620rpm` 下对比同步关闭 / 开启后的 `rpmL/rpmR` | 开启后左右 rpm 差缩小；若振荡，降低 `APP_MOTOR_SYNC_KP_PM_PER_RPM` / `KI` |
-| 急刹 / 启动 | 串口 `b` / `r`，或 S1（若 PA18 电平有效） | `b` 后电机急停；`r` 后恢复当前目标 rpm |
+| 急刹 / 启动 | 串口 `b` / `r` | `b` 后电机急停；`r` 后恢复当前目标 rpm |
+| 电机演示入口 | 装车模式下串口发送 `t` 或 `test` | `app_balance_run()` 返回 `true`，`main.c` 进入 demo |
+| 装车模式入口 | demo 下串口发送 `l` 或 `load` | demo 停止输出，`app_motor_demo_run()` 返回 `true`，`main.c` 回到装车模式 |
 | 校准扫描 | 开启串口日志录制 → 发送 `c` → 等待 `[cal] calibration complete` | 正 / 反向都输出完整 `[cal]` 样本；扫描后恢复原同步配置 |
 | 离线分析 | `python tools/motor_calib/analyze_calib.py calib_run.txt` | 生成聚合统计、PWM→RPM 拟合、误差模型结论和 4 张 PNG 图 |
-| **前馈补偿效果**（Stage 2.6） | 在 `620rpm` 下发送 `p`，对比加前馈前后的 `err / corr` | 前馈 50‰ 生效后，`err` 应接近 0，`corr` ≈ 0；`cmdR ≈ target_pm − ff_pm ≈ 950‰` |
-| **运行时调前馈** | 发送 `f0` 关闭前馈，观察 `err` 是否恢复至约 `+5rpm`；再发 `f50` 恢复 | `err` 随前馈开关正确响应，验证逻辑路径 |
-| **反转方向前馈** | 发送 `b` 后 `r`，改目标为负 rpm（如 `f-1` 实际以反转测）或直接发 `-` 调低后观察 `cmdL/cmdR` | 反转时 `ff_pm` 输出 `0`，`cmdL ≈ cmdR ≈ target_pm + corr`；PI 接管反转残差 |
+| **右路基础补偿效果**（Stage 2.6） | 在 `620rpm` 下发送 `p`，对比补偿前后的 `err / corr` | BSP 右路 95% 补偿生效后，`err` 应接近 0，`corr` ≈ 0；右路物理 PWM 已在底层缩放 |
 
 ***
 
@@ -560,12 +575,11 @@ right_pm = target_pm − ff_pm − correction_pm
 
 | 资源               | 引脚          | LQFP pin | BSP 宏 / 外设                  | 跳线 / 用途                                                                |
 | ---------------- | ----------- | -------- | --------------------------- | ---------------------------------------------------------------------- |
-| `S1`             | `PA18`      | 11       | `BSP_START_BTN_*`           | **`J8` 必须 ON**；Stage 2.5 用作急刹 / 启动，固件按上电空闲电平判定按下态并打印 `raw/active` 诊断 |
 | `XDS-UART TX`    | `PA10`      | 56       | UART_LOG (UART0_TX)         | **`J21` 必须 ON**；XDS-UART 桥到电脑虚拟 COM，调试 `printf` 输出                     |
-| `XDS-UART RX`    | `PA11`      | 57       | UART_LOG (UART0_RX)         | **`J22` 必须 ON**；电脑 → 主控（本演示固件未读，预留串口调参）                                 |
+| `XDS-UART RX`    | `PA11`      | 57       | UART_LOG (UART0_RX)         | **`J22` 必须 ON**；电脑 → 主控，用于 `t/test`、`bp/sp/pid?`、`b/r/c/x/l/load` 等串口命令                       |
 | `LED_R`          | `PB26`      | 28       | `BSP_LED_R_*`               | **`J6` 保留 ON**（RGB-R）；上电默认亮表示未就绪，main.c 后续按需熄灭                          |
 | `LED_G`          | `PB27`      | 29       | `BSP_LED_G_*`               | **`J7` 保留 ON**（RGB-G）；250 ms 翻转作主循环心跳                                  |
-| `LED_B`          | `PB22`      | 21       | `BSP_LED_B_*`               | **`J5` 保留 ON**（RGB-B）；按下 S1 切换方向时翻转一次作提示                                |
+| `LED_B`          | `PB22`      | 21       | `BSP_LED_B_*`               | **`J5` 保留 ON**（RGB-B）；预留业务状态提示                                |
 | `SWDIO`          | `PA19`      | 12       | DEBUGSS                     | **`J101` 13:14 ON**；XDS110 烧录 / 调试，必接                                   |
 | `SWCLK`          | `PA20`      | 13       | DEBUGSS                     | **`J101` 15:16 ON**；同上                                                  |
 
@@ -581,7 +595,6 @@ right_pm = target_pm − ff_pm − correction_pm
 | `J5` | PB22 → RGB-Blue            | **保留 ON**   | LED_B 不亮，无法显示方向切换提示                               |
 | `J6` | PB26 → RGB-Red             | **保留 ON**   | LED_R 不亮，bsp_motor_init 后失去"未就绪"红灯提示              |
 | `J7` | PB27 → RGB-Green           | **保留 ON**   | LED_G 不亮，主循环心跳指示失效                                |
-| `J8` | PA18 → S1 按键 + BSL         | **保留 ON**   | S1 按键无电气连接，bsp_motor_consume_toggle_request 永不触发 |
 | `J12` | PA29 / PA30 / PB14 → QEI 接头  | **OFF / 不再使用**（v0.5） | Stage 2.3 起左编码器迁到 BP J4.34 (PB15) / J4.40 (PB16)，J12 排针出厂未焊不再使用；PA29/PA30/PB14 进入预留池 |
 | `J14` | PB23 ↔ PA9 ↔ BP J1.3        | **(2)-(3) PA9** | 默认 (1)-(2) 是 PB23，PWMB 信号到不了 BP J1.3，右电机不转       |
 | `J15` | PA16 ↔ BP J3.29             | 保留默认 (1)-(2) PA16 | AIN2 共用此排针；J3.29 排针上**不要再外接其他设备**                |
@@ -598,7 +611,7 @@ right_pm = target_pm − ff_pm − correction_pm
 - 编码器 `VCC` 请先确认是 `3.3 V` 还是 `5 V` 版本，不确定前不要直接接主控 IO。
 - TB6612 的 `VM` 与主控逻辑电源分开供电，但 **GND 必须共地**（推荐 TB6612 散热片下铜区为汇接点）。
 - 初次上电务必让车轮离地，确认方向正确后再落地测试。
-- **本阶段所有电机 / 左右编码器 / S1 / LED 引脚都从 LaunchPad BoosterPack 排针直接接出，无需焊接**（左编码器 Stage 2.3 起从 J12 迁到 BP J4.34/J4.40；详见 [Stage0-PinAllocation.md §3.4](Stage0-PinAllocation.md) 必焊清单）。BUZZER (PA0) / LASER_EN (PA1) 因 LaunchPad 板载固有限制需要焊飞线，但本阶段不用，可忽略。
+- **本阶段所有电机 / 左右编码器 / LED 引脚都从 LaunchPad BoosterPack 排针直接接出，无需焊接**（左编码器 Stage 2.3 起从 J12 迁到 BP J4.34/J4.40；详见 [Stage0-PinAllocation.md §3.4](Stage0-PinAllocation.md) 必焊清单）。BUZZER (PA0) / LASER_EN (PA1) 因 LaunchPad 板载固有限制需要焊飞线，但本阶段不用，可忽略。
 - 若某个电机命令方向与轮子实际方向相反，**Stage 2.1 起首选** `bsp_motor_set_invert(invL, invR)` 运行时翻转（参见 §3 / §4.2）；不要再交换动力线或硬编码改 `AIN/BIN` 真值表，避免出厂调好的极性被下一次重新焊接打乱。
 - 若编码器读数方向与轮子实际转向相反（即"轮子正转、count 减少"），同样优先用上一条 invert 的同一调用 —— 它在 BSP 内部对命令侧翻转后，业务层将命令与反馈作差时符号会自动一致；如果调用方需要"反馈也按业务正向"，请在 `bsp_motor_get_feedback()` 之后自行乘 -1，**不要**回到 BSP 层做二次翻转，会破坏"编码器 = 硬件真理"的约定。
 
@@ -616,12 +629,12 @@ Stage 2.2 已完成的（不再列入待办）：
 - ~~**右轮升级为 X4 解码**~~ → 默认 `BSP_MOTOR_RIGHT_DECODE_X = 4`，`bsp_motor_init()` 内已条件编译启用 PA13 双沿中断、`GROUP1_IRQHandler` 已条件分发 `DL_GPIO_IIDX_DIO13`，左右轮分辨率统一 1320 cnt/rev；如 CPU 紧张可 `-DBSP_MOTOR_RIGHT_DECODE_X=2` 退回 X2。
 - ~~**接入平衡环 / 速度环骨架**~~ → 已交付 [middle/pid.{c,h}](../../template/middle/pid.h) 通用 PID + [app\_balance.{c,h}](../../template/app/app_balance.h) 速度外环 + 平衡内环 + 转向叠加，`app_balance_step()` 100 Hz 节拍调一次即跑完全链路。**所有 PID 增益默认 0**（失效安全），业务侧需调 `set_balance_gains` / `set_speed_gains` 注入；详细整定流程见 [app\_balance.h](../../template/app/app_balance.h) 顶部注释。
 - ~~**电池低压保护与 PWM 自动降功率**~~ → 已交付 [bsp\_battery.{c,h}](../../template/hardware/bsp_battery.h) 周期采样 + 阈值状态机；[app\_safety.{c,h}](../../template/app/app_safety.h) 在 `LOW_BAT_WARN` 自动调 `bsp_motor_set_pwm_limit(600)`，在 `LOW_BAT_STOP` 自动 `brake_pulse_ms(120) + enable(false)`。
-- ~~**跌倒检测 → brake**~~ → [app\_safety.{c,h}](../../template/app/app_safety.h) 已实现：`|pitch| > 60°` → `brake_pulse_ms(80) + enable(false)`，恢复后 S1 重启。
+- ~~**跌倒检测 → brake**~~ → [app\_safety.{c,h}](../../template/app/app_safety.h) 已实现：`|pitch| > 60°` → `brake_pulse_ms(80) + enable(false)`，恢复由上层显式 `app_safety_arm()` 触发。
 - ~~**加 IDLE 节流**~~ → 已交付 `bsp_motor_brake_pulse_ms(N)` API，N ms 后由 `bsp_motor_update()` 自动转 coast，避免 brake 持续注入大电流；持续刹车需求保留旧 `bsp_motor_brake()`（持续模式互斥）。
 
 仍然剩余 / 推荐的下一步（Stage 3+ 范围）：
 
-- **新模块加入 EIDE 构建**：当前 main.c 仍跑 [`app_telemetry_run()`](../../template/app/app_telemetry.c)，新模块 8 个文件已就位但未链接。装车整定时把 [`bsp_motor.{c,h}`](../../template/hardware/bsp_motor.h) + [`bsp_battery.{c,h}`](../../template/hardware/bsp_battery.h) + [`middle/pid.{c,h}`](../../template/middle/pid.h) + [`app_safety.{c,h}`](../../template/app/app_safety.h) + [`app_balance.{c,h}`](../../template/app/app_balance.h) 加入 [EIDE/.eide/eide.yml](../../EIDE/.eide/eide.yml) 的 `virtualFolder`，写一个 `app_balance_run()` 主循环替换 main 中的 `app_telemetry_run()` 调用即可。
+- **EIDE 构建核对**：当前 `main.c` 已默认进入 `app_balance_run()` 装车模式；构建配置需包含 [`bsp_motor.{c,h}`](../../template/hardware/bsp_motor.h) + [`bsp_battery.{c,h}`](../../template/hardware/bsp_battery.h) + [`middle/pid.{c,h}`](../../template/middle/pid.h) + [`app_safety.{c,h}`](../../template/app/app_safety.h) + [`app_balance.{c,h}`](../../template/app/app_balance.h) + [`app_motor_demo.{c,h}`](../../template/app/app_motor_demo.h)。
 - **PID 增益整定 + Flash 持久化**：按 [`app_balance.h`](../../template/app/app_balance.h) §"整定提示"4 步流程，先内环后外环；整定完成后把增益写入 Flash（参考阶段 0 §4.5 标定参数固化策略）。
 - **K230 通讯接入 `app_balance_motion_cmd_t`**：`MOTION_CMD` 帧解析后填 `target_speed_cps / target_yaw_pm`，主控的 `app_balance_step()` 负责执行；超时降级时业务侧把 `cmd` 清零并调 `app_safety_disarm()`。
 - **声光提示 + 自动起立 + 圈数判定**：完成基础项 1~4 后再上发挥项；自动起立可参考 Overview §阶段 7.2，反向梯形速度曲线甩起 + 接近垂直时切平衡环。
@@ -639,5 +652,5 @@ Stage 2.2 已完成的（不再列入待办）：
 | 2026-05-09 | v0.5 | **Stage 2.3 左编码器从 J12 迁到 BoosterPack（不再依赖未焊 J12）**。问题背景：板上 J12 排针（PA29 PHA / PA30 PHB / PB14 IDX）出厂未焊接，无法直接接线，且 PA29/PA30/PB14 均不在 BoosterPack 排针上。复核数据手册 PINMUX 表后发现 `PB15 = TIMG8_C0 [func 5, PINCM32]` / `PB16 = TIMG8_C1 [func 5, PINCM33]` 在 BP J4.34 / J4.40 上空闲（蓝牙 1.6 下线后释放进 §3.3 预留池），同时 GB370 编码器无 Z 相，IDX 可省，QEI 由 3-Pin Mode 降为 2-Pin Mode。**SysConfig 改动**（[EIDE/LP_MSPM0G3507.syscfg](../../EIDE/LP_MSPM0G3507.syscfg)）：`QEI_LEFT.enableIndexInput = false`、`peripheral.ccp0Pin.$assign = "PB15"`、`peripheral.ccp1Pin.$assign = "PB16"`，删除 `idxPin.$assign`，并把段顶注释整段重写说明迁移背景。**`ti_msp_dl_config.{c,h}` 同步重生**：`GPIO_QEI_LEFT_PHA_*` 改 GPIOB / DL_GPIO_PIN_15 / IOMUX_PINCM32 / IOMUX_PINCM32_PF_TIMG8_CCP0；`GPIO_QEI_LEFT_PHB_*` 改 GPIOB / DL_GPIO_PIN_16 / IOMUX_PINCM33 / IOMUX_PINCM33_PF_TIMG8_CCP1；删除 `GPIO_QEI_LEFT_IDX_*` 全套宏；`SYSCFG_DL_GPIO_init()` 删除 IDX 的 `DL_GPIO_initPeripheralInputFunction(...)`；`SYSCFG_DL_QEI_LEFT_init()` 中两处 `DL_TIMER_QEI_MODE_3_INPUT` 改 `DL_TIMER_QEI_MODE_2_INPUT`。**硬件 X4 解码精度 1320 cnt/rev 不变，无丢脉冲**；BSP 层 [bsp\_motor.{c,h}](../../template/hardware/bsp_motor.h) 无需任何改动（QEI 计数路径透明）。**文档同步**：① §7.2 左编码器表整段改写（PHA→PB15/BP J4.34、PHB→PB16/BP J4.40、IDX→不接 / 2-Pin Mode），表前加 Stage 2.3 迁移说明段；② §7.5.1 跳线核对清单 J12 行由 "**必须 ON**" 改为 "**OFF / 不再使用**" + 说明 PA29/PA30/PB14 进入预留池；③ §7.5.2 装车通用注意事项中 "BP / J12 直接接出" 改写为 "全部从 BP 直接接出（左编码器 Stage 2.3 起从 J12 迁到 BP J4.34/J4.40）"。**配套真源同步**：[Stage0-PinAllocation.md](Stage0-PinAllocation.md) v0.9 （§1 决策行 / §2 跳线表 J12 / §3.2 业务表 ENC_L / §3.3 预留表 / §4.1 编码器表 / §5.6 验证清单 / §6 维护规则 / §7 修订历史 同步刷新）。**装车收益**：J12 排针保持悬空、不需焊接；左/右编码器接线全在 BP 排针上 + 同列相邻（J4.34 与 J4.40 同侧），施工与维护成本同步降低 | 主控团队 |
 | 2026-05-09 | v0.6 | **Stage 2.4 关键 Bug 修复 ｜ 上车首次启动后两个致命问题定位 + 修复**。**Bug A — `batt=0mV` 始终判 `BAT_STOP`**：根因 = SysConfig 的 `ADC_BAT` 模块漏配 `sampleTime0`（默认 0 cycles），ADC SCOMP0 永远完不成转换，`MEM0_RESULT_LOADED` 不置位，软件读到 0；同时 `bsp_battery::classify` 直接把 0 mV 判 `LOW_STOP` 进 safety `BAT_STOP` 死锁。修复：① [EIDE/LP_MSPM0G3507.syscfg](../../EIDE/LP_MSPM0G3507.syscfg) 加 `BAT_ADC.sampleTime0 = "1 us"` + 修正"内部 VREF 2.5V"误注释为 VDDA 3.3V；② [ti_msp_dl_config.c](../../EIDE/ti_msp_dl_config.c) `SYSCFG_DL_ADC_BAT_init()` 加 `DL_ADC12_setSampleTime0(ADC_BAT_INST, 32)`；③ [bsp_battery.h](../../template/hardware/bsp_battery.h) 新增 `BSP_BATTERY_DISCONNECTED_MV` 默认 1000 mV，[bsp_battery.c](../../template/hardware/bsp_battery.c) 的 `classify()` 在 `mv < DISCONNECTED_MV` 时返回 `UNKNOWN`，未接电池时安全保持 DISARM、不进 LOW_STOP。**Bug B — 手转右轮瞬间宕机**：根因 **不是** ISR 雪崩 / 不是浮空噪声 / 不是优先级问题（这些都已防住），而是 [bsp_motor.c](../../template/hardware/bsp_motor.c) 早期把 GPIO ISR 命名为 `void GPIOA_IRQHandler(void)` —— **MSPM0G3507 vector table 里根本没有 `GPIOA_IRQHandler` 这个名字**！整个 GPIO 中断（GPIOA + GPIOB）+ TRNG + COMP0 共享 IRQn=1 = "GROUP1"，入口名叫 **`GROUP1_IRQHandler`**（参考 SDK `examples/.../driverlib/gpio_simultaneous_interrupts/`）。原 `GPIOA_IRQHandler` 只是个普通全局函数符号，编译链接都不报错但永远不会被链接到 vector table；PA12/PA13/PA18 任何沿事件触发后 NVIC 跳到 vector slot 17 = startup.s 里 weak 默认 `GROUP1_IRQHandler` (`B .` 死循环) → MCU 整体卡死，串口/SysTick/绿灯/业务全停。修复：① [bsp_motor.c](../../template/hardware/bsp_motor.c) 把 ISR 重命名为 `void GROUP1_IRQHandler(void)`，函数顶部注释整段改写、明确警示"GPIOA/GPIOB 共享 GROUP1 入口"；② 同期附加 4 道防护已生效但单独不能救命，仍保留：(a) PA12/PA13/PB15/PB16 启用内部上拉 + Hysteresis（[bsp_gpio.c](../../template/hardware/bsp_gpio.c) + `bsp_motor_init`），(b) SysTick 优先级提到 0（[bsp_systick.c](../../template/hardware/bsp_systick.c)），GPIOA NVIC 优先级降到 3（`bsp_motor_init`），(c) `bsp_motor` 加 ISR 雪崩兜底（200 边沿/ms 触发 disable + 50 ms 自动恢复，新增 `bsp_motor_get_enc_irq_count` / `bsp_motor_enc_irq_is_quenched` 诊断 API），(d) [bsp_systick.c](../../template/hardware/bsp_systick.c) 覆盖 `HardFault_Handler` 为 `NVIC_SystemReset()` —— fault 直接复位、boot log 反复刷屏，比"假死"友好得多，便于以后定位类似问题。**经验教训**：MSPM0 NVIC 把 GPIOA / GPIOB / TRNG / COMP0 等多个外设合并到 GROUP0/GROUP1 共享 vector，与传统 STM32 / MSP432 "每外设一个 vector" 的习惯不同；后续新增任何 GPIO 中断业务（如新加 GPIOB 沿中断、TRNG / COMP0 中断），必须在 `GROUP1_IRQHandler` 内追加分支、不要再写独立 `GPIOA_IRQHandler` / `GPIOB_IRQHandler`。同步：[app_balance.c](../../template/app/app_balance.c) 1 Hz 心跳新增 `encL=/encR=/encISR=` + `[ISR_QUENCH!]` 标记字段方便排查 | 主控团队 |
 | 2026-05-10 | v0.7 | **Stage 2.5 电机测速 / 同步 / 校准服务**。`main.c` 已切入 `app_motor_demo_run()` 作为上电默认入口；`app_motor_demo` 从固定 `350‰` 正反转 demo 升级为可交互电机测试台：① 目标转速按 GB370 `620 rpm` 满量程换算 PWM，XDS-UART 支持 `+/-`、`<rpm><Enter>`、`b/r`、`s/p`、`c/x`、`h/?`；② S1 改为急刹 / 启动，PA18 使用双沿 + 上电空闲电平判定 + 轮询兜底，日志打印 `raw/active/btn_irq/btn_poll` 诊断；③ 右编码器反馈符号按实车安装翻正，同向命令下左右计数 / rpm 同号；④ 新增 `app_motor_demo_set_sync_enabled` / `set_sync_gains` / `reset_sync` / `get_sync_diag`，默认 50 ms 同步周期，误差 `rpmR-rpmL`，PI 输出差分 PWM 补偿，`corr` 限幅 `±350‰`；⑤ 新增 `app_motor_demo_cal_start` / `cal_abort` / `cal_is_active` PWM 扫描校准，正 / 反向从 `100‰` 到 `1000‰`，步进 `50‰`，每档驻留 `1500 ms`，跳过前 `500 ms` 后每 `100 ms` 输出 `[cal]` 样本；⑥ 新增 [tools/motor_calib](../../tools/motor_calib/README.md) 离线分析工具，解析 `[cal]` 日志并生成 PWM→RPM 拟合、误差 vs PWM / 电池电压、残差图。文档同步：顶部 v0.7 提示、§1 目标表、§2 摘要、§3.6 API、§4.4 参数、§5 串口命令 / 日志、§6.4 验收矩阵。 | 主控团队 |
-| 2026-05-10 | v0.8 | **Stage 2.6 右电机静态前馈补偿**。**根因分析**：Stage 2.5 校准扫描数据拟合结果：正转斜率左 `0.2432 rpm/‰`、右 `0.2559 rpm/‰`，斜率比 **1.0522**（右轮固有快 5.22%）；反转方向斜率差仅 0.83%，两路接近对称。问题为 TB6612 两路 H 桥正向导通参数差异（B 通道压降略低 → 相同 PWM 下右轮获得更多有效驱动电压），属硬件固有特性，与绕组和电压无关。**修复方案**：在 `apply_motor_output` 内对右轮施加与 `target_pm` 成比例的静态前馈：`right_pm = target_pm − ff_pm − correction_pm`，`ff_pm = target_pm × ff_x1000 / 1000`；仅正转（`target_pm > 0`）激活，反转时 `ff_pm = 0`，PI 接管反转残差。**参数调整**：同步环 Kp `8 → 4`、Ki `1 → 0`、`maxCorr` `350 → 200`，前馈接管稳态后 PI 专注瞬态不再积分发散。**新增 API**：`app_motor_demo_set_ff_right(ff_x1000)` / `get_ff_right()`；`sync_diag_t` 追加 `ff_pm` 字段。**新增 UART 命令**：`f<val><Enter>` 运行时调前馈系数（0~200），`p` 输出新增 `ff_pm / ff_x1000` 字段；Boot Banner 增打 `ff_right=50/1000` 字段。**默认值**：`APP_MOTOR_SYNC_FF_RIGHT_X1000 = 50`（可编译期 `-D` 覆盖）。文档同步：顶部 v0.8 提示框、§1 第 8 项、§3.6 API + 前馈公式 + PI 参数说明、§4.4 Kp/Ki/maxCorr 默认值更新 + FF 宏新增行、§5 Boot Banner / `p` 命令输出 / 控制命令表、§6.4 新增 3 条前馈验收项。 | 主控团队 |
+| 2026-05-10 | v0.8 | **Stage 2.6 右电机基础补偿**。**根因分析**：Stage 2.5 校准扫描数据拟合结果：正转斜率左 `0.2432 rpm/‰`、右 `0.2559 rpm/‰`，斜率比 **1.0522**（右轮固有快 5.22%）；反转方向斜率差仅 0.83%，两路接近对称。问题为 TB6612 两路 H 桥正向导通参数差异（B 通道压降略低 → 相同 PWM 下右轮获得更多有效驱动电压），属硬件固有特性，与绕组和电压无关。**修复方案**：在 `bsp_motor` 的 `commit_right()` 内对右路正向命令统一乘 `BSP_MOTOR_RIGHT_FORWARD_SCALE_X1000=950`，让 demo、装车平衡、K230 控制等所有业务路径共享同一基础补偿。**参数调整**：同步环 Kp `8 → 4`、Ki `1 → 0`、`maxCorr` `350 → 200`，底层基础补偿接管稳态后 PI 专注瞬态不再积分发散。文档同步：顶部 v0.8 提示框、§1 第 8 项、§3.6 同步公式、§4.1 BSP 宏、§4.4 Kp/Ki/maxCorr 默认值更新、§5 Boot Banner / `p` 命令输出 / 控制命令表、§6.4 验收项。 | 主控团队 |
 

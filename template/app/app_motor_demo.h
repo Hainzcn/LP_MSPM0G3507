@@ -15,13 +15,9 @@ extern "C" {
 
 /**
  * @brief 运行电机转动演示。
- * @return true = 收到装车模式启动请求，调用方应切入 app_balance_run()。
+ * @return true = 收到返回装车模式请求，调用方应切回 app_balance_run()。
  *
- * S1 用作急刹 / 启动切换；左右轮保持同向输出，方便通过编码器转速判断同步性。
- *
- * 当前工程没有可直接复用的板载 S2 输入：LaunchPad SW2/J15 默认落在 PA16，
- * 但 PA16 已被 TB6612 AIN2 占用。确认新的 S2 引脚后，在 app_motor_demo.c
- * 打开 APP_MOTOR_DEMO_ENABLE_LOAD_BUTTON 并填入对应 BSP_LOAD_BTN_* 宏即可返回。
+ * 串口 `b` / `r` 用作急刹 / 启动切换；`l` 或 `load` 请求切入装车模式。
  */
 bool app_motor_demo_run(void);
 
@@ -42,7 +38,6 @@ typedef struct {
     int16_t left_cmd_pm;
     int16_t right_cmd_pm;
     int16_t rpm_error;
-    int16_t ff_pm;          /**< 右电机前馈补偿量（千分比，正值表示右比左少输出） */
 } app_motor_demo_sync_diag_t;
 
 /** 开关双轮同步服务；关闭时左右轮都输出目标转速对应的同一 PWM。 */
@@ -51,21 +46,6 @@ void app_motor_demo_set_sync_enabled(bool enabled);
 /** 配置同步环增益：误差定义为 rpmR - rpmL，输出为左右差分 PWM 补偿。 */
 void app_motor_demo_set_sync_gains(int16_t kp_pm_per_rpm,
                                    int16_t ki_pm_per_rpm_step);
-
-/**
- * @brief 设置右电机静态前馈系数（千分之一单位）。
- *
- * 校准结论：正转时右通道转速比左通道高 5.22%，需对右轮 PWM 减去
- *           target_pm × ff_x1000 / 1000 作为前馈，消除稳态误差。
- *           反转时两路接近对称，前馈自动归零（仅对正转方向生效）。
- *
- * @param ff_x1000  前馈系数 × 1000；默认 50（= 5.0%）。
- *                  范围建议 [0, 200]，超出范围将被钳位。
- */
-void app_motor_demo_set_ff_right(int16_t ff_x1000);
-
-/** 读取当前右电机前馈系数（× 1000）。 */
-int16_t app_motor_demo_get_ff_right(void);
 
 /** 清同步环积分与诊断；改变目标转速或重新启动前可调用。 */
 void app_motor_demo_reset_sync(void);

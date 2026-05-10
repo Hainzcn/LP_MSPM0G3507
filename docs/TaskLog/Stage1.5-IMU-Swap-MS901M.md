@@ -245,7 +245,7 @@
 ### 10.1 已知风险
 
 - **MS901M 板载 EKF 不完全是黑盒**：若磁场/振动严重影响 yaw，最坏退化是 0x01 帧的 yaw 漂移；本工程 yaw 不进 VOFA、不参与平衡环（仅 K230 视觉端用相位角 φ），影响可控。
-- **上电首帧延迟**：MS901M 内部 EKF 收敛需要 200~500 ms，500 ms 上电检测窗口与之边界重合；若实测 fatal handler 偶发触发，把 [`template/main.c`](../../template/main.c) 的 `MS901M_BOOT_TIMEOUT_MS` 调到 1000~2000。
+- **上电首帧延迟**：MS901M 内部 EKF 收敛需要 200~500 ms，早期 500 ms 上电检测窗口与之边界重合；当前 [`template/main.c`](../../template/main.c) 已把 `MS901M_BOOT_TIMEOUT_MS` 放宽到 3000 ms，并在装车模式增加 2500 ms 姿态静默窗口。
 
 ### 10.2 回退路径（若 MS901M 链路不可用）
 
@@ -374,7 +374,7 @@
 | UART 外设级 | IMSC | 触发条件 → IRQ 线 | SysConfig 生成的 `SYSCFG_DL_UART_IMU_init` |
 | ARM 内核级 | NVIC ISER | IRQ 线 → CPU 调度 ISR | **用户代码必须显式调用** |
 
-原 `bsp_imu_uart_init()` 注释写"SDK 在 SYSCFG_DL_UART_IMU_init 里已经使能 RX 中断 + NVIC，无需再开"——这条假设**错误**。结果是 MS901M 数据帧完整送达 UART3 FIFO，FIFO 半满标志置位，但 `UART3_IRQHandler` 永远得不到 CPU 调度 → 环缓 `s_rx_head` 不前进 → `ms901m_has_attitude()` 永远 false → 500 ms 超时触发 fatal。
+原 `bsp_imu_uart_init()` 注释写"SDK 在 SYSCFG_DL_UART_IMU_init 里已经使能 RX 中断 + NVIC，无需再开"——这条假设**错误**。结果是 MS901M 数据帧完整送达 UART3 FIFO，FIFO 半满标志置位，但 `UART3_IRQHandler` 永远得不到 CPU 调度 → 环缓 `s_rx_head` 不前进 → `ms901m_has_attitude()` 永远 false → 上电等待窗口超时触发 fatal。
 
 **修复**：`bsp_imu_uart_init()` 加一行：
 

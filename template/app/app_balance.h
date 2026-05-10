@@ -19,6 +19,8 @@
  *      - 轮径 D / 减速比 GR / 编码器 PPR（已在 bsp_motor.h 中）；
  *      - 静态俯仰零点 pitch_offset_deg：让车体自由立直（用积木 / 支架辅助），
  *        读 1 s 平均的 pitch_deg，写入 `app_balance_set_pitch_offset()`；
+ *      - 若传感器前后装反，打开 `APP_BALANCE_PITCH_INVERT` 或运行时调用
+ *        `app_balance_set_pitch_inverted(true)`，无需改 MS901M 解析层。
  *      - 估算车体高度 h、质心高度 hc、整车质量 m，套倒立摆模型粗估
  *        Kp_balance ≈ m·g·hc / (转矩常数·hc²)，做整定起点。
  *
@@ -76,7 +78,7 @@
  *   `app_balance_step()` 内部会：
  *     - 调 `app_safety_tick()` 检查是否允许驱动；
  *     - 不允许 → 停止输出（不调 set_output，避免覆盖 safety 的 brake 命令）；
- *     - 允许 → 跑速度外环 → 平衡内环 → set_output(left, right)。
+ *     - 允许 → 跑速度外环 → 平衡内环 → 直行同步补偿 → set_output(left, right)。
  */
 
 #ifndef APP_BALANCE_H
@@ -118,6 +120,48 @@ extern "C" {
 #define APP_BALANCE_BALANCE_D_FILTER_ALPHA      (0.10f)
 #endif
 
+/**
+ * 俯仰角一阶低通滤波系数（0~1）。
+ * MS901M 已内置 EKF，但主控侧仍加一层轻量 LPF 抑制串口帧抖动和单帧毛刺。
+ * 控制环 100 Hz 下，0.35 约等效 18 ms 时间常数，延迟较小，适合作为平衡初值。
+ */
+#ifndef APP_BALANCE_PITCH_LPF_ALPHA
+#define APP_BALANCE_PITCH_LPF_ALPHA             (0.35f)
+#endif
+
+/** 俯仰角软件极性翻转：当前装车 MS901M 前后方向与车体坐标相反，默认启用。 */
+#ifndef APP_BALANCE_PITCH_INVERT
+#define APP_BALANCE_PITCH_INVERT                (1)
+#endif
+
+/** 装车模式双轮同步服务开关：直行时按左右编码器速度差做差分 PWM 补偿。 */
+#ifndef APP_BALANCE_SYNC_ENABLED
+#define APP_BALANCE_SYNC_ENABLED                (1)
+#endif
+
+/** 同步环比例项，单位是 0.01 permille / cps；20 = 0.20 pm/cps ≈ 4.4 pm/rpm。 */
+#ifndef APP_BALANCE_SYNC_KP_PM_PER_CPS_X100
+#define APP_BALANCE_SYNC_KP_PM_PER_CPS_X100     (20)
+#endif
+
+/** 同步环积分项，单位同上；默认 0，先避免与平衡内环互相积分。 */
+#ifndef APP_BALANCE_SYNC_KI_PM_PER_CPS_STEP_X100
+#define APP_BALANCE_SYNC_KI_PM_PER_CPS_STEP_X100 (0)
+#endif
+
+/** 同步差分补偿限幅，避免编码器异常时大幅扰动平衡内环。 */
+#ifndef APP_BALANCE_SYNC_MAX_CORRECTION_PM
+#define APP_BALANCE_SYNC_MAX_CORRECTION_PM      (200)
+#endif
+
+/**
+ * 同步环启用的最小平衡驱动力（permille）。
+ * PID 输出很小时暂停同步，避免 PID=0 手拨轮触发电机；平衡环真正发力时恢复同步。
+ */
+#ifndef APP_BALANCE_SYNC_MIN_DRIVE_PM
+#define APP_BALANCE_SYNC_MIN_DRIVE_PM          (30)
+#endif
+
 /* ========================================================================== */
 /* 输入结构体                                                                   */
 /* ========================================================================== */
@@ -144,6 +188,8 @@ typedef struct {
     float   target_tilt_deg;    /* 速度外环输出 = 平衡内环目标角 */
     float   pitch_meas_deg;     /* 实际俯仰（已减零点） */
     float   balance_out_pwm;    /* 平衡内环输出，permille */
+    int16_t sync_correction_pm;  /* 双轮同步差分补偿；正值 = 左加右减 */
+    int32_t sync_error_cps;      /* right_speed_cps - left_speed_cps */
     int16_t left_cmd_pm;        /* 最终左轮命令 */
     int16_t right_cmd_pm;       /* 最终右轮命令 */
     int32_t speed_meas_cps;     /* 实际平均速度 = (L+R)/2 */
@@ -162,9 +208,21 @@ void app_balance_reset(void);
 
 /**
  * @brief 设置静态俯仰零点（°）。让车体在地面"标准直立"状态下读 1 s 平均 pitch
- *        填入此处，运行时 `pitch_meas - offset` 会真正反映"偏离平衡点的角度"。
+ *        填入此处，运行时 `(raw_pitch - offset) * pitch_sign` 会真正反映
+ *        "偏离平衡点的角度"。
  */
 void app_balance_set_pitch_offset(float deg);
+
+/**
+ * @brief 设置俯仰角软件极性翻转。
+ *
+ * MS901M 前后方向装反时，前倾会被解析成后倾，平衡环会反向输出。
+ * 开启后仅在 app_balance 层把 `(raw_pitch - offset)` 取反，不改传感器解析层。
+ */
+void app_balance_set_pitch_inverted(bool inverted);
+
+/** @return true = 当前已启用俯仰角软件翻转。 */
+bool app_balance_get_pitch_inverted(void);
 
 /** 设置平衡内环增益（输入：tilt 误差 deg；输出：PWM permille）。 */
 void app_balance_set_balance_gains(float kp, float ki, float kd);
@@ -185,8 +243,8 @@ void app_balance_set_yaw_kp(float kp_yaw);
  *          ① app_safety_tick(att)：拿到当前安全状态；
  *          ② 不允许驱动 → app_balance_reset() + 不再调 bsp_motor_set_output
  *             （避免覆盖 safety 已经下发的 brake 命令），return；
- *          ③ 允许驱动 → 速度外环 → 限幅得到目标 tilt → 平衡内环 → 加转向 →
- *             bsp_motor_set_output(left, right)。
+ *          ③ 允许驱动 → 速度外环 → 限幅得到目标 tilt → 平衡内环 →
+ *             转向叠加 + 直行同步补偿 → bsp_motor_set_output(left, right)。
  *
  *        本函数完全幂等：同样的输入 + 同样的内部状态 → 同样的输出。
  */
@@ -197,7 +255,7 @@ void app_balance_step(const app_balance_attitude_t *att,
 void app_balance_get_diag(app_balance_diag_t *out);
 
 /**
- * @brief Stage 2.2 上车基线主循环入口（永不返回，由 main 调用）。
+ * @brief Stage 2.2 上车基线主循环入口。
  *
  *        调度策略（单任务轮询 + SysTick 1 ms 节拍标志）：
  *          1 kHz : drain UART3 → ms901m_feed_bytes + bsp_motor_update（QEI 软扩 / 速度窗）
@@ -214,9 +272,11 @@ void app_balance_get_diag(app_balance_diag_t *out);
  *
  *        ⚠️ PID 增益默认 0：上电后即使站立姿态正确电机也不会动。装车整定时
  *           通过串口 / K230 命令注入 `app_balance_set_balance_gains` /
- *           `app_balance_set_speed_gains`；S1 按下进入 ARMED 才允许驱动。
+ *           `app_balance_set_speed_gains`；上层调用 `app_safety_arm()` 后才允许驱动。
+ *
+ * @return true = 收到 UART `t` / `test`，调用方应切入电机演示模式。
  */
-void app_balance_run(void);
+bool app_balance_run(void);
 
 #ifdef __cplusplus
 }

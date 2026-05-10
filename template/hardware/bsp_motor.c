@@ -1,9 +1,9 @@
 /**
  * @file    bsp_motor.c
- * @brief   阶段 2 电机底层驱动实现 —— TB6612 + 左右编码器 + S1 切换。
+ * @brief   阶段 2 电机底层驱动实现 —— TB6612 + 左右编码器。
  *
  * 内部状态聚合到 `s_motor` 单例：
- *   ─ ISR 共享字段（counts / toggle 请求 / 上次按键时间戳）放前面，访问
+ *   ─ ISR 共享字段（counts / 编码器中断诊断）放前面，访问
  *     必须用 `MOTOR_LOCK / MOTOR_UNLOCK` 一对宏关 PRIMASK；
  *   ─ 主循环私有字段（speed window / cmd / 极性 / 限幅）放后面，无需关中断。
  *
@@ -38,10 +38,6 @@ typedef struct {
     /* --- ISR 共享字段：访问必须 MOTOR_LOCK ----------------------------------- */
     volatile int32_t  left_count;       /* 由 update() 维护（QEI 软扩） */
     volatile int32_t  right_count;      /* 由 PA12 (X2 时) 或 PA12+PA13 (X4 时) ISR 维护 */
-    volatile uint8_t  toggle_request;   /* S1 按键置位、消费时清零 */
-    volatile uint32_t last_button_ms;   /* 用于 80 ms 去抖 */
-    volatile uint32_t button_irq_count;  /* S1 中断命中次数 */
-    volatile uint32_t button_poll_count; /* S1 轮询兜底命中次数 */
     volatile uint32_t enc_irq_count;    /* 右编码器 ISR 总进入次数（雪崩诊断） */
     volatile uint32_t enc_irq_window;   /* 1 ms 窗口内 ISR 进入次数 */
     volatile uint8_t  enc_irq_quench_remain_ms;  /* 雪崩兜底：剩余抑制毫秒数 */
@@ -65,8 +61,6 @@ typedef struct {
     uint16_t pwm_limit_pm;
     bool     invert_left;
     bool     invert_right;
-    bool     button_idle_high;
-    bool     button_was_pressed;
     bool     enabled;
 } motor_state_t;
 
@@ -91,6 +85,42 @@ static int16_t apply_limit(int16_t permille)
         lim = BSP_MOTOR_PWM_MAX_PERMILLE;
     }
     return (int16_t)clip_int((int32_t)permille, -lim, lim);
+}
+
+/**
+ * 逻辑 PWM → 物理 PWM 死区补偿：
+ *   0 仍为 coast；非零命令抬升到起转死区以上，同时按当前限幅重映射，
+ *   保证逻辑满量程仍对应物理满量程，不会因简单相加而提前饱和。
+ */
+static int16_t apply_deadzone_comp(int16_t permille)
+{
+#if BSP_MOTOR_DEADZONE_COMP_PM > 0
+    if (permille == 0) {
+        return 0;
+    }
+
+    int32_t lim = (int32_t)s_motor.pwm_limit_pm;
+    if (lim > BSP_MOTOR_PWM_MAX_PERMILLE) {
+        lim = BSP_MOTOR_PWM_MAX_PERMILLE;
+    }
+    if (lim <= 0) {
+        return 0;
+    }
+
+    int32_t dead = BSP_MOTOR_DEADZONE_COMP_PM;
+    if (dead >= lim) {
+        return (permille > 0) ? (int16_t)lim : (int16_t)-lim;
+    }
+
+    int32_t mag = (permille > 0) ? (int32_t)permille : -(int32_t)permille;
+    if (mag > lim) {
+        mag = lim;
+    }
+    mag = dead + ((mag * (lim - dead)) / lim);
+    return (permille > 0) ? (int16_t)mag : (int16_t)-mag;
+#else
+    return permille;
+#endif
 }
 
 /** 取 permille 的绝对值（已假设输入已经限幅，安全无溢出）。 */
@@ -201,6 +231,7 @@ static void apply_one_channel(int16_t permille_after_invert,
 static void commit_left(int16_t cmd_pm)
 {
     int16_t pm = apply_limit(cmd_pm);
+    pm = apply_deadzone_comp(pm);
     if (s_motor.invert_left) {
         pm = (int16_t)(-(int32_t)pm);
     }
@@ -210,6 +241,10 @@ static void commit_left(int16_t cmd_pm)
 static void commit_right(int16_t cmd_pm)
 {
     int16_t pm = apply_limit(cmd_pm);
+    if (pm > 0) {
+        pm = (int16_t)((((int32_t)pm * BSP_MOTOR_RIGHT_FORWARD_SCALE_X1000) + 500) / 1000);
+    }
+    pm = apply_deadzone_comp(pm);
     if (s_motor.invert_right) {
         pm = (int16_t)(-(int32_t)pm);
     }
@@ -252,44 +287,6 @@ static void on_right_encoder_edge(bool is_phase_a_edge)
     s_motor.right_count += step;
 }
 
-static void on_start_button_edge(void)
-{
-    uint32_t pins = DL_GPIO_readPins(BSP_START_BTN_PORT, BSP_START_BTN_PIN);
-    bool level_high = ((pins & BSP_START_BTN_PIN) != 0u);
-    bool pressed = (level_high != s_motor.button_idle_high);
-    uint32_t now_ms = bsp_systick_get_ms();
-
-    if (!pressed) {
-        s_motor.button_was_pressed = false;
-        return;
-    }
-    if (s_motor.button_was_pressed ||
-        ((now_ms - s_motor.last_button_ms) < BSP_MOTOR_BTN_DEBOUNCE_MS)) {
-        s_motor.button_was_pressed = pressed;
-        return;
-    }
-    s_motor.last_button_ms = now_ms;
-    s_motor.button_irq_count++;
-    s_motor.button_was_pressed = true;
-    s_motor.toggle_request = 1u;
-}
-
-static void poll_start_button(void)
-{
-    uint32_t pins = DL_GPIO_readPins(BSP_START_BTN_PORT, BSP_START_BTN_PIN);
-    bool level_high = ((pins & BSP_START_BTN_PIN) != 0u);
-    bool pressed = (level_high != s_motor.button_idle_high);
-    uint32_t now_ms = bsp_systick_get_ms();
-
-    if (pressed && !s_motor.button_was_pressed &&
-        ((now_ms - s_motor.last_button_ms) >= BSP_MOTOR_BTN_DEBOUNCE_MS)) {
-        s_motor.last_button_ms = now_ms;
-        s_motor.button_poll_count++;
-        s_motor.toggle_request = 1u;
-    }
-    s_motor.button_was_pressed = pressed;
-}
-
 /* ========================================================================== */
 /* 公共 API：初始化 / 使能                                                      */
 /* ========================================================================== */
@@ -317,10 +314,6 @@ void bsp_motor_init(void)
     /* --- 1) 状态清零 ------------------------------------------------------- */
     s_motor.left_count             = 0;
     s_motor.right_count            = 0;
-    s_motor.toggle_request         = 0u;
-    s_motor.last_button_ms         = 0u;
-    s_motor.button_irq_count       = 0u;
-    s_motor.button_poll_count      = 0u;
 
     s_motor.left_raw_prev          = (uint16_t)DL_TimerG_getTimerCount(QEI_LEFT_INST);
 
@@ -341,10 +334,6 @@ void bsp_motor_init(void)
     s_motor.pwm_limit_pm           = BSP_MOTOR_PWM_MAX_PERMILLE;
     s_motor.invert_left            = false;
     s_motor.invert_right           = false;
-    s_motor.button_idle_high       =
-        ((DL_GPIO_readPins(BSP_START_BTN_PORT, BSP_START_BTN_PIN) &
-            BSP_START_BTN_PIN) != 0u);
-    s_motor.button_was_pressed     = false;
     s_motor.enabled                = false;
 
     /* --- 2) 安全态：方向位清零 + PWM 占空 0 + STBY 拉低 -------------------- */
@@ -354,7 +343,7 @@ void bsp_motor_init(void)
     set_pwm_duty(GPIO_PWM_MOTOR_C1_IDX, 0u);
     DL_GPIO_clearPins(BSP_STBY_PORT, BSP_STBY_PIN);
 
-    /* --- 3) PA12 双沿 (+ X4 时 PA13 双沿) + PA18 下降沿中断 --------------
+    /* --- 3) PA12 双沿 (+ X4 时 PA13 双沿) 中断 ---------------------------
      *   双沿：单独用 _EDGE_RISE 与 _EDGE_FALL 按位或；某些 SDK 版本没有
      *   `_EDGE_RISE_FALL` 这个组合宏，按位或写法在所有 SDK 里都成立。
      *
@@ -371,15 +360,12 @@ void bsp_motor_init(void)
         DL_GPIO_PIN_12_EDGE_RISE | DL_GPIO_PIN_12_EDGE_FALL);
     uint32_t enc_pins = BSP_ENC_R_A_PIN;
 #endif
-    /* S1 板级实际极性可能受 BSL/J8 走线影响，使用双沿 + 上电空闲电平判定。 */
-    DL_GPIO_setUpperPinsPolarity(GPIOA,
-        DL_GPIO_PIN_18_EDGE_RISE | DL_GPIO_PIN_18_EDGE_FALL);
-    DL_GPIO_clearInterruptStatus(GPIOA, enc_pins | BSP_START_BTN_PIN);
-    DL_GPIO_enableInterrupt    (GPIOA, enc_pins | BSP_START_BTN_PIN);
+    DL_GPIO_clearInterruptStatus(GPIOA, enc_pins);
+    DL_GPIO_enableInterrupt    (GPIOA, enc_pins);
 
     /* 把 GPIOA 中断设为最低优先级（MSPM0G3507 __NVIC_PRIO_BITS = 2 → 3 = 最低），
      * 与 `bsp_systick.c` 把 SysTick 提到 0 = 最高 配套使用：
-     *   ─ 任何编码器噪声 / 按键弹跳引发的 GPIOA ISR 雪崩都不能阻断 SysTick；
+     *   ─ 任何编码器噪声引发的 GPIOA ISR 雪崩都不能阻断 SysTick；
      *   ─ 主循环节拍、电池采样、心跳日志即使在 ISR 高频时也能正常推进。
      * 副作用：编码器边沿与其他外设（UART/ADC）同时到达时，UART/ADC 优先服务，
      *         编码器最多迟几微秒；对 1 kHz 控制环影响可忽略。 */
@@ -670,41 +656,6 @@ bool bsp_motor_enc_irq_is_quenched(void)
     return (s_motor.enc_irq_quench_remain_ms != 0u);
 }
 
-uint32_t bsp_motor_get_button_irq_count(void)
-{
-    uint32_t v;
-    MOTOR_LOCK();
-    v = s_motor.button_irq_count;
-    MOTOR_UNLOCK();
-    return v;
-}
-
-uint32_t bsp_motor_get_button_poll_count(void)
-{
-    uint32_t v;
-    MOTOR_LOCK();
-    v = s_motor.button_poll_count;
-    MOTOR_UNLOCK();
-    return v;
-}
-
-bool bsp_motor_is_start_button_active(void)
-{
-    bool pressed;
-    MOTOR_LOCK();
-    uint32_t pins = DL_GPIO_readPins(BSP_START_BTN_PORT, BSP_START_BTN_PIN);
-    bool level_high = ((pins & BSP_START_BTN_PIN) != 0u);
-    pressed = (level_high != s_motor.button_idle_high);
-    MOTOR_UNLOCK();
-    return pressed;
-}
-
-bool bsp_motor_get_start_button_raw_level(void)
-{
-    return ((DL_GPIO_readPins(BSP_START_BTN_PORT, BSP_START_BTN_PIN) &
-        BSP_START_BTN_PIN) != 0u);
-}
-
 void bsp_motor_reset_encoders(void)
 {
     MOTOR_LOCK();
@@ -718,23 +669,6 @@ void bsp_motor_reset_encoders(void)
     /* 让下次 update() 把当前 16-bit raw 当作 0 起点，避免一次性吃进上一段差值 */
     s_motor.left_raw_prev = (uint16_t)DL_TimerG_getTimerCount(QEI_LEFT_INST);
     MOTOR_UNLOCK();
-}
-
-/* ========================================================================== */
-/* 公共 API：S1 toggle 请求                                                     */
-/* ========================================================================== */
-
-bool bsp_motor_consume_toggle_request(void)
-{
-    bool pending;
-    MOTOR_LOCK();
-    if (s_motor.toggle_request == 0u) {
-        poll_start_button();
-    }
-    pending = (s_motor.toggle_request != 0u);
-    s_motor.toggle_request = 0u;
-    MOTOR_UNLOCK();
-    return pending;
 }
 
 /* ========================================================================== */
@@ -760,14 +694,12 @@ bool bsp_motor_consume_toggle_request(void)
 /*   本工程 GROUP1 上启用的中断源（仅 GPIOA，GPIOB 暂未启用任何沿中断）：       */
 /*     PA12 = 右编码器 A 双沿（X2/X4 都开）                                     */
 /*     PA13 = 右编码器 B 双沿（仅 X4 开）                                       */
-/*     PA18 = S1 下降沿                                                         */
 /*   将来若新增 GPIOB 沿中断 / TRNG / COMP0 中断，需要在本函数内追加对应模块的 */
 /*   `getPendingInterrupt` 分支（按 SDK gpio_simultaneous_interrupts 例程       */
 /*   "GPIOA 段 + GPIOB 段并列" 写法）。                                         */
 /*                                                                              */
 /*   分发策略：按 TI `gpio_simultaneous_interrupts` 示例读取 MIS 位图，分别   */
-/*   处理 PA12 / PA13 / PA18 后逐 pin clear。这样 S1 与编码器同一拍 pending 时 */
-/*   不会被 IIDX 最高优先级选择吞掉，也方便后续扩展多 GPIO 源。                */
+/*   处理 PA12 / PA13 后逐 pin clear，避免 IIDX 最高优先级选择吞掉低优先事件。 */
 /* ========================================================================== */
 
 void GROUP1_IRQHandler(void)
@@ -777,7 +709,7 @@ void GROUP1_IRQHandler(void)
 #if (BSP_MOTOR_RIGHT_DECODE_X == 4)
         | BSP_ENC_R_B_PIN
 #endif
-        | BSP_START_BTN_PIN);
+    );
 
     if ((gpioa & BSP_ENC_R_A_PIN) != 0u) {
         on_right_encoder_edge(true);   /* PA12 (A 相) */
@@ -789,8 +721,4 @@ void GROUP1_IRQHandler(void)
         DL_GPIO_clearInterruptStatus(GPIOA, BSP_ENC_R_B_PIN);
     }
 #endif
-    if ((gpioa & BSP_START_BTN_PIN) != 0u) {
-        on_start_button_edge();
-        DL_GPIO_clearInterruptStatus(GPIOA, BSP_START_BTN_PIN);
-    }
 }

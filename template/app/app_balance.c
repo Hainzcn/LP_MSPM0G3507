@@ -18,6 +18,7 @@
 #include "bsp_gpio.h"
 #include "bsp_imu_uart.h"
 #include "bsp_k230_uart.h"
+#include "bsp_log_uart.h"
 #include "bsp_motor.h"
 #include "bsp_systick.h"
 #include "ms901m.h"
@@ -35,7 +36,11 @@ typedef struct {
     pid_t   speed_pid;       /* 外环：输入 cps 误差，输出目标 tilt deg */
     pid_t   balance_pid;     /* 内环：输入 tilt 误差 deg，输出 PWM permille */
     float   pitch_offset_deg;
+    float   pitch_lpf_deg;
+    int8_t  pitch_sign;      /* +1 正常，-1 传感器前后反装时软件翻转 */
+    bool    pitch_lpf_valid;
     float   yaw_kp;          /* 转向开环系数 */
+    int16_t sync_i_pm;       /* 直行双轮同步积分项 */
     app_balance_diag_t diag;
 } balance_state_t;
 
@@ -43,6 +48,9 @@ static balance_state_t s_bal;
 
 static const float s_dt_sec =
     (float)APP_BALANCE_CONTROL_PERIOD_MS / 1000.0f;
+
+#define APP_BAL_CMD_BUF_LEN  48u
+#define APP_BAL_PID_SCALE    1000L
 
 /* -------------------------------------------------------------------------- */
 /* 内部辅助                                                                    */
@@ -53,6 +61,95 @@ static int16_t clamp_pwm_pm(float v)
     if (v >  (float)APP_BALANCE_MAX_PWM_PERMILLE) v =  (float)APP_BALANCE_MAX_PWM_PERMILLE;
     if (v < -(float)APP_BALANCE_MAX_PWM_PERMILLE) v = -(float)APP_BALANCE_MAX_PWM_PERMILLE;
     return (int16_t)v;
+}
+
+static float apply_pitch_orientation(float raw_pitch_deg)
+{
+    float centered = raw_pitch_deg - s_bal.pitch_offset_deg;
+    return (s_bal.pitch_sign < 0) ? -centered : centered;
+}
+
+static void reset_pitch_filter(void)
+{
+    s_bal.pitch_lpf_deg = 0.0f;
+    s_bal.pitch_lpf_valid = false;
+}
+
+static float filter_pitch(float pitch_deg)
+{
+    float alpha = APP_BALANCE_PITCH_LPF_ALPHA;
+    if (alpha <= 0.0f) {
+        s_bal.pitch_lpf_deg = pitch_deg;
+        s_bal.pitch_lpf_valid = true;
+        return pitch_deg;
+    }
+    if (alpha > 1.0f) {
+        alpha = 1.0f;
+    }
+
+    if (!s_bal.pitch_lpf_valid) {
+        s_bal.pitch_lpf_deg = pitch_deg;
+        s_bal.pitch_lpf_valid = true;
+        return pitch_deg;
+    }
+
+    s_bal.pitch_lpf_deg += alpha * (pitch_deg - s_bal.pitch_lpf_deg);
+    return s_bal.pitch_lpf_deg;
+}
+
+static int16_t clamp_sync_correction(int32_t v)
+{
+    if (v > APP_BALANCE_SYNC_MAX_CORRECTION_PM) {
+        return APP_BALANCE_SYNC_MAX_CORRECTION_PM;
+    }
+    if (v < -APP_BALANCE_SYNC_MAX_CORRECTION_PM) {
+        return -APP_BALANCE_SYNC_MAX_CORRECTION_PM;
+    }
+    return (int16_t)v;
+}
+
+static void reset_sync_state(void)
+{
+    s_bal.sync_i_pm = 0;
+    s_bal.diag.sync_error_cps = 0;
+    s_bal.diag.sync_correction_pm = 0;
+}
+
+static int16_t balance_sync_step(const bsp_motor_feedback_t *fb,
+                                 const app_balance_motion_cmd_t *cmd,
+                                 float drive_pm)
+{
+#if APP_BALANCE_SYNC_ENABLED
+    /* 未实际驱动或转向时暂停同步环：
+     * - drive≈0 时，轮速差多来自手动扰动 / 编码器噪声，纠偏会造成颤抖；
+     * - 平衡环真正发力时，即使目标速度为 0，也要同步左右轮以抑制原地打转；
+     * - 转向时左右轮存在有意差速，同步环不能抵消 yaw 命令。 */
+    if ((fb == NULL) || (cmd == NULL) || (cmd->target_yaw_pm != 0) ||
+        ((drive_pm > -(float)APP_BALANCE_SYNC_MIN_DRIVE_PM) &&
+         (drive_pm <  (float)APP_BALANCE_SYNC_MIN_DRIVE_PM))) {
+        reset_sync_state();
+        return 0;
+    }
+
+    int32_t error_cps = fb->right_speed_cps - fb->left_speed_cps;
+    int32_t i_next = (int32_t)s_bal.sync_i_pm +
+        ((error_cps * APP_BALANCE_SYNC_KI_PM_PER_CPS_STEP_X100) / 100);
+    s_bal.sync_i_pm = clamp_sync_correction(i_next);
+
+    int32_t corr = ((error_cps * APP_BALANCE_SYNC_KP_PM_PER_CPS_X100) / 100) +
+        (int32_t)s_bal.sync_i_pm;
+    int16_t corr_pm = clamp_sync_correction(corr);
+
+    s_bal.diag.sync_error_cps = error_cps;
+    s_bal.diag.sync_correction_pm = corr_pm;
+    return corr_pm;
+#else
+    (void)fb;
+    (void)cmd;
+    (void)drive_pm;
+    reset_sync_state();
+    return 0;
+#endif
 }
 
 /* -------------------------------------------------------------------------- */
@@ -75,7 +172,15 @@ void app_balance_init(void)
     pid_set_d_filter(&s_bal.balance_pid, APP_BALANCE_BALANCE_D_FILTER_ALPHA);
 
     s_bal.pitch_offset_deg = 0.0f;
+    reset_pitch_filter();
+    s_bal.pitch_sign =
+#if APP_BALANCE_PITCH_INVERT
+        -1;
+#else
+        1;
+#endif
     s_bal.yaw_kp = 1.0f;
+    reset_sync_state();
 
     s_bal.diag.target_tilt_deg = 0.0f;
     s_bal.diag.pitch_meas_deg  = 0.0f;
@@ -90,11 +195,24 @@ void app_balance_reset(void)
 {
     pid_reset(&s_bal.speed_pid);
     pid_reset(&s_bal.balance_pid);
+    reset_pitch_filter();
+    reset_sync_state();
 }
 
 void app_balance_set_pitch_offset(float deg)
 {
     s_bal.pitch_offset_deg = deg;
+}
+
+void app_balance_set_pitch_inverted(bool inverted)
+{
+    s_bal.pitch_sign = inverted ? (int8_t)-1 : (int8_t)1;
+    app_balance_reset();
+}
+
+bool app_balance_get_pitch_inverted(void)
+{
+    return (s_bal.pitch_sign < 0);
 }
 
 void app_balance_set_balance_gains(float kp, float ki, float kd)
@@ -119,20 +237,25 @@ void app_balance_step(const app_balance_attitude_t *att,
         return;
     }
 
-    /* ---- 1) safety tick：转交 attitude，拿状态 ---- */
+    float pitch_meas = filter_pitch(apply_pitch_orientation(att->pitch_deg));
+
+    /* ---- 1) safety tick：转交已经按车体坐标修正后的 attitude，拿状态 ---- */
     app_safety_attitude_t sa = {
-        .pitch_deg = att->pitch_deg - s_bal.pitch_offset_deg,
+        .pitch_deg = pitch_meas,
         .attitude_valid = att->attitude_valid,
     };
     (void)app_safety_tick(&sa);
 
-    if (!app_safety_can_drive() || !att->attitude_valid) {
-        /* 不允许驱动：不调 set_output（safety 已经下发了 brake / coast）；
+    if (app_safety_is_startup_grace_active() ||
+        !app_safety_can_drive() || !att->attitude_valid) {
+        /* 不允许驱动：不调 set_output（静默期等待姿态稳定，故障态由 safety 下发 brake/coast）；
          * 同时 reset PID 内部历史，避免下次 ARMED 时 i_term / d 历史跨段污染。 */
         app_balance_reset();
         s_bal.diag.target_tilt_deg = 0.0f;
         s_bal.diag.pitch_meas_deg  = sa.pitch_deg;
         s_bal.diag.balance_out_pwm = 0.0f;
+        s_bal.diag.sync_correction_pm = 0;
+        s_bal.diag.sync_error_cps  = 0;
         s_bal.diag.left_cmd_pm     = 0;
         s_bal.diag.right_cmd_pm    = 0;
         s_bal.diag.speed_meas_cps  = 0;
@@ -152,20 +275,20 @@ void app_balance_step(const app_balance_attitude_t *att,
         s_dt_sec);
 
     /* ---- 3) 平衡内环（100 Hz）：输入 tilt 误差 deg，输出 PWM permille ----
-     * pitch_meas = att->pitch_deg - offset；目标角是外环输出的 target_tilt_deg
+     * pitch_meas = LPF((att->pitch_deg - offset) * pitch_sign)；
+     * 目标角是外环输出的 target_tilt_deg
      * 误差 = target_tilt - pitch_meas（即"还需要倾多少度"）
-     * 注意：MS901M pitch 与车体倾倒方向的极性需要业务侧验证；如发现"加 Kp 后
-     * 车自己倒"，把 Kp 取反或在外面对 att->pitch_deg 取反即可。 */
-    float pitch_meas = att->pitch_deg - s_bal.pitch_offset_deg;
+     * pitch_sign 用于软件修正 MS901M 前后方向装反。 */
     float pwm_out = pid_step(&s_bal.balance_pid,
         target_tilt_deg,
         pitch_meas,
         s_dt_sec);
 
-    /* ---- 4) 转向叠加：left -= yaw, right += yaw ---- */
+    /* ---- 4) 转向叠加 + 直行双轮同步：left += sync, right -= sync ---- */
     float yaw_pm = (float)cmd->target_yaw_pm * s_bal.yaw_kp;
-    int16_t left_pm  = clamp_pwm_pm(pwm_out - yaw_pm);
-    int16_t right_pm = clamp_pwm_pm(pwm_out + yaw_pm);
+    int16_t sync_pm = balance_sync_step(&fb, cmd, pwm_out);
+    int16_t left_pm  = clamp_pwm_pm(pwm_out - yaw_pm + (float)sync_pm);
+    int16_t right_pm = clamp_pwm_pm(pwm_out + yaw_pm - (float)sync_pm);
 
     bsp_motor_set_output(left_pm, right_pm);
 
@@ -173,6 +296,7 @@ void app_balance_step(const app_balance_attitude_t *att,
     s_bal.diag.target_tilt_deg = target_tilt_deg;
     s_bal.diag.pitch_meas_deg  = pitch_meas;
     s_bal.diag.balance_out_pwm = pwm_out;
+    s_bal.diag.sync_correction_pm = sync_pm;
     s_bal.diag.left_cmd_pm     = left_pm;
     s_bal.diag.right_cmd_pm    = right_pm;
     s_bal.diag.speed_meas_cps  = avg_cps;
@@ -204,6 +328,241 @@ void app_balance_get_diag(app_balance_diag_t *out)
 #define BAL_F2_I(v)     ((int32_t)((BAL_F2_X100(v) < 0 ? -BAL_F2_X100(v) : BAL_F2_X100(v)) / 100))
 #define BAL_F2_F(v)     ((uint32_t)((BAL_F2_X100(v) < 0 ? -BAL_F2_X100(v) : BAL_F2_X100(v)) % 100))
 
+static bool is_test_command(const char *buf, uint8_t len)
+{
+    if ((len == 1u) && (buf[0] == 't')) {
+        return true;
+    }
+    return (len == 4u) &&
+           (buf[0] == 't') && (buf[1] == 'e') &&
+           (buf[2] == 's') && (buf[3] == 't');
+}
+
+static bool is_line_delimiter(uint8_t ch)
+{
+    return (ch == (uint8_t)'\r') || (ch == (uint8_t)'\n');
+}
+
+static bool is_field_separator(char ch)
+{
+    return (ch == ' ') || (ch == '\t') || (ch == ',') ||
+           (ch == ';') || (ch == ':');
+}
+
+static void skip_separators(const char **p)
+{
+    while ((*p != NULL) && is_field_separator(**p)) {
+        (*p)++;
+    }
+}
+
+static bool parse_i32_token(const char **p, int32_t *out)
+{
+    if ((p == NULL) || (*p == NULL) || (out == NULL)) {
+        return false;
+    }
+
+    skip_separators(p);
+
+    int32_t sign = 1;
+    if (**p == '-') {
+        sign = -1;
+        (*p)++;
+    } else if (**p == '+') {
+        (*p)++;
+    }
+
+    if ((**p < '0') || (**p > '9')) {
+        return false;
+    }
+
+    int32_t v = 0;
+    while ((**p >= '0') && (**p <= '9')) {
+        v = (v * 10) + (int32_t)(**p - '0');
+        (*p)++;
+    }
+    *out = v * sign;
+    return true;
+}
+
+static float scaled_to_float(int32_t x1000)
+{
+    return (float)x1000 / (float)APP_BAL_PID_SCALE;
+}
+
+static int32_t float_to_scaled(float v)
+{
+    float scaled = v * (float)APP_BAL_PID_SCALE;
+    return (int32_t)(scaled + ((scaled >= 0.0f) ? 0.5f : -0.5f));
+}
+
+static void print_scaled3(const char *tag, float kp, float ki, float kd)
+{
+    int32_t kp_i = float_to_scaled(kp);
+    int32_t ki_i = float_to_scaled(ki);
+    int32_t kd_i = float_to_scaled(kd);
+    int32_t kp_abs = (kp_i < 0) ? -kp_i : kp_i;
+    int32_t ki_abs = (ki_i < 0) ? -ki_i : ki_i;
+    int32_t kd_abs = (kd_i < 0) ? -kd_i : kd_i;
+    (void)printf("[pid] %s kp=%c%ld.%03lu ki=%c%ld.%03lu kd=%c%ld.%03lu "
+                 "(x1000=%ld,%ld,%ld)\r\n",
+        tag,
+        (kp_i < 0) ? '-' : '+',
+        (long)(kp_abs / APP_BAL_PID_SCALE),
+        (unsigned long)(kp_abs % APP_BAL_PID_SCALE),
+        (ki_i < 0) ? '-' : '+',
+        (long)(ki_abs / APP_BAL_PID_SCALE),
+        (unsigned long)(ki_abs % APP_BAL_PID_SCALE),
+        (kd_i < 0) ? '-' : '+',
+        (long)(kd_abs / APP_BAL_PID_SCALE),
+        (unsigned long)(kd_abs % APP_BAL_PID_SCALE),
+        (long)kp_i, (long)ki_i, (long)kd_i);
+}
+
+static void print_pid_status(void)
+{
+    print_scaled3("balance", s_bal.balance_pid.kp, s_bal.balance_pid.ki, s_bal.balance_pid.kd);
+    print_scaled3("speed", s_bal.speed_pid.kp, s_bal.speed_pid.ki, s_bal.speed_pid.kd);
+}
+
+static void print_pid_help(void)
+{
+    (void)printf("[pid] UART commands: bp <kp_x1000> <ki_x1000> <kd_x1000>, "
+                 "sp <kp_x1000> <ki_x1000> <kd_x1000>, pid?, pid0, t/test\r\n");
+    (void)printf("[pid] example: bp 8000 0 1000 ; sp 2 0 0\r\n");
+}
+
+static bool parse_pid_triplet(const char *args, float *kp, float *ki, float *kd)
+{
+    int32_t kp_i;
+    int32_t ki_i;
+    int32_t kd_i;
+    const char *p = args;
+
+    if (!parse_i32_token(&p, &kp_i) ||
+        !parse_i32_token(&p, &ki_i) ||
+        !parse_i32_token(&p, &kd_i)) {
+        return false;
+    }
+
+    *kp = scaled_to_float(kp_i);
+    *ki = scaled_to_float(ki_i);
+    *kd = scaled_to_float(kd_i);
+    return true;
+}
+
+static bool handle_pid_command(const char *cmd)
+{
+    if (cmd == NULL) {
+        return false;
+    }
+
+    if ((cmd[0] == 'p') && (cmd[1] == 'i') && (cmd[2] == 'd') &&
+        ((cmd[3] == '?') || (cmd[3] == '\0'))) {
+        print_pid_status();
+        return true;
+    }
+
+    if ((cmd[0] == 'p') && (cmd[1] == 'i') && (cmd[2] == 'd') &&
+        (cmd[3] == '0') && (cmd[4] == '\0')) {
+        app_balance_set_balance_gains(0.0f, 0.0f, 0.0f);
+        app_balance_set_speed_gains(0.0f, 0.0f, 0.0f);
+        app_balance_reset();
+        (void)printf("[pid] all gains cleared\r\n");
+        return true;
+    }
+
+    if ((cmd[0] == 'b') && (cmd[1] == 'p') && is_field_separator(cmd[2])) {
+        float kp, ki, kd;
+        if (!parse_pid_triplet(&cmd[2], &kp, &ki, &kd)) {
+            (void)printf("[pid] bad bp command, use: bp 8000 0 1000\r\n");
+            return true;
+        }
+        app_balance_set_balance_gains(kp, ki, kd);
+        app_balance_reset();
+        print_scaled3("balance", kp, ki, kd);
+        return true;
+    }
+
+    if ((cmd[0] == 's') && (cmd[1] == 'p') && is_field_separator(cmd[2])) {
+        float kp, ki, kd;
+        if (!parse_pid_triplet(&cmd[2], &kp, &ki, &kd)) {
+            (void)printf("[pid] bad sp command, use: sp 2 0 0\r\n");
+            return true;
+        }
+        app_balance_set_speed_gains(kp, ki, kd);
+        app_balance_reset();
+        print_scaled3("speed", kp, ki, kd);
+        return true;
+    }
+
+    if ((cmd[0] == 'h') && (cmd[1] == '\0')) {
+        print_pid_help();
+        return true;
+    }
+
+    return false;
+}
+
+static void drain_log_uart_command_tail(void)
+{
+    uint8_t ch;
+    while (bsp_log_uart_read_byte(&ch)) {
+        if (is_line_delimiter(ch)) {
+            break;
+        }
+    }
+}
+
+static bool request_motor_test_mode(void)
+{
+    (void)printf("[ctrl] motor test mode requested\r\n");
+    bsp_motor_stop();
+    bsp_motor_enable(false);
+    drain_log_uart_command_tail();
+    return true;
+}
+
+static bool process_log_uart_commands(void)
+{
+    static char cmd_buf[APP_BAL_CMD_BUF_LEN];
+    static uint8_t cmd_len = 0u;
+    uint8_t ch;
+
+    while (bsp_log_uart_read_byte(&ch)) {
+        if ((ch >= (uint8_t)'A') && (ch <= (uint8_t)'Z')) {
+            ch = (uint8_t)(ch - (uint8_t)'A' + (uint8_t)'a');
+        }
+
+        if (is_line_delimiter(ch)) {
+            cmd_buf[cmd_len] = '\0';
+            bool request_test = is_test_command(cmd_buf, cmd_len);
+            cmd_len = 0u;
+            if (request_test) {
+                return request_motor_test_mode();
+            }
+            (void)handle_pid_command(cmd_buf);
+            continue;
+        }
+
+        if ((ch >= (uint8_t)' ') && (ch <= (uint8_t)'~')) {
+            if (cmd_len < (sizeof(cmd_buf) - 1u)) {
+                cmd_buf[cmd_len++] = (char)ch;
+                if (is_test_command(cmd_buf, cmd_len)) {
+                    cmd_len = 0u;
+                    return request_motor_test_mode();
+                }
+            } else {
+                cmd_len = 0u;
+            }
+        } else {
+            cmd_len = 0u;
+        }
+    }
+
+    return false;
+}
+
 static const char *safety_state_to_str(app_safety_state_t s)
 {
     switch (s) {
@@ -216,7 +575,7 @@ static const char *safety_state_to_str(app_safety_state_t s)
     }
 }
 
-void app_balance_run(void)
+bool app_balance_run(void)
 {
     uint32_t tick_count    = 0u;
     uint32_t last_total_rx = bsp_k230_uart_total_rx();
@@ -226,12 +585,19 @@ void app_balance_run(void)
     /* 主循环上电默认无运动指令（K230 通讯接入后由 MOTION_CMD 帧覆盖） */
     app_balance_motion_cmd_t cmd = { .target_speed_cps = 0, .target_yaw_pm = 0 };
 
+    print_pid_help();
+    print_pid_status();
+
     for (;;) {
         if (!bsp_systick_consume_tick()) {
             __WFI();
             continue;
         }
         tick_count++;
+
+        if (process_log_uart_commands()) {
+            return true;
+        }
 
         /* ---- 1 kHz：IMU drain + 电机 1 ms 节拍 -----------------------------
          *   IMU UART RX 半满中断已把字节排入 256 B 环缓，本拍只做拷贝 + 解析；
@@ -288,26 +654,29 @@ void app_balance_run(void)
             app_balance_diag_t  diag;
             app_balance_get_diag(&diag);
             uint32_t batt_mv  = bsp_battery_get_mv();
+            uint32_t log_ovr = bsp_log_uart_rx_overrun();
 
-            (void)printf("[hb] t=%lus state=%s pitch=%c%ld.%02lu tilt*=%c%ld.%02lu "
-                         "pwm=%c%ld.%02lu L=%ld R=%ld v=%ldcps "
-                         "batt=%lumV ms901m_g=%lu/b=%lu k230_rx=%lub/s "
-                         "encL=%ld encR=%ld encISR=%lu/s btn=%lu/%lu%s\n",
+            (void)printf("[hb] t=%lus state=%s pitch=%c%ld.%02lu inv=%u tilt*=%c%ld.%02lu "
+                         "pwm=%c%ld.%02lu syncErr=%ld syncCorr=%d L=%ld R=%ld v=%ldcps "
+                         "batt=%lumV ms901m_g=%lu/b=%lu log_ovr=%lu k230_rx=%lub/s "
+                         "encL=%ld encR=%ld encISR=%lu/s%s\n",
                 (unsigned long)(tick_count / 1000u),
                 safety_state_to_str(app_safety_get_state()),
                 BAL_F2_S(diag.pitch_meas_deg), (long)BAL_F2_I(diag.pitch_meas_deg), (unsigned long)BAL_F2_F(diag.pitch_meas_deg),
+                app_balance_get_pitch_inverted() ? 1u : 0u,
                 BAL_F2_S(diag.target_tilt_deg), (long)BAL_F2_I(diag.target_tilt_deg), (unsigned long)BAL_F2_F(diag.target_tilt_deg),
                 BAL_F2_S(diag.balance_out_pwm), (long)BAL_F2_I(diag.balance_out_pwm), (unsigned long)BAL_F2_F(diag.balance_out_pwm),
+                (long)diag.sync_error_cps,
+                (int)diag.sync_correction_pm,
                 (long)diag.left_cmd_pm, (long)diag.right_cmd_pm,
                 (long)diag.speed_meas_cps,
                 (unsigned long)batt_mv,
                 (unsigned long)ms901m_good_frames(),
                 (unsigned long)ms901m_bad_frames(),
+                (unsigned long)log_ovr,
                 (unsigned long)delta_rx,
                 (long)left_cnt, (long)right_cnt,
                 (unsigned long)delta_enc_irq,
-                (unsigned long)bsp_motor_get_button_irq_count(),
-                (unsigned long)bsp_motor_get_button_poll_count(),
                 encQuenched ? " [ISR_QUENCH!]" : "");
         }
     }

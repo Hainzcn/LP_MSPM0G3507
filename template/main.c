@@ -11,14 +11,14 @@
  *      bsp_k230_uart_init    -- UART1 + DMA RX 接收骨架
  *      bsp_imu_uart_init     -- UART3 (MS901M) RX 中断 + 256 B 环缓
  *      ms901m_init           -- 解析器状态机复位 + 量程系数（±4 g / ±2000 dps）
- *      wait_for_ms901m_*     -- 上电后 500 ms 内等到第一帧 0x01；超时报警
- *      bsp_motor_init        -- TB6612 + QEI + S1 中断（X4 解码默认开 PA13 双沿）
+ *      wait_for_ms901m_*     -- 上电后 3000 ms 内等到第一帧 0x01；超时报警
+ *      bsp_motor_init        -- TB6612 + QEI + 右编码器中断（X4 解码默认开 PA13 双沿）
  *      bsp_battery_init      -- ADC0/PB24 触发首次软件转换
  *      app_safety_init       -- 安全状态机置 DISARMED + 电机 brake + STBY 关
  *      app_balance_init      -- 两路 PID 安全默认（增益 0 + 输出限幅 + D 滤波）
- *      app_balance_run       -- 永不返回的主循环
+ *      app_balance_run       -- 默认装车模式；UART `t`/`test` 可切入电机演示
  *
- *  失败处理：MS901M 上电后 500 ms 仍未收到 0x01 姿态帧 → LED_R 常亮 + 蜂鸣
+ *  失败处理：MS901M 上电后 3000 ms 仍未收到 0x01 姿态帧 → LED_R 常亮 + 蜂鸣
  *            200 ms，然后死循环；不进入主循环以免上报无效数据。
  *
  *  GPIO 备注：业务 GPIO 全部由 bsp_gpio.[ch] 管理，宏前缀 BSP_*；syscfg 不
@@ -31,7 +31,8 @@
  *
  *  Stage 1.6 变更（2026-05-08）：IMU 串口从 UART2/PA21/PA22 迁到 UART3/PB12/
  *  PB13（原蓝牙引脚），原因是 PA21 未引到 BoosterPack 需焊接；同期蓝牙
- *  HC-04 模块整体下线，遥测改走 1 Hz XDS-UART printf。详见
+ *  HC-04 模块整体下线，遥测改走 1 Hz XDS-UART printf；MS901M 0x01 姿态帧
+ *  由 app_balance 再做一阶低通后进入平衡环。详见
  *  docs/TaskLog/Stage1.5-IMU-Swap-MS901M.md §11 Stage 1.6 重排。
  *
  *  Stage 2.2 变更（2026-05-09）：上车基线固件就绪。原 `app_telemetry_run()`
@@ -63,17 +64,17 @@
  * scatter 用模块级 `bsp_flash_pad.o (+Last)` 选择器（见
  * template/keil/mspm0g3507.sct 与 docs/TaskLog/Stage1-IMU-BT-Telemetry.md §8.6）。 */
 
-/* MS901M 上电后允许多长时间没出第一帧 0x01 姿态。出厂默认 200 Hz 主动上报，
- * 上电到首帧典型 < 100 ms；500 ms 给冷启动足够裕度。 */
-#define MS901M_BOOT_TIMEOUT_MS   500u
+/* MS901M 上电后允许多长时间没出第一帧 0x01 姿态。实车电源冷启动时模块
+ * 可能比主控慢，给 3 s 窗口，避免初始化期红灯常亮误判为 fatal。 */
+#define MS901M_BOOT_TIMEOUT_MS   3000u
 
 /* 等待期间每拍 drain 字节数上限（≥ 单帧最大 17 B + 几帧裕度即可） */
 #define MS901M_DRAIN_CHUNK       64u
 
-/* 装车模式临时测试 PID：只用于离地 / 支架调试，正式整定前应改为串口注入。 */
-#define LOAD_TEST_BALANCE_KP     (30.0f)
+/* 装车模式默认 PID：上电保持 0 输出，实际整定通过 XDS-UART 注入。 */
+#define LOAD_TEST_BALANCE_KP     (0.0f)
 #define LOAD_TEST_BALANCE_KI     (0.0f)
-#define LOAD_TEST_BALANCE_KD     (4.0f)
+#define LOAD_TEST_BALANCE_KD     (0.0f)
 #define LOAD_TEST_SPEED_KP       (0.0f)
 #define LOAD_TEST_SPEED_KI       (0.0f)
 #define LOAD_TEST_SPEED_KD       (0.0f)
@@ -143,8 +144,8 @@ int main(void)
         (unsigned long)ms901m_good_frames(),
         (unsigned long)ms901m_bad_frames());
 
-    /* Stage 2.2：电机 / 电池初始化后先进入电机 demo。安全 / 平衡在装车
-     * 请求后再初始化，避免 demo 输出被 safety 的 DISARMED 状态覆盖。
+    /* Stage 2.7：上电默认进入装车模式。仅在装车模式收到 UART `t` / `test`
+     * 后切入电机演示；电机演示收到 `l` / `load` 后返回装车模式。
      *
      *   bsp_motor_init  必须在 bsp_gpio_init 之后（依赖 BSP_ENC_R_*_PIN 配置）
      *   bsp_battery_init 必须在 SYSCFG_DL_init 之后（依赖 ADC_BAT_INST 已配）
@@ -158,24 +159,22 @@ int main(void)
      *       这里清一下当作 "Boot OK" 视觉反馈，进入 run() 后由 5 Hz 任务接管。 */
     DL_GPIO_clearPins(BSP_LED_R_PORT, BSP_LED_R_PIN);
 
-    if (!app_motor_demo_run()) {
-        for (;;) { __WFI(); }
+    for (;;) {
+        (void)printf("[boot] entering load balance mode; inject PID by UART\r\n");
+
+        app_safety_init();
+        app_balance_init();
+        app_balance_set_balance_gains(LOAD_TEST_BALANCE_KP,
+            LOAD_TEST_BALANCE_KI, LOAD_TEST_BALANCE_KD);
+        app_balance_set_speed_gains(LOAD_TEST_SPEED_KP,
+            LOAD_TEST_SPEED_KI, LOAD_TEST_SPEED_KD);
+        (void)app_safety_arm();
+
+        if (app_balance_run()) {
+            (void)printf("[boot] switching to motor test demo; send 'l' or 'load' to return\r\n");
+            (void)app_motor_demo_run();
+        }
     }
 
-    (void)printf("[boot] switching to load balance mode with test PID "
-                 "Kp=%ld Ki=%ld Kd=%ld (x100)\n",
-        (long)(LOAD_TEST_BALANCE_KP * 100.0f),
-        (long)(LOAD_TEST_BALANCE_KI * 100.0f),
-        (long)(LOAD_TEST_BALANCE_KD * 100.0f));
-
-    app_safety_init();
-    app_balance_init();
-    app_balance_set_balance_gains(LOAD_TEST_BALANCE_KP,
-        LOAD_TEST_BALANCE_KI, LOAD_TEST_BALANCE_KD);
-    app_balance_set_speed_gains(LOAD_TEST_SPEED_KP,
-        LOAD_TEST_SPEED_KI, LOAD_TEST_SPEED_KD);
-    (void)app_safety_arm();
-
-    app_balance_run();
     return 0;
 }

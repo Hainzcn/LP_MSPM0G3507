@@ -216,7 +216,7 @@ Done.
 | M1 RMSE 小，M2 改善 < 5% | 绕组不对称主导 | 在同步环中加固定前馈偏置 |
 | M2 改善 > 20% | 电压塌陷主导 | 提高电源容量 / 降低满载 PWM 上限 |
 | 两者 RMSE 均 > 15 rpm | 编码器噪声 / 转速抖动本底较高 | 检查编码器信号质量，考虑增大 SPEED_WINDOW_MS |
-| fig1 曲线出现死区（RPM ≈ 0 at low PWM） | 电机摩擦死区 | 将 `APP_MOTOR_CAL_PWM_START_PM` 降低至 50 重跑 |
+| fig1 曲线出现死区（RPM ≈ 0 at low PWM） | 电机摩擦死区 | 记录最后不转与首次起转 PWM，中点写入 `BSP_MOTOR_DEADZONE_COMP_PM` |
 | vbat 全部 < 1000 mV | 未接电池 | 接电池后重录；此时 M2 电压分析无意义 |
 
 ---
