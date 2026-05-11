@@ -38,13 +38,13 @@
 #define APP_MOTOR_CAL_PWM_START_PM     (0)
 #endif
 #ifndef APP_MOTOR_CAL_PWM_END_PM
-#define APP_MOTOR_CAL_PWM_END_PM       (200)
+#define APP_MOTOR_CAL_PWM_END_PM       (100)
 #endif
 #ifndef APP_MOTOR_CAL_PWM_STEP_PM
-#define APP_MOTOR_CAL_PWM_STEP_PM      (20)
+#define APP_MOTOR_CAL_PWM_STEP_PM      (5)
 #endif
 #ifndef APP_MOTOR_CAL_DWELL_MS
-#define APP_MOTOR_CAL_DWELL_MS         (1500u)
+#define APP_MOTOR_CAL_DWELL_MS         (2000u)
 #endif
 #ifndef APP_MOTOR_CAL_SAMPLE_PERIOD_MS
 #define APP_MOTOR_CAL_SAMPLE_PERIOD_MS (100u)
@@ -71,6 +71,8 @@ static uint32_t        s_cal_last_sample_ms = 0u;
 /* 校准进入时保存的原始状态，结束/中止后恢复 */
 static int16_t         s_cal_saved_pwm_pm        = 0;
 static bool            s_cal_saved_sync_enabled  = false;
+static bool            s_cal_saved_deadzone_comp = false;
+static bool            s_cal_saved_cal_mode      = false;
 
 static uint16_t s_target_rpm = APP_MOTOR_DEMO_DEFAULT_RPM;
 static int16_t  s_target_pwm_pm =
@@ -240,14 +242,26 @@ static void print_cal_header(int8_t dir)
     int16_t total = s_cal_total_steps;
     (void)printf(
         "[cal] start dir=%+d steps=%d pm_start=%d pm_end=%d step=%d "
-        "dwell_ms=%u settle_ms=%u\r\n",
+        "dwell_ms=%u settle_ms=%u dz_comp=%u cal_mode=%u "
+        "dz_lf=%d dz_lr=%d dz_rf=%d dz_rr=%d "
+        "rdz_lf=%d rdz_lr=%d rdz_rf=%d rdz_rr=%d\r\n",
         (int)dir,
         (int)total,
         APP_MOTOR_CAL_PWM_START_PM,
         APP_MOTOR_CAL_PWM_END_PM,
         APP_MOTOR_CAL_PWM_STEP_PM,
         (unsigned int)APP_MOTOR_CAL_DWELL_MS,
-        (unsigned int)APP_MOTOR_CAL_SETTLE_MS);
+        (unsigned int)APP_MOTOR_CAL_SETTLE_MS,
+        bsp_motor_get_deadzone_comp_enabled() ? 1u : 0u,
+        bsp_motor_get_calibration_mode() ? 1u : 0u,
+        BSP_MOTOR_LEFT_FORWARD_DEADZONE_PM,
+        BSP_MOTOR_LEFT_REVERSE_DEADZONE_PM,
+        BSP_MOTOR_RIGHT_FORWARD_DEADZONE_PM,
+        BSP_MOTOR_RIGHT_REVERSE_DEADZONE_PM,
+        BSP_MOTOR_LEFT_FORWARD_RUNNING_DEADZONE_PM,
+        BSP_MOTOR_LEFT_REVERSE_RUNNING_DEADZONE_PM,
+        BSP_MOTOR_RIGHT_FORWARD_RUNNING_DEADZONE_PM,
+        BSP_MOTOR_RIGHT_REVERSE_RUNNING_DEADZONE_PM);
 }
 
 static void print_cal_step(int8_t dir, int16_t idx, int16_t pm)
@@ -332,10 +346,17 @@ bool app_motor_demo_cal_start(void)
 
     s_cal_saved_pwm_pm       = s_target_pwm_pm;
     s_cal_saved_sync_enabled = s_sync.enabled;
+    s_cal_saved_deadzone_comp = bsp_motor_get_deadzone_comp_enabled();
+    s_cal_saved_cal_mode     = bsp_motor_get_calibration_mode();
 
     s_sync.enabled = false;
     s_sync_i_pm    = 0;
     s_sync.correction_pm = 0;
+    bsp_motor_set_deadzone_comp_enabled(true);
+    /* 校准必须用 cal_mode = 静态 DZ 映射 + 无 kick：稳态 PWM→RPM 关系才能正确
+     * 反映补偿效果，否则除每相首档外其他档位会退到 running_dz 路径，输出远低
+     * 于静摩擦阈值而无法启动电机。详见 bsp_motor_set_calibration_mode() 注释。 */
+    bsp_motor_set_calibration_mode(true);
 
     s_cal_total_steps = cal_total_steps();
     s_cal_step_idx    = 0;
@@ -357,6 +378,8 @@ void app_motor_demo_cal_abort(void)
     }
     (void)printf("[cal] abort\r\n");
     s_cal_phase = APP_CAL_IDLE;
+    bsp_motor_set_calibration_mode(s_cal_saved_cal_mode);
+    bsp_motor_set_deadzone_comp_enabled(s_cal_saved_deadzone_comp);
     brake_now();
 
     s_target_pwm_pm  = s_cal_saved_pwm_pm;
@@ -404,6 +427,8 @@ static bool handle_calibration_tick(uint32_t now_ms, bsp_motor_feedback_t *feedb
                 s_sync.enabled   = s_cal_saved_sync_enabled;
                 s_sync_i_pm      = 0;
                 s_sync.correction_pm = 0;
+                bsp_motor_set_calibration_mode(s_cal_saved_cal_mode);
+                bsp_motor_set_deadzone_comp_enabled(s_cal_saved_deadzone_comp);
                 (void)printf("[cal] calibration complete\r\n");
             }
         } else {

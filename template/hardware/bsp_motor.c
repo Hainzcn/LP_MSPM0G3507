@@ -61,7 +61,20 @@ typedef struct {
     uint16_t pwm_limit_pm;
     bool     invert_left;
     bool     invert_right;
+    bool     deadzone_comp_enabled;
+    bool     calibration_mode;     /* true: commit 走静态 DZ + 无 kick；详见 .h */
     bool     enabled;
+
+    /* --- Kick 启动脉冲状态（主循环私有：仅 commit_* 与 update() 访问） -------
+     *   prev_dir:        +1 / 0 / -1，跟踪上一次写到硬件的物理方向（已应用
+     *                    极性翻转之前），用于检测方向跳变；
+     *   kick_remain_ms:  剩余 kick 毫秒数，0 = 无 kick。
+     *   方向跳变（0→非零 或 +→-/-→+）时由 commit_* 置 BSP_MOTOR_KICK_MS；
+     *   update() 1 kHz 递减；到期后 commit_* 自动切回 running deadzone 路径。 */
+    int8_t   left_prev_dir;
+    int8_t   right_prev_dir;
+    uint16_t left_kick_remain_ms;
+    uint16_t right_kick_remain_ms;
 } motor_state_t;
 
 static motor_state_t s_motor;
@@ -87,16 +100,47 @@ static int16_t apply_limit(int16_t permille)
     return (int16_t)clip_int((int32_t)permille, -lim, lim);
 }
 
-/**
- * 逻辑 PWM → 物理 PWM 死区补偿：
- *   0 仍为 coast；非零命令抬升到起转死区以上，同时按当前限幅重映射，
- *   保证逻辑满量程仍对应物理满量程，不会因简单相加而提前饱和。
- */
-static int16_t apply_deadzone_comp(int16_t permille)
+/** 按方向 / 左右取动摩擦"running"死区（稳态线性区基准）。 */
+static int32_t get_running_dz_pm(int16_t permille, bool is_left)
 {
-#if BSP_MOTOR_DEADZONE_COMP_PM > 0
+    if (permille > 0) {
+        return is_left ? BSP_MOTOR_LEFT_FORWARD_RUNNING_DEADZONE_PM
+                       : BSP_MOTOR_RIGHT_FORWARD_RUNNING_DEADZONE_PM;
+    }
+    if (permille < 0) {
+        return is_left ? BSP_MOTOR_LEFT_REVERSE_RUNNING_DEADZONE_PM
+                       : BSP_MOTOR_RIGHT_REVERSE_RUNNING_DEADZONE_PM;
+    }
+    return 0;
+}
+
+/** 按方向 / 左右取静摩擦 kick 幅值（=原 *_DEADZONE_PM 标定值）。 */
+static int32_t get_kick_pm(int16_t permille, bool is_left)
+{
+    if (permille > 0) {
+        return is_left ? BSP_MOTOR_LEFT_FORWARD_KICK_PM
+                       : BSP_MOTOR_RIGHT_FORWARD_KICK_PM;
+    }
+    if (permille < 0) {
+        return is_left ? BSP_MOTOR_LEFT_REVERSE_KICK_PM
+                       : BSP_MOTOR_RIGHT_REVERSE_KICK_PM;
+    }
+    return 0;
+}
+
+/**
+ * 死区线性重映射核：[-lim, -dz] ∪ {0} ∪ [dz, +lim]。
+ *   0 仍为 coast；非零命令按 dz 抬升到死区门槛以上，同时按当前限幅重映射，
+ *   保证逻辑满量程仍对应物理满量程，不会因简单相加而提前饱和。
+ *   `dz` 由调用方按 running / static 表选好后传入；本函数不关心 dz 来源。
+ */
+static int16_t apply_deadzone_mapping(int16_t permille, int32_t dz)
+{
     if (permille == 0) {
         return 0;
+    }
+    if (dz <= 0) {
+        return permille;
     }
 
     int32_t lim = (int32_t)s_motor.pwm_limit_pm;
@@ -107,8 +151,7 @@ static int16_t apply_deadzone_comp(int16_t permille)
         return 0;
     }
 
-    int32_t dead = BSP_MOTOR_DEADZONE_COMP_PM;
-    if (dead >= lim) {
+    if (dz >= lim) {
         return (permille > 0) ? (int16_t)lim : (int16_t)-lim;
     }
 
@@ -116,11 +159,52 @@ static int16_t apply_deadzone_comp(int16_t permille)
     if (mag > lim) {
         mag = lim;
     }
-    mag = dead + ((mag * (lim - dead)) / lim);
+    mag = dz + ((mag * (lim - dz)) / lim);
     return (permille > 0) ? (int16_t)mag : (int16_t)-mag;
-#else
-    return permille;
-#endif
+}
+
+/** Running 死区映射（稳态线性区，平衡车 / 默认运行模式）。 */
+static int16_t apply_running_deadzone(int16_t permille, bool is_left)
+{
+    return apply_deadzone_mapping(permille, get_running_dz_pm(permille, is_left));
+}
+
+/** Static 死区映射（= 静摩擦门槛，cal 模式 / 旧单门槛行为）。 */
+static int16_t apply_static_deadzone(int16_t permille, bool is_left)
+{
+    return apply_deadzone_mapping(permille, get_kick_pm(permille, is_left));
+}
+
+/**
+ * Kick "地板"：把已 deadzone 映射的输出抬升到至少静摩擦突破值（受限幅约束）。
+ *   ─ 对小命令（如 PID 在零点附近）：等价于"50 ms 内固定输出 KICK_PM"；
+ *   ─ 对大命令（如 demo 全速）：抬升不生效，避免产生"先低后高"的扭矩悬崖。
+ *   ─ 输入 dz_mapped_pm 已含方向（正/负），输出维持同符号。
+ */
+static int16_t apply_kick_floor(int16_t dz_mapped_pm, bool is_left)
+{
+    if (dz_mapped_pm == 0) {
+        return 0;
+    }
+
+    int32_t kick = get_kick_pm(dz_mapped_pm, is_left);
+    if (kick <= 0) {
+        return dz_mapped_pm;
+    }
+
+    int32_t lim = (int32_t)s_motor.pwm_limit_pm;
+    if (lim > BSP_MOTOR_PWM_MAX_PERMILLE) {
+        lim = BSP_MOTOR_PWM_MAX_PERMILLE;
+    }
+    if (kick > lim) {
+        kick = lim;
+    }
+
+    int32_t mag = (dz_mapped_pm > 0) ? (int32_t)dz_mapped_pm : -(int32_t)dz_mapped_pm;
+    if (mag < kick) {
+        mag = kick;
+    }
+    return (dz_mapped_pm > 0) ? (int16_t)mag : (int16_t)-mag;
 }
 
 /** 取 permille 的绝对值（已假设输入已经限幅，安全无溢出）。 */
@@ -227,28 +311,73 @@ static void apply_one_channel(int16_t permille_after_invert,
     }
 }
 
-/** 命令 → 物理输出（限幅 + 极性 + 写硬件） */
-static void commit_left(int16_t cmd_pm)
+/**
+ * 通道公共提交：完整流程  limit → kick state → right_fwd_scale → deadzone(+kick) →
+ *                          invert → 写硬件。
+ *
+ * 两种死区路径（由 s_motor.calibration_mode 决定）：
+ *   ─ calibration_mode = false（默认 / 平衡车 / motor demo 运行）：
+ *       deadzone = running_dz，方向跳变时叠加 50 ms kick floor（双门槛 + 启动脉冲）。
+ *   ─ calibration_mode = true（校准扫描）：
+ *       deadzone = static_dz（= KICK_PM），不应用 kick floor。整段扫描走旧
+ *       单门槛行为，"DZ in data" 反映真实有效死区，可用于验证补偿是否生效。
+ *       cal 模式下 kick 计时器仍维护，但不影响输出 —— 切回非 cal 模式后立即生效。
+ *
+ * Kick 状态机（始终维护，与 cal_mode 无关）：
+ *   ─ new_dir 取自**逻辑 cmd 的符号**（不含极性翻转 / 右路 scale，避免极性翻转
+ *     被错认为方向跳变）；
+ *   ─ new_dir == 0：清 kick，下次启动会重新触发；
+ *   ─ new_dir != 0 且 new_dir != prev_dir：装载 BSP_MOTOR_KICK_MS。
+ *   ─ kick 计时在 update() 1 kHz 路径递减，到期后再次 commit 让输出退到 running
+ *     deadzone。
+ */
+static void commit_channel(int16_t cmd_pm, bool is_left)
 {
+    int8_t   new_dir         = (cmd_pm > 0) ? (int8_t)1
+                              : (cmd_pm < 0) ? (int8_t)-1 : (int8_t)0;
+    int8_t  *prev_dir_p      = is_left ? &s_motor.left_prev_dir
+                                       : &s_motor.right_prev_dir;
+    uint16_t *kick_remain_p  = is_left ? &s_motor.left_kick_remain_ms
+                                       : &s_motor.right_kick_remain_ms;
+
+    if (new_dir == 0) {
+        *kick_remain_p = 0u;
+    } else if (new_dir != *prev_dir_p) {
+        *kick_remain_p = BSP_MOTOR_KICK_MS;
+    }
+    *prev_dir_p = new_dir;
+
     int16_t pm = apply_limit(cmd_pm);
-    pm = apply_deadzone_comp(pm);
-    if (s_motor.invert_left) {
+    if (!is_left && pm > 0) {
+        pm = (int16_t)((((int32_t)pm * BSP_MOTOR_RIGHT_FORWARD_SCALE_X1000) + 500) / 1000);
+    }
+
+    if (s_motor.deadzone_comp_enabled) {
+        if (s_motor.calibration_mode) {
+            pm = apply_static_deadzone(pm, is_left);
+        } else {
+            pm = apply_running_deadzone(pm, is_left);
+            if (*kick_remain_p > 0u) {
+                pm = apply_kick_floor(pm, is_left);
+            }
+        }
+    }
+
+    bool invert = is_left ? s_motor.invert_left : s_motor.invert_right;
+    if (invert) {
         pm = (int16_t)(-(int32_t)pm);
     }
-    apply_one_channel(pm, true);
+    apply_one_channel(pm, is_left);
+}
+
+static void commit_left(int16_t cmd_pm)
+{
+    commit_channel(cmd_pm, true);
 }
 
 static void commit_right(int16_t cmd_pm)
 {
-    int16_t pm = apply_limit(cmd_pm);
-    if (pm > 0) {
-        pm = (int16_t)((((int32_t)pm * BSP_MOTOR_RIGHT_FORWARD_SCALE_X1000) + 500) / 1000);
-    }
-    pm = apply_deadzone_comp(pm);
-    if (s_motor.invert_right) {
-        pm = (int16_t)(-(int32_t)pm);
-    }
-    apply_one_channel(pm, false);
+    commit_channel(cmd_pm, false);
 }
 
 /* ========================================================================== */
@@ -334,7 +463,13 @@ void bsp_motor_init(void)
     s_motor.pwm_limit_pm           = BSP_MOTOR_PWM_MAX_PERMILLE;
     s_motor.invert_left            = false;
     s_motor.invert_right           = false;
+    s_motor.deadzone_comp_enabled  = true;
+    s_motor.calibration_mode       = false;
     s_motor.enabled                = false;
+    s_motor.left_prev_dir          = 0;
+    s_motor.right_prev_dir         = 0;
+    s_motor.left_kick_remain_ms    = 0u;
+    s_motor.right_kick_remain_ms   = 0u;
 
     /* --- 2) 安全态：方向位清零 + PWM 占空 0 + STBY 拉低 -------------------- */
     set_dir_left (DIR_COAST);
@@ -416,11 +551,21 @@ void bsp_motor_set_right(int16_t right_permille)
     commit_right(right_permille);
 }
 
+/** 清 kick 状态：方向归零、计时归零。stop / brake 后下次启动会重新触发 kick。 */
+static void clear_kick_state(void)
+{
+    s_motor.left_prev_dir         = 0;
+    s_motor.right_prev_dir        = 0;
+    s_motor.left_kick_remain_ms   = 0u;
+    s_motor.right_kick_remain_ms  = 0u;
+}
+
 void bsp_motor_stop(void)
 {
     s_motor.brake_pulse_remain_ms = 0u;
     s_motor.left_cmd_pm  = 0;
     s_motor.right_cmd_pm = 0;
+    clear_kick_state();
     set_dir_left (DIR_COAST);
     set_dir_right(DIR_COAST);
     set_pwm_duty(GPIO_PWM_MOTOR_C0_IDX, 0u);
@@ -432,6 +577,7 @@ void bsp_motor_brake(void)
     s_motor.brake_pulse_remain_ms = 0u;   /* 持续模式，不会自动转 stop */
     s_motor.left_cmd_pm  = 0;
     s_motor.right_cmd_pm = 0;
+    clear_kick_state();
     set_dir_left (DIR_BRAKE);
     set_dir_right(DIR_BRAKE);
     set_pwm_duty(GPIO_PWM_MOTOR_C0_IDX, BSP_MOTOR_PWM_MAX_PERMILLE);
@@ -447,11 +593,45 @@ void bsp_motor_brake_pulse_ms(uint32_t duration_ms)
     /* 与持续 brake 复用硬件命令，但置位计时器；update() 倒计时到 0 后自动转 stop */
     s_motor.left_cmd_pm  = 0;
     s_motor.right_cmd_pm = 0;
+    clear_kick_state();
     set_dir_left (DIR_BRAKE);
     set_dir_right(DIR_BRAKE);
     set_pwm_duty(GPIO_PWM_MOTOR_C0_IDX, BSP_MOTOR_PWM_MAX_PERMILLE);
     set_pwm_duty(GPIO_PWM_MOTOR_C1_IDX, BSP_MOTOR_PWM_MAX_PERMILLE);
     s_motor.brake_pulse_remain_ms = duration_ms;
+}
+
+void bsp_motor_set_deadzone_comp_enabled(bool enabled)
+{
+    if (s_motor.deadzone_comp_enabled == enabled) {
+        return;
+    }
+
+    s_motor.deadzone_comp_enabled = enabled;
+    commit_left (s_motor.left_cmd_pm);
+    commit_right(s_motor.right_cmd_pm);
+}
+
+bool bsp_motor_get_deadzone_comp_enabled(void)
+{
+    return s_motor.deadzone_comp_enabled;
+}
+
+void bsp_motor_set_calibration_mode(bool enabled)
+{
+    if (s_motor.calibration_mode == enabled) {
+        return;
+    }
+
+    s_motor.calibration_mode = enabled;
+    /* 立即让新模式生效，避免"已切 cal 但旧命令仍按运行 dz 跑"的窗口。 */
+    commit_left (s_motor.left_cmd_pm);
+    commit_right(s_motor.right_cmd_pm);
+}
+
+bool bsp_motor_get_calibration_mode(void)
+{
+    return s_motor.calibration_mode;
 }
 
 /* ========================================================================== */
@@ -515,6 +695,23 @@ void bsp_motor_update(void)
         if (s_motor.brake_pulse_remain_ms == 0u) {
             /* 到期：转 coast。直接调 stop 会清 brake_pulse 计数（已是 0，无影响） */
             bsp_motor_stop();
+        }
+    }
+
+    /* --- 0.2) Kick 启动脉冲倒计时（左右独立）-------------------------------
+     *   到期后再次调用 commit_left/right(cmd_pm)：kick_remain 已归零，输出会从
+     *   "静摩擦地板 ≥ KICK_PM" 切换到"running deadzone 线性映射"，避免大命令在
+     *   首 50 ms 被压在 KICK_PM 上的"扭矩悬崖"。 */
+    if (s_motor.left_kick_remain_ms != 0u) {
+        s_motor.left_kick_remain_ms--;
+        if (s_motor.left_kick_remain_ms == 0u) {
+            commit_left(s_motor.left_cmd_pm);
+        }
+    }
+    if (s_motor.right_kick_remain_ms != 0u) {
+        s_motor.right_kick_remain_ms--;
+        if (s_motor.right_kick_remain_ms == 0u) {
+            commit_right(s_motor.right_cmd_pm);
         }
     }
 
@@ -668,6 +865,13 @@ void bsp_motor_reset_encoders(void)
     s_motor.speed_window_acc_ms    = 0u;
     /* 让下次 update() 把当前 16-bit raw 当作 0 起点，避免一次性吃进上一段差值 */
     s_motor.left_raw_prev = (uint16_t)DL_TimerG_getTimerCount(QEI_LEFT_INST);
+    /* 一并清 kick 状态：reset_encoders 语义上等价于"准备下次跑车"，下一次命令
+     * 应当被视为 0→非零的全新启动，自动触发 kick。motor 当前若仍在转，调用方
+     * 通常先 stop / brake 再 reset_encoders，所以此处覆盖到的边缘场景极少。 */
+    s_motor.left_prev_dir         = 0;
+    s_motor.right_prev_dir        = 0;
+    s_motor.left_kick_remain_ms   = 0u;
+    s_motor.right_kick_remain_ms  = 0u;
     MOTOR_UNLOCK();
 }
 

@@ -518,6 +518,7 @@ static bool request_motor_test_mode(void)
 {
     (void)printf("[ctrl] motor test mode requested\r\n");
     bsp_motor_stop();
+    bsp_motor_set_deadzone_comp_enabled(true);
     bsp_motor_enable(false);
     drain_log_uart_command_tail();
     return true;

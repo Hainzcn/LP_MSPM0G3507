@@ -78,13 +78,85 @@ extern "C" {
 #endif
 
 /**
- * 电机静摩擦死区补偿（permille）。
- * 标定数据：±20/±40‰ 均不转，±60‰ 已稳定起转，因此取中点 50‰。
- * BSP 会把非零逻辑命令映射到 [±50‰, 当前 PWM limit]，0 仍保持 coast。
+ * 电机静/动摩擦双门槛死区补偿（permille）。
+ *
+ * 物理事实（来自 tools/motor_calib 多轮标定）：
+ *   ─ "静摩擦突破"：电机从静止启动所需的最小 PWM，四路各异，左反向最大。
+ *   ─ "动摩擦门槛"：电机一旦转起来，维持转动所需的 PWM 远低于静摩擦。
+ *
+ * 单门槛"一刀切"会导致：非零命令瞬间跳到静摩擦补偿值 → 转速直接 0→10 RPM
+ * 阶跃，PID 在零附近永远无法线性可控。因此 BSP 拆为两阶段：
+ *
+ *   ① **Kick 阶段**（方向跳变后 BSP_MOTOR_KICK_MS 内）：用 KICK_PM 强行突破静
+ *      摩擦，保证电机一定能转。幅值默认 = BSP_MOTOR_*_DEADZONE_PM（标定值）。
+ *   ② **稳态阶段**（kick 计时到期后）：用 RUNNING_DEADZONE_PM 做线性映射，
+ *      死区减半 → 小命令也能产生小输出，0…1000‰ 区间线性可控。
+ *
+ * 静摩擦标定值（2026-05-11 第二轮 cal_mode 扫描，DZ in data 全部 ≈ 5 ✓）：
+ *   ─ 左正 50（旧 44，残留 DZ_data=10 → +6 余量）
+ *   ─ 左反 68（沿用，DZ_data=5 已最优）
+ *   ─ 右正 50（旧 44，残留 DZ_data=10 → +6 余量，含 RIGHT_FORWARD_SCALE 0.95）
+ *   ─ 右反 54（旧 42，残留 DZ_data=15 → +12 余量）
+ *
+ * 若旧工程只定义 BSP_MOTOR_DEADZONE_COMP_PM，则四路 DEADZONE_PM 沿用该值，
+ * RUNNING_DEADZONE 默认取其一半（最少 1‰），保留旧行为入口。
  */
 #ifndef BSP_MOTOR_DEADZONE_COMP_PM
-#define BSP_MOTOR_DEADZONE_COMP_PM                (50)
+#define BSP_MOTOR_DEADZONE_COMP_PM                (0)
 #endif
+
+#ifndef BSP_MOTOR_LEFT_FORWARD_DEADZONE_PM
+#define BSP_MOTOR_LEFT_FORWARD_DEADZONE_PM        ((BSP_MOTOR_DEADZONE_COMP_PM > 0) ? BSP_MOTOR_DEADZONE_COMP_PM : 50)
+#endif
+
+#ifndef BSP_MOTOR_LEFT_REVERSE_DEADZONE_PM
+#define BSP_MOTOR_LEFT_REVERSE_DEADZONE_PM        ((BSP_MOTOR_DEADZONE_COMP_PM > 0) ? BSP_MOTOR_DEADZONE_COMP_PM : 68)
+#endif
+
+#ifndef BSP_MOTOR_RIGHT_FORWARD_DEADZONE_PM
+#define BSP_MOTOR_RIGHT_FORWARD_DEADZONE_PM       ((BSP_MOTOR_DEADZONE_COMP_PM > 0) ? BSP_MOTOR_DEADZONE_COMP_PM : 50)
+#endif
+
+#ifndef BSP_MOTOR_RIGHT_REVERSE_DEADZONE_PM
+#define BSP_MOTOR_RIGHT_REVERSE_DEADZONE_PM       ((BSP_MOTOR_DEADZONE_COMP_PM > 0) ? BSP_MOTOR_DEADZONE_COMP_PM : 54)
+#endif
+
+/**
+ * 动摩擦死区（稳态线性区死区）。kick 计时到期后命令被映射到 [RUNNING_DEADZONE,
+ * 当前 PWM limit]，默认取静摩擦值的 1/2，对应 fig1 反向曲线 ~5-10 rpm 区间。
+ * 调试时若发现稳态卡顿，可独立向上微调；若线性度仍不够，可向下微调。
+ */
+#ifndef BSP_MOTOR_LEFT_FORWARD_RUNNING_DEADZONE_PM
+#define BSP_MOTOR_LEFT_FORWARD_RUNNING_DEADZONE_PM   (25)
+#endif
+#ifndef BSP_MOTOR_LEFT_REVERSE_RUNNING_DEADZONE_PM
+#define BSP_MOTOR_LEFT_REVERSE_RUNNING_DEADZONE_PM   (20)
+#endif
+#ifndef BSP_MOTOR_RIGHT_FORWARD_RUNNING_DEADZONE_PM
+#define BSP_MOTOR_RIGHT_FORWARD_RUNNING_DEADZONE_PM  (25)
+#endif
+#ifndef BSP_MOTOR_RIGHT_REVERSE_RUNNING_DEADZONE_PM
+#define BSP_MOTOR_RIGHT_REVERSE_RUNNING_DEADZONE_PM  (27)
+#endif
+
+/**
+ * Kick 启动脉冲持续毫秒数（=update() tick 数）。
+ * 50 ms 经验值，对 GB370 + TB6612 链路足够齿轮转过一个齿位、突破静摩擦；
+ * 太短可能脉冲消失前电机还没启动（弱启动失败），太长会让"小命令"的初始
+ * 阶段显著高于稳态目标，造成"先冲后回"的非对称启动。
+ */
+#ifndef BSP_MOTOR_KICK_MS
+#define BSP_MOTOR_KICK_MS                            (50u)
+#endif
+
+/**
+ * Kick 脉冲幅值：直接复用各方向静摩擦标定值，确保第一拍输出一定能突破静摩擦。
+ * 如需独立调参（例如脉冲幅值要超过静摩擦更多），可在工程级 -D 覆盖本处别名。
+ */
+#define BSP_MOTOR_LEFT_FORWARD_KICK_PM    BSP_MOTOR_LEFT_FORWARD_DEADZONE_PM
+#define BSP_MOTOR_LEFT_REVERSE_KICK_PM    BSP_MOTOR_LEFT_REVERSE_DEADZONE_PM
+#define BSP_MOTOR_RIGHT_FORWARD_KICK_PM   BSP_MOTOR_RIGHT_FORWARD_DEADZONE_PM
+#define BSP_MOTOR_RIGHT_REVERSE_KICK_PM   BSP_MOTOR_RIGHT_REVERSE_DEADZONE_PM
 
 #define BSP_MOTOR_LEFT_COUNTS_PER_OUTPUT_REV \
     (BSP_MOTOR_GB370_GEAR_RATIO * BSP_MOTOR_GB370_HALL_PPR * BSP_MOTOR_LEFT_DECODE_X)
@@ -212,6 +284,52 @@ void bsp_motor_brake(void);
  * @param duration_ms  brake 持续毫秒数，推荐 50~150；0 = 立即转 stop（等价 `bsp_motor_stop()`）
  */
 void bsp_motor_brake_pulse_ms(uint32_t duration_ms);
+
+/**
+ * @brief 开关四路静摩擦死区补偿。
+ *        默认开启，普通电机测试会把非零命令映射到起转死区以上；
+ *        平衡闭环可关闭它，保留接近 0 的连续小 PWM，避免死区阶跃冲击。
+ */
+void bsp_motor_set_deadzone_comp_enabled(bool enabled);
+
+/** 查询当前是否启用四路静摩擦死区补偿。 */
+bool bsp_motor_get_deadzone_comp_enabled(void);
+
+/**
+ * @brief 切换校准扫描专用补偿模式（cal-mode）。
+ *
+ *        默认 false：commit 用 RUNNING_DEADZONE_PM 做稳态线性映射，方向跳变时
+ *                    应用 50 ms KICK 地板（=双门槛 + 启动脉冲，平衡车真实工作模式）。
+ *        true：commit 始终用 *_DEADZONE_PM 做线性映射，关闭 kick floor。
+ *
+ *        校准扫描必须用 cal-mode = true，否则除每相首档外的所有档位都走
+ *        running_dz 路径，输出远低于静摩擦阈值 → 电机不启动 → "DZ in data"
+ *        反映 running_dz 而非真实有效死区，校准失去验证意义。
+ *
+ *        cal-mode = true 时行为与旧版单门槛完全一致，便于沿用 fig1 形态判断
+ *        补偿是否生效（"DZ in data ≈ 5" = 补偿足够）。
+ */
+void bsp_motor_set_calibration_mode(bool enabled);
+
+/** 查询当前是否处于校准扫描专用补偿模式。 */
+bool bsp_motor_get_calibration_mode(void);
+
+/**
+ * @brief 切换校准扫描专用补偿模式。
+ *
+ *        默认 false：commit 用 RUNNING_DEADZONE_PM 做稳态线性映射 + 方向跳变时
+ *                    应用 50 ms KICK 地板（= 双门槛行为）；
+ *        true：commit 始终用静态 DEADZONE_PM 映射 + 关闭 kick floor。
+ *
+ *        校准扫描需要稳态、可重复的 PWM→RPM 关系：双门槛会导致除每相首档外
+ *        所有档位都退到 running_dz 输出，远低于静摩擦阈值，绝大多数档位电机
+ *        不会启动，"DZ in data" 反映 running_dz 而非真实补偿后的有效死区，
+ *        失去验证意义。开启本标志后行为与旧版单门槛一致，便于复用 fig1 形态。
+ */
+void bsp_motor_set_calibration_mode(bool enabled);
+
+/** 查询当前是否处于校准扫描专用补偿模式。 */
+bool bsp_motor_get_calibration_mode(void);
 
 /* ========================================================================== */
 /* 极性 / 限幅（运行时可调，省去重新编译）                                       */
