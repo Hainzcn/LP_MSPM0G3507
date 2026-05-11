@@ -58,6 +58,8 @@ typedef struct {
     /* --- 命令与配置 --------------------------------------------------------- */
     int16_t  left_cmd_pm;
     int16_t  right_cmd_pm;
+    int16_t  left_actual_pwm_pm;
+    int16_t  right_actual_pwm_pm;
     uint16_t pwm_limit_pm;
     bool     invert_left;
     bool     invert_right;
@@ -367,6 +369,11 @@ static void commit_channel(int16_t cmd_pm, bool is_left)
     if (invert) {
         pm = (int16_t)(-(int32_t)pm);
     }
+    if (is_left) {
+        s_motor.left_actual_pwm_pm = pm;
+    } else {
+        s_motor.right_actual_pwm_pm = pm;
+    }
     apply_one_channel(pm, is_left);
 }
 
@@ -460,6 +467,8 @@ void bsp_motor_init(void)
 
     s_motor.left_cmd_pm            = 0;
     s_motor.right_cmd_pm           = 0;
+    s_motor.left_actual_pwm_pm     = 0;
+    s_motor.right_actual_pwm_pm    = 0;
     s_motor.pwm_limit_pm           = BSP_MOTOR_PWM_MAX_PERMILLE;
     s_motor.invert_left            = false;
     s_motor.invert_right           = false;
@@ -565,6 +574,8 @@ void bsp_motor_stop(void)
     s_motor.brake_pulse_remain_ms = 0u;
     s_motor.left_cmd_pm  = 0;
     s_motor.right_cmd_pm = 0;
+    s_motor.left_actual_pwm_pm = 0;
+    s_motor.right_actual_pwm_pm = 0;
     clear_kick_state();
     set_dir_left (DIR_COAST);
     set_dir_right(DIR_COAST);
@@ -577,6 +588,8 @@ void bsp_motor_brake(void)
     s_motor.brake_pulse_remain_ms = 0u;   /* 持续模式，不会自动转 stop */
     s_motor.left_cmd_pm  = 0;
     s_motor.right_cmd_pm = 0;
+    s_motor.left_actual_pwm_pm = 0;
+    s_motor.right_actual_pwm_pm = 0;
     clear_kick_state();
     set_dir_left (DIR_BRAKE);
     set_dir_right(DIR_BRAKE);
@@ -593,6 +606,8 @@ void bsp_motor_brake_pulse_ms(uint32_t duration_ms)
     /* 与持续 brake 复用硬件命令，但置位计时器；update() 倒计时到 0 后自动转 stop */
     s_motor.left_cmd_pm  = 0;
     s_motor.right_cmd_pm = 0;
+    s_motor.left_actual_pwm_pm = 0;
+    s_motor.right_actual_pwm_pm = 0;
     clear_kick_state();
     set_dir_left (DIR_BRAKE);
     set_dir_right(DIR_BRAKE);
@@ -681,6 +696,16 @@ int16_t bsp_motor_get_left_cmd(void)
 int16_t bsp_motor_get_right_cmd(void)
 {
     return s_motor.right_cmd_pm;
+}
+
+int16_t bsp_motor_get_left_actual_pwm(void)
+{
+    return s_motor.left_actual_pwm_pm;
+}
+
+int16_t bsp_motor_get_right_actual_pwm(void)
+{
+    return s_motor.right_actual_pwm_pm;
 }
 
 /* ========================================================================== */

@@ -368,6 +368,12 @@ int16_t bsp_motor_get_left_cmd(void);
 /** 当前右轮命令 permille */
 int16_t bsp_motor_get_right_cmd(void);
 
+/** 当前左轮实际 PWM 占空比 permille（已应用限幅、补偿、scale、极性翻转）。 */
+int16_t bsp_motor_get_left_actual_pwm(void);
+
+/** 当前右轮实际 PWM 占空比 permille（已应用限幅、补偿、scale、极性翻转）。 */
+int16_t bsp_motor_get_right_actual_pwm(void);
+
 /* ========================================================================== */
 /* 反馈与编码器                                                                 */
 /* ========================================================================== */

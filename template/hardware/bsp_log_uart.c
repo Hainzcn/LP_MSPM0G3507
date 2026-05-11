@@ -22,11 +22,43 @@
 
 #define LOG_RX_BUF_SIZE   128u
 #define LOG_RX_BUF_MASK   (LOG_RX_BUF_SIZE - 1u)
+#define LOG_TX_BUF_SIZE   1024u
+#define LOG_TX_BUF_MASK   (LOG_TX_BUF_SIZE - 1u)
 
 static volatile uint8_t  s_log_rx_buf[LOG_RX_BUF_SIZE];
 static volatile uint16_t s_log_rx_head = 0u;
 static volatile uint16_t s_log_rx_tail = 0u;
 static volatile uint32_t s_log_rx_overrun = 0u;
+static volatile uint8_t  s_log_tx_buf[LOG_TX_BUF_SIZE];
+static volatile uint16_t s_log_tx_head = 0u;
+static volatile uint16_t s_log_tx_tail = 0u;
+static volatile uint32_t s_log_tx_drop = 0u;
+
+static uint16_t log_tx_used(void)
+{
+    return (uint16_t)((s_log_tx_head - s_log_tx_tail) & LOG_TX_BUF_MASK);
+}
+
+static uint16_t log_tx_free(void)
+{
+    return (uint16_t)((LOG_TX_BUF_SIZE - 1u) - log_tx_used());
+}
+
+static void log_uart_tx_drain_fifo(void)
+{
+    while ((s_log_tx_head != s_log_tx_tail) &&
+           (DL_UART_Main_isTXFIFOFull(UART_LOG_INST) == false)) {
+        uint8_t b = s_log_tx_buf[s_log_tx_tail];
+        s_log_tx_tail = (uint16_t)((s_log_tx_tail + 1u) & LOG_TX_BUF_MASK);
+        DL_UART_Main_transmitData(UART_LOG_INST, b);
+    }
+
+    if (s_log_tx_head == s_log_tx_tail) {
+        DL_UART_Main_disableInterrupt(UART_LOG_INST, DL_UART_MAIN_INTERRUPT_TX);
+    } else {
+        DL_UART_Main_enableInterrupt(UART_LOG_INST, DL_UART_MAIN_INTERRUPT_TX);
+    }
+}
 
 void bsp_log_uart_init(void)
 {
@@ -35,6 +67,9 @@ void bsp_log_uart_init(void)
     s_log_rx_head = 0u;
     s_log_rx_tail = 0u;
     s_log_rx_overrun = 0u;
+    s_log_tx_head = 0u;
+    s_log_tx_tail = 0u;
+    s_log_tx_drop = 0u;
 
     DL_UART_Main_clearInterruptStatus(UART_LOG_INST,
         DL_UART_MAIN_INTERRUPT_RX | DL_UART_MAIN_INTERRUPT_TX);
@@ -58,6 +93,32 @@ void bsp_log_uart_write(const uint8_t *data, size_t len)
     }
 }
 
+bool bsp_log_uart_try_write_async(const uint8_t *data, size_t len)
+{
+    if ((data == NULL) || (len == 0u)) {
+        return true;
+    }
+    if (len >= LOG_TX_BUF_SIZE) {
+        s_log_tx_drop++;
+        return false;
+    }
+
+    __disable_irq();
+    if (log_tx_free() < len) {
+        s_log_tx_drop++;
+        __enable_irq();
+        return false;
+    }
+
+    for (size_t i = 0u; i < len; ++i) {
+        s_log_tx_buf[s_log_tx_head] = data[i];
+        s_log_tx_head = (uint16_t)((s_log_tx_head + 1u) & LOG_TX_BUF_MASK);
+    }
+    log_uart_tx_drain_fifo();
+    __enable_irq();
+    return true;
+}
+
 bool bsp_log_uart_read_byte(uint8_t *out)
 {
     if (out == NULL) {
@@ -76,6 +137,11 @@ uint32_t bsp_log_uart_rx_overrun(void)
     return s_log_rx_overrun;
 }
 
+uint32_t bsp_log_uart_tx_drop_count(void)
+{
+    return s_log_tx_drop;
+}
+
 void UART0_IRQHandler(void)
 {
     switch (DL_UART_Main_getPendingInterrupt(UART_LOG_INST)) {
@@ -92,6 +158,9 @@ void UART0_IRQHandler(void)
             }
             break;
         }
+        case DL_UART_MAIN_IIDX_TX:
+            log_uart_tx_drain_fifo();
+            break;
         default:
             break;
     }

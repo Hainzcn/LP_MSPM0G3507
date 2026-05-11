@@ -41,6 +41,7 @@ typedef struct {
     bool    pitch_lpf_valid;
     float   yaw_kp;          /* 转向开环系数 */
     int16_t sync_i_pm;       /* 直行双轮同步积分项 */
+    bool    lt_stream_enabled;
     app_balance_diag_t diag;
 } balance_state_t;
 
@@ -180,6 +181,7 @@ void app_balance_init(void)
         1;
 #endif
     s_bal.yaw_kp = 1.0f;
+    s_bal.lt_stream_enabled = false;
     reset_sync_state();
 
     s_bal.diag.target_tilt_deg = 0.0f;
@@ -328,6 +330,31 @@ void app_balance_get_diag(app_balance_diag_t *out)
 #define BAL_F2_I(v)     ((int32_t)((BAL_F2_X100(v) < 0 ? -BAL_F2_X100(v) : BAL_F2_X100(v)) / 100))
 #define BAL_F2_F(v)     ((uint32_t)((BAL_F2_X100(v) < 0 ? -BAL_F2_X100(v) : BAL_F2_X100(v)) % 100))
 
+static int32_t cps_to_rpm_x100(int32_t cps, int32_t counts_per_rev)
+{
+    if (counts_per_rev <= 0) {
+        return 0;
+    }
+    return (int32_t)((cps * 6000L) / counts_per_rev);
+}
+
+static char scaled2_sign(int32_t x100)
+{
+    return (x100 < 0) ? '-' : '+';
+}
+
+static int32_t scaled2_int_abs(int32_t x100)
+{
+    int32_t abs_v = (x100 < 0) ? -x100 : x100;
+    return abs_v / 100;
+}
+
+static uint32_t scaled2_frac_abs(int32_t x100)
+{
+    int32_t abs_v = (x100 < 0) ? -x100 : x100;
+    return (uint32_t)(abs_v % 100);
+}
+
 static bool is_test_command(const char *buf, uint8_t len)
 {
     if ((len == 1u) && (buf[0] == 't')) {
@@ -428,8 +455,57 @@ static void print_pid_status(void)
 static void print_pid_help(void)
 {
     (void)printf("[pid] UART commands: bp <kp_x1000> <ki_x1000> <kd_x1000>, "
-                 "sp <kp_x1000> <ki_x1000> <kd_x1000>, pid?, pid0, t/test\r\n");
+                 "sp <kp_x1000> <ki_x1000> <kd_x1000>, pid?, pid0, lt, lt0, t/test\r\n");
     (void)printf("[pid] example: bp 8000 0 1000 ; sp 2 0 0\r\n");
+}
+
+static void send_lt_header(void)
+{
+    static const char header[] =
+        "lt,t_ms,pitch_deg,left_target_rpm,right_target_rpm,"
+        "left_actual_rpm,right_actual_rpm,left_actual_pwm,right_actual_pwm\r\n";
+    (void)bsp_log_uart_try_write_async((const uint8_t *)header, sizeof(header) - 1u);
+}
+
+static void set_lt_stream_enabled(bool enabled)
+{
+    s_bal.lt_stream_enabled = enabled;
+    (void)printf("[lt] high-rate CSV %s\r\n", enabled ? "on" : "off");
+    if (enabled) {
+        send_lt_header();
+    }
+}
+
+static void send_lt_sample(uint32_t now_ms,
+                           const app_balance_motion_cmd_t *cmd,
+                           const bsp_motor_feedback_t *fb)
+{
+    if (!s_bal.lt_stream_enabled || (cmd == NULL) || (fb == NULL)) {
+        return;
+    }
+
+    int32_t left_target_rpm_x100 = cps_to_rpm_x100(
+        cmd->target_speed_cps, BSP_MOTOR_LEFT_COUNTS_PER_OUTPUT_REV);
+    int32_t right_target_rpm_x100 = cps_to_rpm_x100(
+        cmd->target_speed_cps, BSP_MOTOR_RIGHT_COUNTS_PER_OUTPUT_REV);
+    int32_t left_actual_rpm_x100 = BAL_F2_X100(fb->left_speed_rpm);
+    int32_t right_actual_rpm_x100 = BAL_F2_X100(fb->right_speed_rpm);
+
+    char line[128];
+    int n = snprintf(line, sizeof(line),
+        "lt,%lu,%c%ld.%02lu,%c%ld.%02lu,%c%ld.%02lu,%c%ld.%02lu,%c%ld.%02lu,%d,%d\r\n",
+        (unsigned long)now_ms,
+        BAL_F2_S(s_bal.diag.pitch_meas_deg), (long)BAL_F2_I(s_bal.diag.pitch_meas_deg), (unsigned long)BAL_F2_F(s_bal.diag.pitch_meas_deg),
+        scaled2_sign(left_target_rpm_x100), (long)scaled2_int_abs(left_target_rpm_x100), (unsigned long)scaled2_frac_abs(left_target_rpm_x100),
+        scaled2_sign(right_target_rpm_x100), (long)scaled2_int_abs(right_target_rpm_x100), (unsigned long)scaled2_frac_abs(right_target_rpm_x100),
+        scaled2_sign(left_actual_rpm_x100), (long)scaled2_int_abs(left_actual_rpm_x100), (unsigned long)scaled2_frac_abs(left_actual_rpm_x100),
+        scaled2_sign(right_actual_rpm_x100), (long)scaled2_int_abs(right_actual_rpm_x100), (unsigned long)scaled2_frac_abs(right_actual_rpm_x100),
+        (int)bsp_motor_get_left_actual_pwm(),
+        (int)bsp_motor_get_right_actual_pwm());
+
+    if ((n > 0) && ((size_t)n < sizeof(line))) {
+        (void)bsp_log_uart_try_write_async((const uint8_t *)line, (size_t)n);
+    }
 }
 
 static bool parse_pid_triplet(const char *args, float *kp, float *ki, float *kd)
@@ -470,6 +546,21 @@ static bool handle_pid_command(const char *cmd)
         app_balance_reset();
         (void)printf("[pid] all gains cleared\r\n");
         return true;
+    }
+
+    if ((cmd[0] == 'l') && (cmd[1] == 't')) {
+        if (cmd[2] == '\0') {
+            set_lt_stream_enabled(true);
+            return true;
+        }
+        if ((cmd[2] == '0') && (cmd[3] == '\0')) {
+            set_lt_stream_enabled(false);
+            return true;
+        }
+        if ((cmd[2] == '1') && (cmd[3] == '\0')) {
+            set_lt_stream_enabled(true);
+            return true;
+        }
     }
 
     if ((cmd[0] == 'b') && (cmd[1] == 'p') && is_field_separator(cmd[2])) {
@@ -621,6 +712,10 @@ bool app_balance_run(void)
                 .attitude_valid = snap.has_attitude,
             };
             app_balance_step(&att, &cmd);
+
+            bsp_motor_feedback_t fb_lt;
+            bsp_motor_get_feedback(&fb_lt);
+            send_lt_sample(tick_count, &cmd, &fb_lt);
         }
 
         /* ---- 5 Hz：LED_G 绿心跳 + LED_R 跌倒 / 低压告警 ------------------- */
@@ -639,7 +734,7 @@ bool app_balance_run(void)
         }
 
         /* ---- 1 Hz：XDS-UART 调试日志 -------------------------------------- */
-        if ((tick_count % APP_BAL_PHASE_LOG_TICKS) == 0u) {
+        if (!s_bal.lt_stream_enabled && ((tick_count % APP_BAL_PHASE_LOG_TICKS) == 0u)) {
             uint32_t total_rx = bsp_k230_uart_total_rx();
             uint32_t delta_rx = total_rx - last_total_rx;
             last_total_rx = total_rx;
