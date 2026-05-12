@@ -63,6 +63,8 @@ void app_motor_demo_get_sync_diag(app_motor_demo_sync_diag_t *out);
  * 自动关闭同步环，依次从 APP_MOTOR_CAL_PWM_START_PM 到
  * APP_MOTOR_CAL_PWM_END_PM 以 APP_MOTOR_CAL_PWM_STEP_PM 步进遍历，
  * 正向完成后再以负值做反向扫描，结束后恢复原同步配置与目标转速。
+ * 默认启用当前运行补偿系统（静摩擦起转、动摩擦运行、右正 scale）；
+ * demo 串口 `d` 可切换为原始 PWM 扫描。
  * 每 APP_MOTOR_CAL_SAMPLE_PERIOD_MS 输出一条 [cal] 日志，包含 vbat / rpmL / rpmR。
  *
  * @return true  = 成功启动；false = 已在校准中（busy）。

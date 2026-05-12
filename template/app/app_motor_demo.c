@@ -73,6 +73,8 @@ static int16_t         s_cal_saved_pwm_pm        = 0;
 static bool            s_cal_saved_sync_enabled  = false;
 static bool            s_cal_saved_deadzone_comp = false;
 static bool            s_cal_saved_cal_mode      = false;
+static bool            s_cal_saved_right_fwd_scale = false;
+static bool            s_cal_apply_comp          = true;
 
 static uint16_t s_target_rpm = APP_MOTOR_DEMO_DEFAULT_RPM;
 static int16_t  s_target_pwm_pm =
@@ -242,7 +244,7 @@ static void print_cal_header(int8_t dir)
     int16_t total = s_cal_total_steps;
     (void)printf(
         "[cal] start dir=%+d steps=%d pm_start=%d pm_end=%d step=%d "
-        "dwell_ms=%u settle_ms=%u dz_comp=%u cal_mode=%u "
+        "dwell_ms=%u settle_ms=%u apply_comp=%u dz_comp=%u cal_mode=%u rf_scale=%u "
         "dz_lf=%d dz_lr=%d dz_rf=%d dz_rr=%d "
         "rdz_lf=%d rdz_lr=%d rdz_rf=%d rdz_rr=%d\r\n",
         (int)dir,
@@ -252,8 +254,10 @@ static void print_cal_header(int8_t dir)
         APP_MOTOR_CAL_PWM_STEP_PM,
         (unsigned int)APP_MOTOR_CAL_DWELL_MS,
         (unsigned int)APP_MOTOR_CAL_SETTLE_MS,
+        s_cal_apply_comp ? 1u : 0u,
         bsp_motor_get_deadzone_comp_enabled() ? 1u : 0u,
         bsp_motor_get_calibration_mode() ? 1u : 0u,
+        bsp_motor_get_right_forward_scale_enabled() ? 1u : 0u,
         BSP_MOTOR_LEFT_FORWARD_DEADZONE_PM,
         BSP_MOTOR_LEFT_REVERSE_DEADZONE_PM,
         BSP_MOTOR_RIGHT_FORWARD_DEADZONE_PM,
@@ -348,15 +352,16 @@ bool app_motor_demo_cal_start(void)
     s_cal_saved_sync_enabled = s_sync.enabled;
     s_cal_saved_deadzone_comp = bsp_motor_get_deadzone_comp_enabled();
     s_cal_saved_cal_mode     = bsp_motor_get_calibration_mode();
+    s_cal_saved_right_fwd_scale = bsp_motor_get_right_forward_scale_enabled();
 
     s_sync.enabled = false;
     s_sync_i_pm    = 0;
     s_sync.correction_pm = 0;
-    bsp_motor_set_deadzone_comp_enabled(true);
-    /* 校准必须用 cal_mode = 静态 DZ 映射 + 无 kick：稳态 PWM→RPM 关系才能正确
-     * 反映补偿效果，否则除每相首档外其他档位会退到 running_dz 路径，输出远低
-     * 于静摩擦阈值而无法启动电机。详见 bsp_motor_set_calibration_mode() 注释。 */
-    bsp_motor_set_calibration_mode(true);
+    /* apply_comp=1：扫描时启用当前运行补偿系统（静摩擦起转 → 动摩擦运行）；
+     * apply_comp=0：输出原始 PWM，用于重新采集未补偿的起转曲线。 */
+    bsp_motor_set_right_forward_scale_enabled(s_cal_apply_comp);
+    bsp_motor_set_deadzone_comp_enabled(s_cal_apply_comp);
+    bsp_motor_set_calibration_mode(false);
 
     s_cal_total_steps = cal_total_steps();
     s_cal_step_idx    = 0;
@@ -380,6 +385,7 @@ void app_motor_demo_cal_abort(void)
     s_cal_phase = APP_CAL_IDLE;
     bsp_motor_set_calibration_mode(s_cal_saved_cal_mode);
     bsp_motor_set_deadzone_comp_enabled(s_cal_saved_deadzone_comp);
+    bsp_motor_set_right_forward_scale_enabled(s_cal_saved_right_fwd_scale);
     brake_now();
 
     s_target_pwm_pm  = s_cal_saved_pwm_pm;
@@ -422,13 +428,14 @@ static bool handle_calibration_tick(uint32_t now_ms, bsp_motor_feedback_t *feedb
                 /* 反向也完成 */
                 print_cal_done(dir, false);
                 s_cal_phase = APP_CAL_IDLE;
-                bsp_motor_set_output(s_cal_saved_pwm_pm, s_cal_saved_pwm_pm);
                 s_target_pwm_pm  = s_cal_saved_pwm_pm;
                 s_sync.enabled   = s_cal_saved_sync_enabled;
                 s_sync_i_pm      = 0;
                 s_sync.correction_pm = 0;
                 bsp_motor_set_calibration_mode(s_cal_saved_cal_mode);
                 bsp_motor_set_deadzone_comp_enabled(s_cal_saved_deadzone_comp);
+                bsp_motor_set_right_forward_scale_enabled(s_cal_saved_right_fwd_scale);
+                bsp_motor_set_output(s_cal_saved_pwm_pm, s_cal_saved_pwm_pm);
                 (void)printf("[cal] calibration complete\r\n");
             }
         } else {
@@ -456,6 +463,7 @@ static void print_ctrl_help(void)
 {
     (void)printf("[ctrl] UART commands: '+'/'-' step %urpm, '<rpm><Enter>' set speed, "
                  "'b' brake, 'r' run, 's' sync on/off, 'p' print sync, "
+                 "'d' calib comp on/off, "
                  "'c' calib sweep, 'x' abort calib, 'l'/'load' enter load mode\r\n",
         (unsigned int)APP_MOTOR_DEMO_RPM_STEP);
 }
@@ -554,14 +562,22 @@ static bool process_log_uart_commands(bool *running)
         case (uint8_t)'p':
         case (uint8_t)'P':
             (void)printf(
-                "[ctrl] sync=%s err=%d corr=%d cmdL=%d cmdR=%d kp=%d ki=%d\r\n",
+                "[ctrl] sync=%s err=%d corr=%d cmdL=%d cmdR=%d kp=%d ki=%d cal_apply_comp=%u rf_scale=%u\r\n",
                 s_sync.enabled ? "on" : "off",
                 (int)s_sync.rpm_error,
                 (int)s_sync.correction_pm,
                 (int)s_sync.left_cmd_pm,
                 (int)s_sync.right_cmd_pm,
                 (int)s_sync.kp_pm_per_rpm,
-                (int)s_sync.ki_pm_per_rpm_step);
+                (int)s_sync.ki_pm_per_rpm_step,
+                s_cal_apply_comp ? 1u : 0u,
+                bsp_motor_get_right_forward_scale_enabled() ? 1u : 0u);
+            break;
+        case (uint8_t)'d':
+        case (uint8_t)'D':
+            s_cal_apply_comp = !s_cal_apply_comp;
+            (void)printf("[ctrl] cal_apply_comp=%u\r\n",
+                s_cal_apply_comp ? 1u : 0u);
             break;
         case (uint8_t)'f':
         case (uint8_t)'F':

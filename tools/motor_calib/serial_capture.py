@@ -2,12 +2,12 @@
 serial_capture.py — 串口日志录制工具
 =====================================
 录制 XDS-UART 串口输出并保存到文件，检测到校准结束标志后可自动停止。
-脚本打开串口后等待 --cmd-delay 秒（默认 5s），依次发送 'r' 和 'c' 启动校准。
+脚本打开串口后等待 --cmd-delay 秒（默认 5s），依次发送 't'、'b'、'c' 启动流程。
 
 用法:
     python serial_capture.py --port COM3
     python serial_capture.py --port COM3 --baud 115200 --out calib_run.txt
-    python serial_capture.py --port COM3 --cmd-delay 5     # 等 5s 后自动发 r/c
+    python serial_capture.py --port COM3 --cmd-delay 5     # 等 5s 后自动发 t/b/c
     python serial_capture.py --port COM3 --no-auto-cmd     # 不自动发命令
     python serial_capture.py --port COM3 --no-auto-stop    # 手动 Ctrl+C 停止
     python serial_capture.py --list                        # 列出可用串口
@@ -19,6 +19,7 @@ serial_capture.py — 串口日志录制工具
 import argparse
 import datetime
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -48,25 +49,65 @@ def make_default_filename():
     return f"calib_{ts}.txt"
 
 
-def _send_cmd(ser, cmd: str, label: str):
-    """向串口发送单个命令字节并打印提示。"""
-    ser.write((cmd + "\r\n").encode())
-    ser.flush()
-    print(f"[capture] >>> 发送命令: {label!r}")
+def _send_cmd(ser, io_lock: threading.Lock, cmd: str, label: str,
+              retry: int = 3, retry_gap_s: float = 0.25) -> bool:
+    """向串口发送单个命令，失败时重试并给出明确错误。"""
+    payload = (cmd + "\r\n").encode("ascii", errors="ignore")
+    for attempt in range(1, retry + 1):
+        try:
+            if not ser.is_open:
+                print(f"[capture] !!! 串口未打开，无法发送: {label!r}")
+                return False
+            with io_lock:
+                ser.write(payload)
+                ser.flush()
+            print(f"[capture] >>> 发送命令: {label!r}")
+            return True
+        except Exception as e:
+            print(
+                f"[capture] !!! 发送失败({attempt}/{retry}) {label!r}: {e}",
+                file=sys.stderr,
+            )
+            if attempt < retry:
+                time.sleep(retry_gap_s)
+    return False
 
 
-def _auto_cmd_thread(ser, delay_s: float, stop_event: threading.Event):
+def _auto_cmd_thread(ser, io_lock: threading.Lock, delay_s: float,
+                     stop_event: threading.Event):
     """
-    后台线程：等待 delay_s 后依次发送 'r'（启动电机）和 'c'（开始校准）。
-    两条命令之间间隔 1s，给固件处理 'r' 的时间。
+    后台线程：等待 delay_s 后依次发送 't'、'b'、'c'。
+    每条命令之间间隔 1s，给固件处理时间。
     stop_event 置位时线程提前退出（用于 Ctrl+C 中断）。
     """
     if stop_event.wait(timeout=delay_s):
         return  # 主循环已退出，不再发命令
-    _send_cmd(ser, "r", "r  (run motors)")
+    if not _send_cmd(ser, io_lock, "t", "t"):
+        return
     if stop_event.wait(timeout=1.0):
         return
-    _send_cmd(ser, "c", "c  (start calib sweep)")
+    if not _send_cmd(ser, io_lock, "b", "b"):
+        return
+    if stop_event.wait(timeout=1.0):
+        return
+    _send_cmd(ser, io_lock, "c", "c")
+
+
+def _run_analyze_script(log_path: str):
+    analyzer = os.path.join(os.path.dirname(__file__), "analyze_calib.py")
+    if not os.path.isfile(analyzer):
+        print(f"[capture] 未找到分析脚本，跳过：{analyzer}")
+        return
+
+    print(f"[capture] 调用分析脚本: {analyzer}")
+    try:
+        ret = subprocess.run([sys.executable, analyzer, log_path], check=False)
+    except Exception as e:
+        print(f"[capture] 调用分析脚本失败：{e}", file=sys.stderr)
+        return
+
+    if ret.returncode != 0:
+        print(f"[capture] 分析脚本退出码: {ret.returncode}", file=sys.stderr)
 
 
 def capture(port: str, baud: int, out_path: str,
@@ -81,7 +122,7 @@ def capture(port: str, baud: int, out_path: str,
     print(f"[capture] 打开串口 {port}  波特率 {baud}")
     print(f"[capture] 保存至   {os.path.abspath(out_path)}")
     if auto_cmd:
-        print(f"[capture] {cmd_delay:.0f}s 后自动发送 'r' + 'c'")
+        print(f"[capture] {cmd_delay:.0f}s 后自动发送 't' + 'b' + 'c'")
     if auto_stop:
         print(f"[capture] 检测到 '{AUTO_STOP_MARKER}' 后自动停止")
     else:
@@ -89,17 +130,18 @@ def capture(port: str, baud: int, out_path: str,
     print()
 
     try:
-        ser = serial.Serial(port, baud, timeout=1.0)
+        ser = serial.Serial(port, baud, timeout=1.0, write_timeout=1.0)
     except serial.SerialException as e:
         print(f"错误：无法打开串口 {port}：{e}", file=sys.stderr)
         sys.exit(1)
 
+    io_lock = threading.Lock()
     stop_event = threading.Event()
     cmd_thread = None
     if auto_cmd:
         cmd_thread = threading.Thread(
             target=_auto_cmd_thread,
-            args=(ser, cmd_delay, stop_event),
+            args=(ser, io_lock, cmd_delay, stop_event),
             daemon=True,
         )
         cmd_thread.start()
@@ -108,11 +150,17 @@ def capture(port: str, baud: int, out_path: str,
     cal_sample_count = 0
     start_time = time.monotonic()
     last_activity = start_time
+    ended_by_marker = False
 
     try:
         with open(out_path, "w", encoding="utf-8") as fh:
             while True:
-                raw = ser.readline()
+                try:
+                    with io_lock:
+                        raw = ser.readline()
+                except serial.SerialException as e:
+                    print(f"\n[capture] 串口读取失败：{e}", file=sys.stderr)
+                    break
                 if not raw:
                     # readline 超时（1s），检查空闲超时
                     if timeout_s > 0 and (time.monotonic() - last_activity) > timeout_s:
@@ -132,7 +180,11 @@ def capture(port: str, baud: int, out_path: str,
                     cal_sample_count += 1
 
                 if auto_stop and AUTO_STOP_MARKER in line:
-                    print("\n[capture] 检测到结束标志，停止录制。")
+                    print("\n[capture] 检测到结束标志，1s 后发送 'b'。")
+                    time.sleep(1.0)
+                    _send_cmd(ser, io_lock, "b", "b  (post-calib stop)")
+                    ended_by_marker = True
+                    print("[capture] 停止录制。")
                     break
 
     except KeyboardInterrupt:
@@ -147,6 +199,8 @@ def capture(port: str, baud: int, out_path: str,
     print(f"\n[capture] 共录制 {line_count} 行（含 {cal_sample_count} 条 [cal] 行），"
           f"耗时 {elapsed:.1f}s")
     print(f"[capture] 文件：{os.path.abspath(out_path)}")
+    if ended_by_marker:
+        _run_analyze_script(os.path.abspath(out_path))
 
 
 def main():
@@ -161,11 +215,11 @@ def main():
     )
     parser.add_argument(
         "--cmd-delay", type=float, default=5.0,
-        help="打开串口后等待多少秒再自动发送 r/c（默认 5s）"
+        help="打开串口后等待多少秒再自动发送 t/b/c（默认 5s）"
     )
     parser.add_argument(
         "--no-auto-cmd", action="store_true",
-        help="禁止自动发送 r/c 命令（手动在串口终端操作）"
+        help="禁止自动发送 t/b/c 命令（手动在串口终端操作）"
     )
     parser.add_argument(
         "--no-auto-stop", action="store_true",

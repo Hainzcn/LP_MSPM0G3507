@@ -45,6 +45,17 @@ import serial.tools.list_ports
 
 import matplotlib
 matplotlib.use("QtAgg")
+matplotlib.rcParams["font.family"] = "sans-serif"
+matplotlib.rcParams["font.sans-serif"] = [
+    "Microsoft YaHei",
+    "Microsoft YaHei UI",
+    "SimHei",
+    "Noto Sans CJK SC",
+    "WenQuanYi Zen Hei",
+    "Arial Unicode MS",
+    "DejaVu Sans",
+]
+matplotlib.rcParams["axes.unicode_minus"] = False
 
 from matplotlib.backends.backend_qtagg import (
     FigureCanvasQTAgg,
@@ -99,29 +110,146 @@ class RingBuffer:
             list(self.right_pwm),
         )
 
+    def snapshot_tail_view(self, t_min, t_max, max_points=None):
+        """优先用于自动滚动：从最新数据向前扫描，仅拷贝窗口内可见点。"""
+        locker = QtCore.QMutexLocker(self._lock)
+        if not self.t:
+            return (self._count, [], [], [], [], [], [], [], [])
+
+        rows = []
+        for vals in zip(
+            reversed(self.t),
+            reversed(self.pitch),
+            reversed(self.left_target),
+            reversed(self.right_target),
+            reversed(self.left_actual),
+            reversed(self.right_actual),
+            reversed(self.left_pwm),
+            reversed(self.right_pwm),
+        ):
+            ts = vals[0]
+            if ts > t_max:
+                continue
+            if ts < t_min:
+                break
+            rows.append(vals)
+
+        if not rows:
+            vals = (
+                self.t[-1], self.pitch[-1], self.left_target[-1], self.right_target[-1],
+                self.left_actual[-1], self.right_actual[-1], self.left_pwm[-1], self.right_pwm[-1],
+            )
+            rows = [vals]
+
+        rows.reverse()
+        if max_points and len(rows) > max_points:
+            step = (len(rows) + max_points - 1) // max_points
+            rows = rows[::step]
+
+        cols = list(zip(*rows))
+        return (
+            self._count,
+            list(cols[0]),
+            list(cols[1]),
+            list(cols[2]),
+            list(cols[3]),
+            list(cols[4]),
+            list(cols[5]),
+            list(cols[6]),
+            list(cols[7]),
+        )
+
+    def snapshot_range_view(self, t_min, t_max, max_points=None):
+        """用于暂停滚动时：按当前x轴范围提取可见点。"""
+        locker = QtCore.QMutexLocker(self._lock)
+        if not self.t:
+            return (self._count, [], [], [], [], [], [], [], [])
+
+        rows = []
+        for vals in zip(
+            self.t,
+            self.pitch,
+            self.left_target,
+            self.right_target,
+            self.left_actual,
+            self.right_actual,
+            self.left_pwm,
+            self.right_pwm,
+        ):
+            ts = vals[0]
+            if ts < t_min:
+                continue
+            if ts > t_max:
+                break
+            rows.append(vals)
+
+        if not rows:
+            vals = (
+                self.t[-1], self.pitch[-1], self.left_target[-1], self.right_target[-1],
+                self.left_actual[-1], self.right_actual[-1], self.left_pwm[-1], self.right_pwm[-1],
+            )
+            rows = [vals]
+
+        if max_points and len(rows) > max_points:
+            step = (len(rows) + max_points - 1) // max_points
+            rows = rows[::step]
+
+        cols = list(zip(*rows))
+        return (
+            self._count,
+            list(cols[0]),
+            list(cols[1]),
+            list(cols[2]),
+            list(cols[3]),
+            list(cols[4]),
+            list(cols[5]),
+            list(cols[6]),
+            list(cols[7]),
+        )
+
     @property
     def count(self):
         locker = QtCore.QMutexLocker(self._lock)
         return self._count
+
+    @property
+    def latest_time(self):
+        locker = QtCore.QMutexLocker(self._lock)
+        if not self.t:
+            return None
+        return self.t[-1]
 
 
 class SerialWorker(QtCore.QThread):
     data_ready = QtCore.pyqtSignal(float, float, float, float, float, float, float, float)
     error_occurred = QtCore.pyqtSignal(str)
     finished = QtCore.pyqtSignal(int)
+    command_sent = QtCore.pyqtSignal(str)
 
     def __init__(self, port, baud):
         super().__init__()
         self._port = port
         self._baud = baud
         self._stop_flag = False
+        self._tx_lock = QtCore.QMutex()
+        self._tx_queue = deque()
+
+    def send_text(self, text):
+        locker = QtCore.QMutexLocker(self._tx_lock)
+        self._tx_queue.append(text)
+
+    def _pop_pending_commands(self):
+        locker = QtCore.QMutexLocker(self._tx_lock)
+        cmds = list(self._tx_queue)
+        self._tx_queue.clear()
+        return cmds
 
     def stop(self):
         self._stop_flag = True
 
     def run(self):
         try:
-            ser = serial.Serial(self._port, self._baud, timeout=0.3)
+            ser = serial.Serial(self._port, self._baud, timeout=0.1, write_timeout=0.2)
         except serial.SerialException as e:
             self.error_occurred.emit(f"无法打开串口 {self._port}: {e}")
             return
@@ -129,7 +257,19 @@ class SerialWorker(QtCore.QThread):
         t0 = time.monotonic()
         line_count = 0
 
+        def flush_tx():
+            for cmd in self._pop_pending_commands():
+                try:
+                    ser.write(cmd.encode("ascii", errors="ignore"))
+                    self.command_sent.emit(cmd.rstrip("\r\n"))
+                except serial.SerialException as e:
+                    self.error_occurred.emit(f"串口发送失败: {e}")
+                    return False
+            return True
+
         while not self._stop_flag:
+            if not flush_tx():
+                break
             try:
                 raw = ser.readline()
             except serial.SerialException:
@@ -163,6 +303,7 @@ class SerialWorker(QtCore.QThread):
             )
             line_count += 1
 
+        flush_tx()
         ser.close()
         self.finished.emit(line_count)
 
@@ -188,8 +329,7 @@ class RealTimeCanvas(FigureCanvasQTAgg):
         self.ax1.set_ylabel("左电机\n(rpm)", fontsize=9, linespacing=1.4)
         self.ax1.grid(True, alpha=0.3, linestyle="--")
         self.line_lt, = self.ax1.plot([], [], "#2196F3", linewidth=1.0, label="期望")
-        self.line_la, = self.ax1.plot([], [], "#FF5722", linewidth=1.0,
-                                      linestyle="--", dashes=(4, 2), label="实际")
+        self.line_la, = self.ax1.plot([], [], "#FF5722", linewidth=1.0, label="实际")
         self.ax1.legend(loc="upper right", fontsize=8, ncol=2,
                         framealpha=0.6, edgecolor="none")
         self.ax1.yaxis.set_major_locator(MaxNLocator(5))
@@ -198,8 +338,7 @@ class RealTimeCanvas(FigureCanvasQTAgg):
         self.ax2.set_ylabel("右电机\n(rpm)", fontsize=9, linespacing=1.4)
         self.ax2.grid(True, alpha=0.3, linestyle="--")
         self.line_rt, = self.ax2.plot([], [], "#2196F3", linewidth=1.0, label="期望")
-        self.line_ra, = self.ax2.plot([], [], "#FF5722", linewidth=1.0,
-                                      linestyle="--", dashes=(4, 2), label="实际")
+        self.line_ra, = self.ax2.plot([], [], "#FF5722", linewidth=1.0, label="实际")
         self.ax2.legend(loc="upper right", fontsize=8, ncol=2,
                         framealpha=0.6, edgecolor="none")
         self.ax2.yaxis.set_major_locator(MaxNLocator(5))
@@ -266,13 +405,17 @@ class RealTimeCanvas(FigureCanvasQTAgg):
 
 
 class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self, buffer, window_sec=10.0):
+    def __init__(self, buffer, worker, window_sec=10.0):
         super().__init__()
         self.buffer = buffer
+        self.worker = worker
         self.window_sec = window_sec
         self.auto_scroll = True
         self._frame_idx = 0
         self._ylim_frozen = False
+        self._last_draw_total_count = 0
+        self._max_draw_points = 1200
+        self._refresh_interval_ms = 33
 
         self.setWindowTitle("串口实时监控")
         self.setMinimumSize(1000, 650)
@@ -284,9 +427,34 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
+        pid_panel = QtWidgets.QWidget()
+        pid_layout = QtWidgets.QHBoxLayout(pid_panel)
+        pid_layout.setContentsMargins(8, 6, 8, 6)
+        pid_layout.setSpacing(8)
+
+        title_label = QtWidgets.QLabel("PID调参:")
+        self.kp_edit = QtWidgets.QLineEdit("0.0")
+        self.ki_edit = QtWidgets.QLineEdit("0.0")
+        self.kd_edit = QtWidgets.QLineEdit("0.0")
+        self.send_pid_btn = QtWidgets.QPushButton("发送PID")
+        self.send_pid_btn.setFixedHeight(28)
+        self.send_pid_btn.clicked.connect(self._send_pid_params)
+
+        for name, edit in [("Kp", self.kp_edit), ("Ki", self.ki_edit), ("Kd", self.kd_edit)]:
+            edit.setMaximumWidth(110)
+            edit.setPlaceholderText(name)
+            edit.returnPressed.connect(self._send_pid_params)
+            pid_layout.addWidget(QtWidgets.QLabel(name))
+            pid_layout.addWidget(edit)
+
+        pid_layout.insertWidget(0, title_label)
+        pid_layout.addStretch(1)
+        pid_layout.addWidget(self.send_pid_btn)
+
         self.canvas = RealTimeCanvas()
         self.toolbar = NavigationToolbar2QT(self.canvas, self)
         self.toolbar.setMaximumHeight(36)
+        layout.addWidget(pid_panel)
         layout.addWidget(self.toolbar)
         layout.addWidget(self.canvas)
 
@@ -296,6 +464,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.status_bar = self.statusBar()
         self.status_bar.addPermanentWidget(self.status_label)
+        self.worker.command_sent.connect(self._on_command_sent)
 
         self._update_title()
 
@@ -304,7 +473,23 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._timer = QtCore.QTimer(self)
         self._timer.timeout.connect(self._refresh)
-        self._timer.start(50)
+        self._timer.start(self._refresh_interval_ms)
+
+    def _send_pid_params(self):
+        try:
+            kp = float(self.kp_edit.text().strip())
+            ki = float(self.ki_edit.text().strip())
+            kd = float(self.kd_edit.text().strip())
+        except ValueError:
+            QtWidgets.QMessageBox.warning(self, "参数错误", "Kp/Ki/Kd 请输入合法数字。")
+            return
+
+        cmd = f"bp {kp:g} {ki:g} {kd:g}\n"
+        self.worker.send_text(cmd)
+        self.status_bar.showMessage(f"已加入发送队列: {cmd.strip()}", 2500)
+
+    def _on_command_sent(self, text):
+        self.status_bar.showMessage(f"已发送: {text}", 2500)
 
     def _update_title(self):
         status = "自动" if self.auto_scroll else "暂停"
@@ -349,20 +534,39 @@ class MainWindow(QtWidgets.QMainWindow):
         return lo - pad, hi + pad
 
     def _refresh(self):
-        ts, pitch, lt, rt, la, ra, lp, rp = self.buffer.snapshot()
+        total_count = self.buffer.count
+        if total_count <= 0:
+            return
 
-        self.canvas.line_lt.set_data(ts, lt)
-        self.canvas.line_la.set_data(ts, la)
-        self.canvas.line_rt.set_data(ts, rt)
-        self.canvas.line_ra.set_data(ts, ra)
-        self.canvas.line_pitch.set_data(ts, pitch)
-        self.canvas.line_lp.set_data(ts, lp)
-        self.canvas.line_rp.set_data(ts, rp)
+        # 无新数据且自动滚动时，跳过重绘以降低CPU占用
+        # 注意：不能用 len(ts) 判断，环形缓冲区满后长度会恒定不变
+        if self.auto_scroll and total_count == self._last_draw_total_count:
+            return
 
-        if ts and self.auto_scroll:
-            t_max = ts[-1]
+        if self.auto_scroll:
+            t_max = self.buffer.latest_time
+            if t_max is None:
+                return
             t_min = max(0.0, t_max - self.window_sec)
             self.canvas.ax1.set_xlim(t_min, t_max)
+            total_count, vis_t, vis_pitch, vis_lt, vis_rt, vis_la, vis_ra, vis_lp, vis_rp = (
+                self.buffer.snapshot_tail_view(t_min, t_max, self._max_draw_points)
+            )
+        else:
+            x0, x1 = self.canvas.ax1.get_xlim()
+            t_min = min(x0, x1)
+            t_max = max(x0, x1)
+            total_count, vis_t, vis_pitch, vis_lt, vis_rt, vis_la, vis_ra, vis_lp, vis_rp = (
+                self.buffer.snapshot_range_view(t_min, t_max, self._max_draw_points)
+            )
+
+        self.canvas.line_lt.set_data(vis_t, vis_lt)
+        self.canvas.line_la.set_data(vis_t, vis_la)
+        self.canvas.line_rt.set_data(vis_t, vis_rt)
+        self.canvas.line_ra.set_data(vis_t, vis_ra)
+        self.canvas.line_pitch.set_data(vis_t, vis_pitch)
+        self.canvas.line_lp.set_data(vis_t, vis_lp)
+        self.canvas.line_rp.set_data(vis_t, vis_rp)
 
         self._frame_idx += 1
         if self._frame_idx % 15 == 0:
@@ -372,16 +576,30 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"数据:{self.buffer.count}行"
             )
 
-        if self._frame_idx % 15 == 0 and not self._ylim_frozen and ts:
-            self.canvas.ax1.set_ylim(self._smart_ylim(lt, la, margin_frac=0.10))
-            self.canvas.ax2.set_ylim(self._smart_ylim(rt, ra, margin_frac=0.10))
-            self.canvas.ax3.set_ylim(self._smart_ylim(pitch, margin_frac=0.10))
-            if any(v > 1050 for v in lp) or any(v < -50 for v in lp):
-                self.canvas.ax4.set_ylim(self._smart_ylim(lp, abs_margin=20))
-            if any(v > 1050 for v in rp) or any(v < -50 for v in rp):
-                self.canvas.ax5.set_ylim(self._smart_ylim(rp, abs_margin=20))
+        if self._frame_idx % 15 == 0 and not self._ylim_frozen and vis_t:
+            # 每组图统一比例尺：左右电机共享同一转速Y轴范围
+            speed_ylim = self._smart_ylim(
+                vis_lt, vis_la, vis_rt, vis_ra, margin_frac=0.10
+            )
+            self.canvas.ax1.set_ylim(speed_ylim)
+            self.canvas.ax2.set_ylim(speed_ylim)
+            self.canvas.ax3.set_ylim(self._smart_ylim(vis_pitch, margin_frac=0.10))
+
+            # 左右PWM图也统一比例尺；默认保持固定范围，越界时再联合自适应
+            pwm_out_of_range = (
+                any(v > 1050 for v in vis_lp) or any(v < -50 for v in vis_lp)
+                or any(v > 1050 for v in vis_rp) or any(v < -50 for v in vis_rp)
+            )
+            if pwm_out_of_range:
+                pwm_ylim = self._smart_ylim(vis_lp, vis_rp, abs_margin=20)
+                self.canvas.ax4.set_ylim(pwm_ylim)
+                self.canvas.ax5.set_ylim(pwm_ylim)
+            else:
+                self.canvas.ax4.set_ylim(-50, 1050)
+                self.canvas.ax5.set_ylim(-50, 1050)
 
         self.canvas.fig.canvas.draw_idle()
+        self._last_draw_total_count = total_count
 
     def closeEvent(self, event):
         self._timer.stop()
@@ -422,6 +640,7 @@ def main():
 
     app = QtWidgets.QApplication(sys.argv)
     app.setStyle("Fusion")
+    app.setFont(QtGui.QFont("Microsoft YaHei UI", 9))
 
     buffer = RingBuffer(maxlen=args.max_points)
 
@@ -438,7 +657,7 @@ def main():
     worker.finished.connect(on_finished)
     worker.start()
 
-    window = MainWindow(buffer, window_sec=args.window)
+    window = MainWindow(buffer, worker, window_sec=args.window)
     window.show()
 
     try:
