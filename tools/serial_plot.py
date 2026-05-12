@@ -437,8 +437,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ki_edit = QtWidgets.QLineEdit("0.0")
         self.kd_edit = QtWidgets.QLineEdit("0.0")
         self.send_pid_btn = QtWidgets.QPushButton("发送PID")
+        self.send_lt_btn = QtWidgets.QPushButton("发送lt")
         self.send_pid_btn.setFixedHeight(28)
+        self.send_lt_btn.setFixedHeight(28)
         self.send_pid_btn.clicked.connect(self._send_pid_params)
+        self.send_lt_btn.clicked.connect(self._send_lt_command)
 
         for name, edit in [("Kp", self.kp_edit), ("Ki", self.ki_edit), ("Kd", self.kd_edit)]:
             edit.setMaximumWidth(110)
@@ -449,6 +452,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         pid_layout.insertWidget(0, title_label)
         pid_layout.addStretch(1)
+        pid_layout.addWidget(self.send_lt_btn)
         pid_layout.addWidget(self.send_pid_btn)
 
         self.canvas = RealTimeCanvas()
@@ -490,6 +494,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_command_sent(self, text):
         self.status_bar.showMessage(f"已发送: {text}", 2500)
+
+    def _send_lt_command(self):
+        cmd = "lt\n"
+        self.worker.send_text(cmd)
+        self.status_bar.showMessage("已加入发送队列: lt", 2500)
 
     def _update_title(self):
         status = "自动" if self.auto_scroll else "暂停"
