@@ -123,18 +123,27 @@ extern "C" {
 #endif
 
 /**
- * 动摩擦死区（稳态线性区死区）。编码器确认电机已启动后，命令被映射到
- * [RUNNING_DEADZONE, 当前 PWM limit]，对应 fig1 反向曲线 ~5-10 rpm 区间。
- * 调试时若发现稳态卡顿，可独立向上微调；若线性度仍不够，可向下微调。
+ * 动摩擦死区（Running Dead Zone）—— 平衡车模式下的核心补偿参数。
+ *
+ * 功能：非零 PID 命令经线性映射后，最小实际输出被抬升到此门槛值。
+ * 设定原则：≥ 实测静摩擦起转 PWM（确保任何非零命令都能让电机响应）。
+ *
+ * 平衡车模式下（static_dz_enabled = false）此值被无条件应用：
+ *   - 不依赖编码器确认运动状态，不引入 kick 脉冲；
+ *   - PID 输出 ±1‰ 时电机也能拿到 ≥门槛的实际电压；
+ *   - 倒立摆物理特性 + D 项角速率响应保证 10-20ms 内自然突破静摩擦。
+ *
+ * 标定方法：对每路电机扫描找到"从 0 开始加 PWM，编码器首次产生计数"
+ * 的门槛值，取该值 +10~15‰ 余量即可。
  */
 #ifndef BSP_MOTOR_LEFT_FORWARD_RUNNING_DEADZONE_PM
-#define BSP_MOTOR_LEFT_FORWARD_RUNNING_DEADZONE_PM   (25)
+#define BSP_MOTOR_LEFT_FORWARD_RUNNING_DEADZONE_PM   (45)
 #endif
 #ifndef BSP_MOTOR_LEFT_REVERSE_RUNNING_DEADZONE_PM
-#define BSP_MOTOR_LEFT_REVERSE_RUNNING_DEADZONE_PM   (30)
+#define BSP_MOTOR_LEFT_REVERSE_RUNNING_DEADZONE_PM   (60)
 #endif
 #ifndef BSP_MOTOR_RIGHT_FORWARD_RUNNING_DEADZONE_PM
-#define BSP_MOTOR_RIGHT_FORWARD_RUNNING_DEADZONE_PM  (28)
+#define BSP_MOTOR_RIGHT_FORWARD_RUNNING_DEADZONE_PM  (30)
 #endif
 #ifndef BSP_MOTOR_RIGHT_REVERSE_RUNNING_DEADZONE_PM
 #define BSP_MOTOR_RIGHT_REVERSE_RUNNING_DEADZONE_PM  (30)
@@ -285,14 +294,41 @@ void bsp_motor_brake(void);
 void bsp_motor_brake_pulse_ms(uint32_t duration_ms);
 
 /**
- * @brief 开关四路静摩擦死区补偿。
- *        默认开启，普通电机测试会把非零命令映射到起转死区以上；
- *        平衡闭环可关闭它，保留接近 0 的连续小 PWM，避免死区阶跃冲击。
+ * @brief 死区补偿总开关（master switch）。
+ *        false → 跳过全部死区逻辑（静态 + 动态），所有命令只经 apply_limit 后直通硬件。
+ *        true  → 由 static_dz / running_dz 两个分开关分别控制各自逻辑。
+ *        默认开启。
  */
 void bsp_motor_set_deadzone_comp_enabled(bool enabled);
 
-/** 查询当前是否启用四路静摩擦死区补偿。 */
+/** 查询死区补偿总开关状态。 */
 bool bsp_motor_get_deadzone_comp_enabled(void);
+
+/**
+ * @brief 静摩擦死区补偿分开关。
+ *        false → 跳过 apply_static_deadzone()，电机未启动时也不做起转 kick，
+ *                命令直通限幅值（适合 PID 调试时观察线性小 PWM 响应）。
+ *        true  → 保持原有行为：未确认运动 / cal 模式 → 静摩擦门槛映射（默认）。
+ *        切换时立即以新参数重发当前命令。总开关 deadzone_comp_enabled 为 false 时
+ *        本开关无效。
+ */
+void bsp_motor_set_static_dz_enabled(bool enabled);
+
+/** 查询静摩擦死区补偿分开关状态。 */
+bool bsp_motor_get_static_dz_enabled(void);
+
+/**
+ * @brief 动摩擦死区补偿分开关。
+ *        false → 跳过 apply_running_deadzone()，编码器确认已启动后命令仍直通限幅值，
+ *                不做动摩擦线性重映射（适合分析原始 PWM→速度曲线）。
+ *        true  → 保持原有行为：已确认运动 → 动摩擦线性区映射（默认）。
+ *        切换时立即以新参数重发当前命令。总开关 deadzone_comp_enabled 为 false 时
+ *        本开关无效。
+ */
+void bsp_motor_set_running_dz_enabled(bool enabled);
+
+/** 查询动摩擦死区补偿分开关状态。 */
+bool bsp_motor_get_running_dz_enabled(void);
 
 /**
  * @brief 切换静态死区强制模式（legacy cal-mode）。

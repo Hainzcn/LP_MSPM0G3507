@@ -35,12 +35,16 @@
 typedef struct {
     pid_t   speed_pid;       /* 外环：输入 cps 误差，输出目标 tilt deg */
     pid_t   balance_pid;     /* 内环：输入 tilt 误差 deg，输出 PWM permille */
+    pid_t   yaw_pid;         /* Yaw 角度环：输入 yaw 误差 °，输出差分 PWM permille */
     float   pitch_offset_deg;
     float   pitch_lpf_deg;
     int8_t  pitch_sign;      /* +1 正常，-1 传感器前后反装时软件翻转 */
+    int8_t  yaw_sign;        /* +1 正常，-1 gz_dps/yaw_deg 符号翻转 */
     bool    pitch_lpf_valid;
     float   yaw_kp;          /* 转向开环系数 */
-    int16_t sync_i_pm;       /* 直行双轮同步积分项 */
+    float   yaw_target_deg;     /* [源 0] EKF 模式：锁定目标航向（°） */
+    bool    yaw_target_valid;   /* [源 0] EKF 模式：首次有效 yaw 才初始化 */
+    float   yaw_gz_integrated;  /* [源 1] 陀螺积分模式：累积偏航量（°） */
     bool    lt_stream_enabled;
     app_balance_diag_t diag;
 } balance_state_t;
@@ -98,58 +102,132 @@ static float filter_pitch(float pitch_deg)
     return s_bal.pitch_lpf_deg;
 }
 
-static int16_t clamp_sync_correction(int32_t v)
+/** 把角度差折叠到 [-180, 180] 区间，处理 yaw 环绕。 */
+static float wrap_180(float deg)
 {
-    if (v > APP_BALANCE_SYNC_MAX_CORRECTION_PM) {
-        return APP_BALANCE_SYNC_MAX_CORRECTION_PM;
+    while (deg >  180.0f) { deg -= 360.0f; }
+    while (deg < -180.0f) { deg += 360.0f; }
+    return deg;
+}
+
+static int16_t clamp_yaw_correction(float v)
+{
+    if (v >  (float)APP_BALANCE_YAW_MAX_CORRECTION_PM) {
+        v =  (float)APP_BALANCE_YAW_MAX_CORRECTION_PM;
     }
-    if (v < -APP_BALANCE_SYNC_MAX_CORRECTION_PM) {
-        return -APP_BALANCE_SYNC_MAX_CORRECTION_PM;
+    if (v < -(float)APP_BALANCE_YAW_MAX_CORRECTION_PM) {
+        v = -(float)APP_BALANCE_YAW_MAX_CORRECTION_PM;
     }
     return (int16_t)v;
 }
 
-static void reset_sync_state(void)
+static void reset_yaw_state(void)
 {
-    s_bal.sync_i_pm = 0;
-    s_bal.diag.sync_error_cps = 0;
-    s_bal.diag.sync_correction_pm = 0;
+    pid_reset(&s_bal.yaw_pid);
+    s_bal.yaw_target_valid   = false;
+    s_bal.yaw_gz_integrated  = 0.0f;
+    s_bal.diag.yaw_error_deg     = 0.0f;
+    s_bal.diag.yaw_correction_pm = 0;
 }
 
-static int16_t balance_sync_step(const bsp_motor_feedback_t *fb,
-                                 const app_balance_motion_cmd_t *cmd,
-                                 float drive_pm)
+/**
+ * Yaw 角度环一拍计算。
+ *
+ * 由编译期 APP_BALANCE_YAW_SOURCE 选择数据源：
+ *
+ *   0 = EKF 绝对角（yaw_deg）
+ *       ─ 锁定首次目标角，后续用 wrap_180 + virtual_measured 跟踪；
+ *       ─ 转向时持续更新目标角为当前角，结束后无缝接管。
+ *
+ *   1 = 陀螺仪积分（gz_dps × dt）
+ *       ─ 直行时持续积分，PID 以"归零积分量"为目标；
+ *       ─ D 项等效于 gz_dps 角速率阻尼，天然平滑；
+ *       ─ 转向时清零积分，转向结束后重新从 0 追踪；
+ *       ─ 彻底无 ±180° 跳变，不受磁场干扰。
+ *
+ * 输出：差分补偿 permille，正值 → left 加 / right 减（即左轮加速 → 修正左偏）。
+ */
+static int16_t yaw_angle_step(const app_balance_attitude_t *att,
+                               const app_balance_motion_cmd_t *cmd)
 {
-#if APP_BALANCE_SYNC_ENABLED
-    /* 未实际驱动或转向时暂停同步环：
-     * - drive≈0 时，轮速差多来自手动扰动 / 编码器噪声，纠偏会造成颤抖；
-     * - 平衡环真正发力时，即使目标速度为 0，也要同步左右轮以抑制原地打转；
-     * - 转向时左右轮存在有意差速，同步环不能抵消 yaw 命令。 */
-    if ((fb == NULL) || (cmd == NULL) || (cmd->target_yaw_pm != 0) ||
-        ((drive_pm > -(float)APP_BALANCE_SYNC_MIN_DRIVE_PM) &&
-         (drive_pm <  (float)APP_BALANCE_SYNC_MIN_DRIVE_PM))) {
-        reset_sync_state();
+#if !APP_BALANCE_YAW_ENABLED
+    (void)att;
+    (void)cmd;
+    reset_yaw_state();
+    return 0;
+
+/* ---- 源 0：EKF 绝对偏航角 ------------------------------------------------ */
+#elif APP_BALANCE_YAW_SOURCE == 0
+    if ((att == NULL) || (cmd == NULL)) {
+        reset_yaw_state();
         return 0;
     }
 
-    int32_t error_cps = fb->right_speed_cps - fb->left_speed_cps;
-    int32_t i_next = (int32_t)s_bal.sync_i_pm +
-        ((error_cps * APP_BALANCE_SYNC_KI_PM_PER_CPS_STEP_X100) / 100);
-    s_bal.sync_i_pm = clamp_sync_correction(i_next);
+    float yaw_deg = att->yaw_deg * (float)s_bal.yaw_sign;
 
-    int32_t corr = ((error_cps * APP_BALANCE_SYNC_KP_PM_PER_CPS_X100) / 100) +
-        (int32_t)s_bal.sync_i_pm;
-    int16_t corr_pm = clamp_sync_correction(corr);
+    /* 转向期间：暂停闭环，持续刷新目标角，转向结束后无缝接管 */
+    if (cmd->target_yaw_pm != 0) {
+        pid_reset(&s_bal.yaw_pid);
+        s_bal.yaw_target_deg   = yaw_deg;
+        s_bal.yaw_target_valid = true;
+        s_bal.diag.yaw_error_deg     = 0.0f;
+        s_bal.diag.yaw_correction_pm = 0;
+        return 0;
+    }
 
-    s_bal.diag.sync_error_cps = error_cps;
-    s_bal.diag.sync_correction_pm = corr_pm;
+    /* 直行：首拍初始化目标角 */
+    if (!s_bal.yaw_target_valid) {
+        s_bal.yaw_target_deg   = yaw_deg;
+        s_bal.yaw_target_valid = true;
+        pid_reset(&s_bal.yaw_pid);
+        s_bal.diag.yaw_error_deg     = 0.0f;
+        s_bal.diag.yaw_correction_pm = 0;
+        return 0;
+    }
+
+    /* wrap_180 误差，"virtual measured" 技巧避免 D 项在 ±180 跳变 */
+    float err          = wrap_180(s_bal.yaw_target_deg - yaw_deg);
+    float virtual_meas = s_bal.yaw_target_deg - err;
+    float raw_corr     = pid_step(&s_bal.yaw_pid,
+                                   s_bal.yaw_target_deg,
+                                   virtual_meas,
+                                   s_dt_sec);
+    int16_t corr_pm    = clamp_yaw_correction(raw_corr);
+
+    s_bal.diag.yaw_error_deg     = err;
+    s_bal.diag.yaw_correction_pm = corr_pm;
     return corr_pm;
+
+/* ---- 源 1：陀螺仪积分（gz_dps × dt） -------------------------------------- */
 #else
-    (void)fb;
-    (void)cmd;
-    (void)drive_pm;
-    reset_sync_state();
-    return 0;
+    if ((att == NULL) || (cmd == NULL)) {
+        reset_yaw_state();
+        return 0;
+    }
+
+    /* 转向期间：暂停 PID，清零积分，转向结束后从 0 重新追踪 */
+    if (cmd->target_yaw_pm != 0) {
+        pid_reset(&s_bal.yaw_pid);
+        s_bal.yaw_gz_integrated      = 0.0f;
+        s_bal.diag.yaw_error_deg     = 0.0f;
+        s_bal.diag.yaw_correction_pm = 0;
+        return 0;
+    }
+
+    /* 直行：积分 gz_dps（经 yaw_sign 修正极性），PID 以"归零积分量"为目标。
+     * D 项 = -Kd * d(yaw_gz_integrated)/dt ≈ -Kd * gz_dps * yaw_sign，
+     * 天然提供角速率阻尼，无需单独引入速率反馈。 */
+    s_bal.yaw_gz_integrated += att->gz_dps * (float)s_bal.yaw_sign * s_dt_sec;
+
+    float raw_corr  = pid_step(&s_bal.yaw_pid,
+                                0.0f,
+                                s_bal.yaw_gz_integrated,
+                                s_dt_sec);
+    int16_t corr_pm = clamp_yaw_correction(raw_corr);
+
+    s_bal.diag.yaw_error_deg     = -s_bal.yaw_gz_integrated; /* error = target - measured */
+    s_bal.diag.yaw_correction_pm = corr_pm;
+    return corr_pm;
 #endif
 }
 
@@ -161,6 +239,7 @@ void app_balance_init(void)
 {
     pid_init(&s_bal.speed_pid);
     pid_init(&s_bal.balance_pid);
+    pid_init(&s_bal.yaw_pid);
 
     /* 速度外环：输出是"目标 tilt deg"，限幅 ±MAX_TILT_DEG */
     pid_set_output_limit(&s_bal.speed_pid,
@@ -172,7 +251,13 @@ void app_balance_init(void)
         -(float)APP_BALANCE_MAX_PWM_PERMILLE, (float)APP_BALANCE_MAX_PWM_PERMILLE);
     pid_set_d_filter(&s_bal.balance_pid, APP_BALANCE_BALANCE_D_FILTER_ALPHA);
 
-    s_bal.pitch_offset_deg = 0.0f;
+    /* Yaw 角度环：输出是差分 PWM permille，限幅 ±YAW_MAX_CORRECTION */
+    pid_set_output_limit(&s_bal.yaw_pid,
+        -(float)APP_BALANCE_YAW_MAX_CORRECTION_PM,
+         (float)APP_BALANCE_YAW_MAX_CORRECTION_PM);
+    pid_set_d_filter(&s_bal.yaw_pid, APP_BALANCE_YAW_D_FILTER_ALPHA);
+
+    s_bal.pitch_offset_deg = -0.8f;
     reset_pitch_filter();
     s_bal.pitch_sign =
 #if APP_BALANCE_PITCH_INVERT
@@ -180,9 +265,15 @@ void app_balance_init(void)
 #else
         1;
 #endif
+    s_bal.yaw_sign =
+#if APP_BALANCE_YAW_INVERT
+        -1;
+#else
+        1;
+#endif
     s_bal.yaw_kp = 1.0f;
     s_bal.lt_stream_enabled = false;
-    reset_sync_state();
+    reset_yaw_state();
 
     s_bal.diag.target_tilt_deg = 0.0f;
     s_bal.diag.pitch_meas_deg  = 0.0f;
@@ -198,7 +289,7 @@ void app_balance_reset(void)
     pid_reset(&s_bal.speed_pid);
     pid_reset(&s_bal.balance_pid);
     reset_pitch_filter();
-    reset_sync_state();
+    reset_yaw_state();
 }
 
 void app_balance_set_pitch_offset(float deg)
@@ -217,6 +308,17 @@ bool app_balance_get_pitch_inverted(void)
     return (s_bal.pitch_sign < 0);
 }
 
+void app_balance_set_yaw_inverted(bool inverted)
+{
+    s_bal.yaw_sign = inverted ? (int8_t)-1 : (int8_t)1;
+    reset_yaw_state();
+}
+
+bool app_balance_get_yaw_inverted(void)
+{
+    return (s_bal.yaw_sign < 0);
+}
+
 void app_balance_set_balance_gains(float kp, float ki, float kd)
 {
     pid_set_gains(&s_bal.balance_pid, kp, ki, kd);
@@ -230,6 +332,11 @@ void app_balance_set_speed_gains(float kp, float ki, float kd)
 void app_balance_set_yaw_kp(float kp_yaw)
 {
     s_bal.yaw_kp = kp_yaw;
+}
+
+void app_balance_set_yaw_gains(float kp, float ki, float kd)
+{
+    pid_set_gains(&s_bal.yaw_pid, kp, ki, kd);
 }
 
 void app_balance_step(const app_balance_attitude_t *att,
@@ -253,15 +360,15 @@ void app_balance_step(const app_balance_attitude_t *att,
         /* 不允许驱动：不调 set_output（静默期等待姿态稳定，故障态由 safety 下发 brake/coast）；
          * 同时 reset PID 内部历史，避免下次 ARMED 时 i_term / d 历史跨段污染。 */
         app_balance_reset();
-        s_bal.diag.target_tilt_deg = 0.0f;
-        s_bal.diag.pitch_meas_deg  = sa.pitch_deg;
-        s_bal.diag.balance_out_pwm = 0.0f;
-        s_bal.diag.sync_correction_pm = 0;
-        s_bal.diag.sync_error_cps  = 0;
-        s_bal.diag.left_cmd_pm     = 0;
-        s_bal.diag.right_cmd_pm    = 0;
-        s_bal.diag.speed_meas_cps  = 0;
-        s_bal.diag.driving         = false;
+        s_bal.diag.target_tilt_deg   = 0.0f;
+        s_bal.diag.pitch_meas_deg    = sa.pitch_deg;
+        s_bal.diag.balance_out_pwm   = 0.0f;
+        s_bal.diag.yaw_correction_pm = 0;
+        s_bal.diag.yaw_error_deg     = 0.0f;
+        s_bal.diag.left_cmd_pm       = 0;
+        s_bal.diag.right_cmd_pm      = 0;
+        s_bal.diag.speed_meas_cps    = 0;
+        s_bal.diag.driving           = false;
         return;
     }
 
@@ -286,23 +393,22 @@ void app_balance_step(const app_balance_attitude_t *att,
         pitch_meas,
         s_dt_sec);
 
-    /* ---- 4) 转向叠加 + 直行双轮同步：left += sync, right -= sync ---- */
-    float yaw_pm = (float)cmd->target_yaw_pm * s_bal.yaw_kp;
-    int16_t sync_pm = balance_sync_step(&fb, cmd, pwm_out);
-    int16_t left_pm  = clamp_pwm_pm(pwm_out - yaw_pm + (float)sync_pm);
-    int16_t right_pm = clamp_pwm_pm(pwm_out + yaw_pm - (float)sync_pm);
+    /* ---- 4) 转向叠加 + Yaw 角度环差分：left += yaw_corr, right -= yaw_corr ---- */
+    float yaw_pm     = (float)cmd->target_yaw_pm * s_bal.yaw_kp;
+    int16_t yaw_corr = yaw_angle_step(att, cmd);
+    int16_t left_pm  = clamp_pwm_pm(pwm_out - yaw_pm + (float)yaw_corr);
+    int16_t right_pm = clamp_pwm_pm(pwm_out + yaw_pm - (float)yaw_corr);
 
     bsp_motor_set_output(left_pm, right_pm);
 
     /* ---- 5) 诊断写回 ---- */
-    s_bal.diag.target_tilt_deg = target_tilt_deg;
-    s_bal.diag.pitch_meas_deg  = pitch_meas;
-    s_bal.diag.balance_out_pwm = pwm_out;
-    s_bal.diag.sync_correction_pm = sync_pm;
-    s_bal.diag.left_cmd_pm     = left_pm;
-    s_bal.diag.right_cmd_pm    = right_pm;
-    s_bal.diag.speed_meas_cps  = avg_cps;
-    s_bal.diag.driving         = true;
+    s_bal.diag.target_tilt_deg   = target_tilt_deg;
+    s_bal.diag.pitch_meas_deg    = pitch_meas;
+    s_bal.diag.balance_out_pwm   = pwm_out;
+    s_bal.diag.left_cmd_pm       = left_pm;
+    s_bal.diag.right_cmd_pm      = right_pm;
+    s_bal.diag.speed_meas_cps    = avg_cps;
+    s_bal.diag.driving           = true;
 }
 
 void app_balance_get_diag(app_balance_diag_t *out)
@@ -449,14 +555,17 @@ static void print_scaled3(const char *tag, float kp, float ki, float kd)
 static void print_pid_status(void)
 {
     print_scaled3("balance", s_bal.balance_pid.kp, s_bal.balance_pid.ki, s_bal.balance_pid.kd);
-    print_scaled3("speed", s_bal.speed_pid.kp, s_bal.speed_pid.ki, s_bal.speed_pid.kd);
+    print_scaled3("speed",   s_bal.speed_pid.kp,   s_bal.speed_pid.ki,   s_bal.speed_pid.kd);
+    print_scaled3("yaw",     s_bal.yaw_pid.kp,     s_bal.yaw_pid.ki,     s_bal.yaw_pid.kd);
 }
 
 static void print_pid_help(void)
 {
     (void)printf("[pid] UART commands: bp <kp_x1000> <ki_x1000> <kd_x1000>, "
-                 "sp <kp_x1000> <ki_x1000> <kd_x1000>, pid?, pid0, lt, lt0, t/test\r\n");
-    (void)printf("[pid] example: bp 8000 0 1000 ; sp 2 0 0\r\n");
+                 "sp <kp_x1000> <ki_x1000> <kd_x1000>, "
+                 "yp <kp_x1000> <ki_x1000> <kd_x1000>, "
+                 "yi0/yi1, pid?, pid0, lt, lt0, t/test\r\n");
+    (void)printf("[pid] example: bp 8000 0 1000 ; sp 2 0 0 ; yp 500 0 100 ; yi1\r\n");
 }
 
 static void send_lt_header(void)
@@ -543,6 +652,7 @@ static bool handle_pid_command(const char *cmd)
         (cmd[3] == '0') && (cmd[4] == '\0')) {
         app_balance_set_balance_gains(0.0f, 0.0f, 0.0f);
         app_balance_set_speed_gains(0.0f, 0.0f, 0.0f);
+        app_balance_set_yaw_gains(0.0f, 0.0f, 0.0f);
         app_balance_reset();
         (void)printf("[pid] all gains cleared\r\n");
         return true;
@@ -584,6 +694,32 @@ static bool handle_pid_command(const char *cmd)
         app_balance_set_speed_gains(kp, ki, kd);
         app_balance_reset();
         print_scaled3("speed", kp, ki, kd);
+        return true;
+    }
+
+    if ((cmd[0] == 'y') && (cmd[1] == 'p') && is_field_separator(cmd[2])) {
+        float kp, ki, kd;
+        if (!parse_pid_triplet(&cmd[2], &kp, &ki, &kd)) {
+            (void)printf("[pid] bad yp command, use: yp 500 0 100\r\n");
+            return true;
+        }
+        app_balance_set_yaw_gains(kp, ki, kd);
+        reset_yaw_state();
+        print_scaled3("yaw", kp, ki, kd);
+        return true;
+    }
+
+    if ((cmd[0] == 'y') && (cmd[1] == 'i') &&
+        ((cmd[2] == '\0') || (cmd[2] == '?'))) {
+        (void)printf("[yaw] invert=%u\r\n",
+                     app_balance_get_yaw_inverted() ? 1u : 0u);
+        return true;
+    }
+    if ((cmd[0] == 'y') && (cmd[1] == 'i') &&
+        ((cmd[2] == '0') || (cmd[2] == '1')) && (cmd[3] == '\0')) {
+        app_balance_set_yaw_inverted(cmd[2] == '1');
+        (void)printf("[yaw] invert=%u\r\n",
+                     app_balance_get_yaw_inverted() ? 1u : 0u);
         return true;
     }
 
@@ -674,6 +810,13 @@ bool app_balance_run(void)
     uint32_t last_enc_irq  = bsp_motor_get_enc_irq_count();
     ms901m_snapshot_t snap = { 0 };
 
+    /* 平衡车死区策略：禁用静摩擦 kick，仅用 running DZ 无条件映射。
+     * 倒立摆物理特性保证：电机不响应 → 倾角增大 → PID 输出自然增大 → 超越静摩擦。
+     * 无需状态机检测"是否已启动"，避免方向翻转时 kick 脉冲引发机械振颤。 */
+    bsp_motor_set_calibration_mode(false);
+    bsp_motor_set_static_dz_enabled(false);
+    bsp_motor_set_running_dz_enabled(true);
+
     /* 主循环上电默认无运动指令（K230 通讯接入后由 MOTION_CMD 帧覆盖） */
     app_balance_motion_cmd_t cmd = { .target_speed_cps = 0, .target_yaw_pm = 0 };
 
@@ -707,8 +850,10 @@ bool app_balance_run(void)
             ms901m_get_snapshot(&snap);
 
             app_balance_attitude_t att = {
-                .pitch_deg     = snap.pitch_deg,
+                .pitch_deg      = snap.pitch_deg,
                 .pitch_rate_dps = snap.gy_dps,
+                .yaw_deg        = snap.yaw_deg,
+                .gz_dps         = snap.gz_dps,
                 .attitude_valid = snap.has_attitude,
             };
             app_balance_step(&att, &cmd);
@@ -753,7 +898,7 @@ bool app_balance_run(void)
             uint32_t log_ovr = bsp_log_uart_rx_overrun();
 
             (void)printf("[hb] t=%lus state=%s pitch=%c%ld.%02lu inv=%u tilt*=%c%ld.%02lu "
-                         "pwm=%c%ld.%02lu syncErr=%ld syncCorr=%d L=%ld R=%ld v=%ldcps "
+                         "pwm=%c%ld.%02lu yawErr=%c%ld.%02lu yawCorr=%d L=%ld R=%ld v=%ldcps "
                          "batt=%lumV ms901m_g=%lu/b=%lu log_ovr=%lu k230_rx=%lub/s "
                          "encL=%ld encR=%ld encISR=%lu/s%s\n",
                 (unsigned long)(tick_count / 1000u),
@@ -762,8 +907,8 @@ bool app_balance_run(void)
                 app_balance_get_pitch_inverted() ? 1u : 0u,
                 BAL_F2_S(diag.target_tilt_deg), (long)BAL_F2_I(diag.target_tilt_deg), (unsigned long)BAL_F2_F(diag.target_tilt_deg),
                 BAL_F2_S(diag.balance_out_pwm), (long)BAL_F2_I(diag.balance_out_pwm), (unsigned long)BAL_F2_F(diag.balance_out_pwm),
-                (long)diag.sync_error_cps,
-                (int)diag.sync_correction_pm,
+                BAL_F2_S(diag.yaw_error_deg), (long)BAL_F2_I(diag.yaw_error_deg), (unsigned long)BAL_F2_F(diag.yaw_error_deg),
+                (int)diag.yaw_correction_pm,
                 (long)diag.left_cmd_pm, (long)diag.right_cmd_pm,
                 (long)diag.speed_meas_cps,
                 (unsigned long)batt_mv,

@@ -63,7 +63,9 @@ typedef struct {
     uint16_t pwm_limit_pm;
     bool     invert_left;
     bool     invert_right;
-    bool     deadzone_comp_enabled;
+    bool     deadzone_comp_enabled;   /* 总开关：false 时跳过全部死区逻辑 */
+    bool     static_dz_enabled;       /* 静摩擦补偿分开关：false 时跳过 apply_static_deadzone */
+    bool     running_dz_enabled;      /* 动摩擦补偿分开关：false 时跳过 apply_running_deadzone */
     bool     calibration_mode;     /* true: commit 固定走静态 DZ；详见 .h */
     bool     right_forward_scale_enabled;
     bool     enabled;
@@ -335,11 +337,22 @@ static void commit_channel(int16_t cmd_pm, bool is_left)
 
     if (s_motor.deadzone_comp_enabled) {
         if (s_motor.calibration_mode) {
-            pm = apply_static_deadzone(pm, is_left);
+            if (s_motor.static_dz_enabled) {
+                pm = apply_static_deadzone(pm, is_left);
+            }
         } else if (*running_p) {
-            pm = apply_running_deadzone(pm, is_left);
+            if (s_motor.running_dz_enabled) {
+                pm = apply_running_deadzone(pm, is_left);
+            }
         } else {
-            pm = apply_static_deadzone(pm, is_left);
+            /* 未确认运动 / 停转重试：优先走静摩擦 kick。
+             * 若 static_dz 被禁用（平衡车模式），则 fallback 到 running_dz，
+             * 保证非零命令始终有死区补偿，避免 PID 微量输出被死区吃掉。 */
+            if (s_motor.static_dz_enabled) {
+                pm = apply_static_deadzone(pm, is_left);
+            } else if (s_motor.running_dz_enabled) {
+                pm = apply_running_deadzone(pm, is_left);
+            }
         }
     }
 
@@ -490,7 +503,9 @@ void bsp_motor_init(void)
     s_motor.invert_left            = false;
     s_motor.invert_right           = false;
     s_motor.deadzone_comp_enabled  = true;
-    s_motor.calibration_mode       = true;
+    s_motor.static_dz_enabled      = true;
+    s_motor.running_dz_enabled     = true;
+    s_motor.calibration_mode       = false;
     s_motor.right_forward_scale_enabled = true;
     s_motor.enabled                = false;
     s_motor.left_prev_dir          = 0;
@@ -658,6 +673,36 @@ void bsp_motor_set_deadzone_comp_enabled(bool enabled)
 bool bsp_motor_get_deadzone_comp_enabled(void)
 {
     return s_motor.deadzone_comp_enabled;
+}
+
+void bsp_motor_set_static_dz_enabled(bool enabled)
+{
+    if (s_motor.static_dz_enabled == enabled) {
+        return;
+    }
+    s_motor.static_dz_enabled = enabled;
+    commit_left (s_motor.left_cmd_pm);
+    commit_right(s_motor.right_cmd_pm);
+}
+
+bool bsp_motor_get_static_dz_enabled(void)
+{
+    return s_motor.static_dz_enabled;
+}
+
+void bsp_motor_set_running_dz_enabled(bool enabled)
+{
+    if (s_motor.running_dz_enabled == enabled) {
+        return;
+    }
+    s_motor.running_dz_enabled = enabled;
+    commit_left (s_motor.left_cmd_pm);
+    commit_right(s_motor.right_cmd_pm);
+}
+
+bool bsp_motor_get_running_dz_enabled(void)
+{
+    return s_motor.running_dz_enabled;
 }
 
 void bsp_motor_set_calibration_mode(bool enabled)

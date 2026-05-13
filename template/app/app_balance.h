@@ -44,9 +44,10 @@
  *      c) 速度外环输出会被钳到 ±`APP_BALANCE_MAX_TILT_DEG`（默认 ±10°），
  *         避免外环把目标角推到内环工作区外；
  *
- *   ④ **转向叠加（最后调）**：
- *      `app_balance_set_yaw_kp(Kp_yaw)`：直接的 yaw 速率反馈；K230 给的 ω 命令
- *      乘以一个开环系数即可，本骨架未做内环 yaw（GB370 没装 yaw 编码器）。
+ *   ④ **转向叠加 + Yaw 角度环（最后调）**：
+ *      `app_balance_set_yaw_kp(Kp_yaw)`：转向开环差速乘子；
+ *      `app_balance_set_yaw_gains(Kp, Ki, Kd)`：直行时 Yaw 角度闭环，
+ *      锁定 MS901M yaw_deg，防止原地偏航。串口命令 `yp Kp_x1000 Ki_x1000 Kd_x1000`。
  *
  * ============================================================================
  * 调用模型
@@ -67,6 +68,8 @@
  *               ms901m_get_snapshot(&snap);
  *               app_balance_attitude_t att = { .pitch_deg = snap.pitch_deg,
  *                                              .pitch_rate_dps = snap.gy_dps,
+ *                                              .yaw_deg = snap.yaw_deg,
+ *                                              .gz_dps = snap.gz_dps,
  *                                              .attitude_valid = snap.has_attitude };
  *               app_balance_motion_cmd_t cmd = { .target_speed_cps = ...,
  *                                                .target_yaw_pm = ... };
@@ -134,32 +137,50 @@ extern "C" {
 #define APP_BALANCE_PITCH_INVERT                (1)
 #endif
 
-/** 装车模式双轮同步服务开关：直行时按左右编码器速度差做差分 PWM 补偿。 */
-#ifndef APP_BALANCE_SYNC_ENABLED
-#define APP_BALANCE_SYNC_ENABLED                (1)
+/**
+ * Yaw 轴极性翻转（gz_dps / yaw_deg 符号修正）。
+ *
+ * 标准 IMU 约定：俯视逆时针 → gz_dps > 0。但本系统差速驱动约定
+ * "left 加 / right 减 → 修正左偏"，要求车向左偏时 PID 输出为正。
+ * 若 IMU 默认符号与差速修正方向不匹配（现象：高 Kp 无限自转），
+ * 启用此翻转即可将正反馈改为负反馈。
+ *
+ * 判别方法：上电后手动将车顺时针转一小角度再松手，
+ *   - 若 yaw_corr 先出正值再衰减 → 符号正确，设 0；
+ *   - 若 yaw_corr 持续同方向增长 → 正反馈，设 1。
+ */
+#ifndef APP_BALANCE_YAW_INVERT
+#define APP_BALANCE_YAW_INVERT                  (1)
 #endif
 
-/** 同步环比例项，单位是 0.01 permille / cps；20 = 0.20 pm/cps ≈ 4.4 pm/rpm。 */
-#ifndef APP_BALANCE_SYNC_KP_PM_PER_CPS_X100
-#define APP_BALANCE_SYNC_KP_PM_PER_CPS_X100     (20)
-#endif
-
-/** 同步环积分项，单位同上；默认 0，先避免与平衡内环互相积分。 */
-#ifndef APP_BALANCE_SYNC_KI_PM_PER_CPS_STEP_X100
-#define APP_BALANCE_SYNC_KI_PM_PER_CPS_STEP_X100 (0)
-#endif
-
-/** 同步差分补偿限幅，避免编码器异常时大幅扰动平衡内环。 */
-#ifndef APP_BALANCE_SYNC_MAX_CORRECTION_PM
-#define APP_BALANCE_SYNC_MAX_CORRECTION_PM      (200)
+/** Yaw 角度环开关：直行时闭环锁定航向，抑制原地偏航。 */
+#ifndef APP_BALANCE_YAW_ENABLED
+#define APP_BALANCE_YAW_ENABLED                 (1)
 #endif
 
 /**
- * 同步环启用的最小平衡驱动力（permille）。
- * PID 输出很小时暂停同步，避免 PID=0 手拨轮触发电机；平衡环真正发力时恢复同步。
+ * Yaw 数据源选择（编译期一键切换，上车前按实测效果选定后重新编译）：
+ *   0 = MS901M EKF 绝对偏航角 yaw_deg [-180, 180]°
+ *       ─ 磁力计 + 陀螺 EKF 融合，长期稳定，不漂移；
+ *       ─ 存在 ±180° 跳变风险（已用 wrap_180 + virtual_measured 技巧处理）；
+ *       ─ 磁场干扰环境下 yaw_deg 可能出现 180° 跳变，导致短暂反向输出。
+ *   1 = 陀螺仪积分 gz_dps × dt（相对偏航累积量）
+ *       ─ 零漂约 0.2~0.5°/s，100 Hz 拍上不明显；直行短时间（< 30 s）效果好；
+ *       ─ 彻底无 ±180° 跳变，无磁干扰；转向结束后积分自动清零重新锁定；
+ *       ─ PID 的 D 项天然等效 gz_dps 角速率阻尼，调参直觉更好。
  */
-#ifndef APP_BALANCE_SYNC_MIN_DRIVE_PM
-#define APP_BALANCE_SYNC_MIN_DRIVE_PM          (30)
+#ifndef APP_BALANCE_YAW_SOURCE
+#define APP_BALANCE_YAW_SOURCE                  (1)   /* 0=EKF yaw_deg  1=gyro_integration */
+#endif
+
+/** Yaw PID 微分项 EMA 滤波系数（0 = 禁用）。 */
+#ifndef APP_BALANCE_YAW_D_FILTER_ALPHA
+#define APP_BALANCE_YAW_D_FILTER_ALPHA          (0.20f)
+#endif
+
+/** Yaw 角度环输出差分补偿限幅（permille），防止大角度误差时扰动平衡内环。 */
+#ifndef APP_BALANCE_YAW_MAX_CORRECTION_PM
+#define APP_BALANCE_YAW_MAX_CORRECTION_PM       (200)
 #endif
 
 /* ========================================================================== */
@@ -170,6 +191,8 @@ extern "C" {
 typedef struct {
     float pitch_deg;        /* 俯仰角；车头上扬为正（与 MS901M 对齐） */
     float pitch_rate_dps;   /* 俯仰角速度，°/s（MS901M gy_dps） */
+    float yaw_deg;          /* 偏航角 [-180, 180]°（MS901M 0x01 帧 EKF 输出） */
+    float gz_dps;           /* 偏航角速度，°/s（MS901M gz_dps，Z 轴陀螺） */
     bool  attitude_valid;   /* 0x01 帧是否至少收到过 */
 } app_balance_attitude_t;
 
@@ -188,8 +211,8 @@ typedef struct {
     float   target_tilt_deg;    /* 速度外环输出 = 平衡内环目标角 */
     float   pitch_meas_deg;     /* 实际俯仰（已减零点） */
     float   balance_out_pwm;    /* 平衡内环输出，permille */
-    int16_t sync_correction_pm;  /* 双轮同步差分补偿；正值 = 左加右减 */
-    int32_t sync_error_cps;      /* right_speed_cps - left_speed_cps */
+    int16_t yaw_correction_pm;  /* Yaw 角度环差分补偿；正值 = 左加右减 */
+    float   yaw_error_deg;      /* wrap_180(yaw_target - yaw_measured)，°  */
     int16_t left_cmd_pm;        /* 最终左轮命令 */
     int16_t right_cmd_pm;       /* 最终右轮命令 */
     int32_t speed_meas_cps;     /* 实际平均速度 = (L+R)/2 */
@@ -224,6 +247,17 @@ void app_balance_set_pitch_inverted(bool inverted);
 /** @return true = 当前已启用俯仰角软件翻转。 */
 bool app_balance_get_pitch_inverted(void);
 
+/**
+ * @brief 设置 Yaw 轴极性翻转（影响 gz_dps / yaw_deg 在角度环内的符号）。
+ *
+ * 若启用，gz_dps 在积分前取反、yaw_deg 误差在计算前取反，
+ * 使 PID 输出方向与差速修正方向一致。修改后自动 reset_yaw_state。
+ */
+void app_balance_set_yaw_inverted(bool inverted);
+
+/** @return true = 当前已启用 Yaw 轴软件翻转。 */
+bool app_balance_get_yaw_inverted(void);
+
 /** 设置平衡内环增益（输入：tilt 误差 deg；输出：PWM permille）。 */
 void app_balance_set_balance_gains(float kp, float ki, float kd);
 
@@ -235,6 +269,13 @@ void app_balance_set_speed_gains(float kp, float ki, float kd);
  *        默认 1.0 = K230 给的 target_yaw_pm 直接当差速量加；可在 0.3 ~ 1.5 间调试。
  */
 void app_balance_set_yaw_kp(float kp_yaw);
+
+/**
+ * @brief 设置 Yaw 角度环 PID 增益（输入：yaw 误差 °；输出：差分 PWM permille）。
+ *        直行时闭环锁定 MS901M yaw_deg；转向时 PID 暂停并更新目标角。
+ *        默认增益 0（同其他环，需串口 `yp kp ki kd` 注入）。
+ */
+void app_balance_set_yaw_gains(float kp, float ki, float kd);
 
 /**
  * @brief 跑一拍控制环（建议 100 Hz 调用，与 `APP_BALANCE_CONTROL_PERIOD_MS` 对齐）。
