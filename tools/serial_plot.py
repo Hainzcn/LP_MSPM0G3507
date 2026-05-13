@@ -433,27 +433,60 @@ class MainWindow(QtWidgets.QMainWindow):
         pid_layout.setSpacing(8)
 
         title_label = QtWidgets.QLabel("PID调参:")
-        self.kp_edit = QtWidgets.QLineEdit("0.0")
-        self.ki_edit = QtWidgets.QLineEdit("0.0")
-        self.kd_edit = QtWidgets.QLineEdit("0.0")
-        self.send_pid_btn = QtWidgets.QPushButton("发送PID")
+        self.bp_kp_edit = QtWidgets.QLineEdit("0.0")
+        self.bp_ki_edit = QtWidgets.QLineEdit("0.0")
+        self.bp_kd_edit = QtWidgets.QLineEdit("0.0")
+        self.yp_kp_edit = QtWidgets.QLineEdit("0.0")
+        self.yp_ki_edit = QtWidgets.QLineEdit("0.0")
+        self.yp_kd_edit = QtWidgets.QLineEdit("0.0")
+        self.sp_kp_edit = QtWidgets.QLineEdit("0.0")
+        self.sp_ki_edit = QtWidgets.QLineEdit("0.0")
+        self.sp_kd_edit = QtWidgets.QLineEdit("0.0")
+        self.send_bp_btn = QtWidgets.QPushButton("发送平衡环PID")
+        self.send_yp_btn = QtWidgets.QPushButton("发送角度环PID")
+        self.send_sp_btn = QtWidgets.QPushButton("发送速度环PID")
         self.send_lt_btn = QtWidgets.QPushButton("发送lt")
-        self.send_pid_btn.setFixedHeight(28)
+        self.send_bp_btn.setFixedHeight(28)
+        self.send_yp_btn.setFixedHeight(28)
+        self.send_sp_btn.setFixedHeight(28)
         self.send_lt_btn.setFixedHeight(28)
-        self.send_pid_btn.clicked.connect(self._send_pid_params)
+        self.send_bp_btn.clicked.connect(self._send_balance_pid_params)
+        self.send_yp_btn.clicked.connect(self._send_angle_pid_params)
+        self.send_sp_btn.clicked.connect(self._send_speed_pid_params)
         self.send_lt_btn.clicked.connect(self._send_lt_command)
 
-        for name, edit in [("Kp", self.kp_edit), ("Ki", self.ki_edit), ("Kd", self.kd_edit)]:
-            edit.setMaximumWidth(110)
+        pid_layout.addWidget(QtWidgets.QLabel("平衡环 bp"))
+        for name, edit in [("Kp", self.bp_kp_edit), ("Ki", self.bp_ki_edit), ("Kd", self.bp_kd_edit)]:
+            edit.setMaximumWidth(95)
             edit.setPlaceholderText(name)
-            edit.returnPressed.connect(self._send_pid_params)
+            edit.returnPressed.connect(self._send_balance_pid_params)
             pid_layout.addWidget(QtWidgets.QLabel(name))
             pid_layout.addWidget(edit)
+        pid_layout.addWidget(self.send_bp_btn)
+
+        pid_layout.addSpacing(12)
+        pid_layout.addWidget(QtWidgets.QLabel("角度环 yp"))
+        for name, edit in [("Kp", self.yp_kp_edit), ("Ki", self.yp_ki_edit), ("Kd", self.yp_kd_edit)]:
+            edit.setMaximumWidth(95)
+            edit.setPlaceholderText(name)
+            edit.returnPressed.connect(self._send_angle_pid_params)
+            pid_layout.addWidget(QtWidgets.QLabel(name))
+            pid_layout.addWidget(edit)
+        pid_layout.addWidget(self.send_yp_btn)
+
+        pid_layout.addSpacing(12)
+        pid_layout.addWidget(QtWidgets.QLabel("速度环 sp"))
+        for name, edit in [("Kp", self.sp_kp_edit), ("Ki", self.sp_ki_edit), ("Kd", self.sp_kd_edit)]:
+            edit.setMaximumWidth(95)
+            edit.setPlaceholderText(name)
+            edit.returnPressed.connect(self._send_speed_pid_params)
+            pid_layout.addWidget(QtWidgets.QLabel(name))
+            pid_layout.addWidget(edit)
+        pid_layout.addWidget(self.send_sp_btn)
 
         pid_layout.insertWidget(0, title_label)
         pid_layout.addStretch(1)
         pid_layout.addWidget(self.send_lt_btn)
-        pid_layout.addWidget(self.send_pid_btn)
 
         self.canvas = RealTimeCanvas()
         self.toolbar = NavigationToolbar2QT(self.canvas, self)
@@ -479,16 +512,43 @@ class MainWindow(QtWidgets.QMainWindow):
         self._timer.timeout.connect(self._refresh)
         self._timer.start(self._refresh_interval_ms)
 
-    def _send_pid_params(self):
+    @staticmethod
+    def _read_pid_triplet(kp_edit, ki_edit, kd_edit):
+        kp = float(kp_edit.text().strip())
+        ki = float(ki_edit.text().strip())
+        kd = float(kd_edit.text().strip())
+        return kp, ki, kd
+
+    def _send_balance_pid_params(self):
         try:
-            kp = float(self.kp_edit.text().strip())
-            ki = float(self.ki_edit.text().strip())
-            kd = float(self.kd_edit.text().strip())
+            kp, ki, kd = self._read_pid_triplet(self.bp_kp_edit, self.bp_ki_edit, self.bp_kd_edit)
         except ValueError:
-            QtWidgets.QMessageBox.warning(self, "参数错误", "Kp/Ki/Kd 请输入合法数字。")
+            QtWidgets.QMessageBox.warning(self, "参数错误", "平衡环 Kp/Ki/Kd 请输入合法数字。")
             return
 
         cmd = f"bp {kp:g} {ki:g} {kd:g}\n"
+        self.worker.send_text(cmd)
+        self.status_bar.showMessage(f"已加入发送队列: {cmd.strip()}", 2500)
+
+    def _send_angle_pid_params(self):
+        try:
+            kp, ki, kd = self._read_pid_triplet(self.yp_kp_edit, self.yp_ki_edit, self.yp_kd_edit)
+        except ValueError:
+            QtWidgets.QMessageBox.warning(self, "参数错误", "角度环 Kp/Ki/Kd 请输入合法数字。")
+            return
+
+        cmd = f"yp {kp:g} {ki:g} {kd:g}\n"
+        self.worker.send_text(cmd)
+        self.status_bar.showMessage(f"已加入发送队列: {cmd.strip()}", 2500)
+
+    def _send_speed_pid_params(self):
+        try:
+            kp, ki, kd = self._read_pid_triplet(self.sp_kp_edit, self.sp_ki_edit, self.sp_kd_edit)
+        except ValueError:
+            QtWidgets.QMessageBox.warning(self, "参数错误", "速度环 Kp/Ki/Kd 请输入合法数字。")
+            return
+
+        cmd = f"sp {kp:g} {ki:g} {kd:g}\n"
         self.worker.send_text(cmd)
         self.status_bar.showMessage(f"已加入发送队列: {cmd.strip()}", 2500)
 

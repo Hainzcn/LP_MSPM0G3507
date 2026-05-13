@@ -15,7 +15,7 @@
  * 接口约定：
  *   ─ 速度命令使用 permille（千分比），范围 [-1000, 1000]，
  *     正值正转、负值反转、0 = 滑行 (coast，方向位清零、PWM = 0)
- *   ─ 角度按 GB370 常见 11 PPR、30:1 减速比估算；如实物参数不同，
+ *   ─ 角度按 GB370 实测 11 PPR、9.6:1 减速比计算；如实物参数不同，
  *     仅需改本文件顶部的编码器宏，不要改业务代码
  *   ─ 速度反馈基于 update() 周期内的滑动窗口差分（默认 20 ms 窗口 → 50 Hz 速度刷新率）
  *
@@ -49,8 +49,8 @@ extern "C" {
 /** PWM 命令满量程千分比（不要改） */
 #define BSP_MOTOR_PWM_MAX_PERMILLE                 (1000)
 
-/** GB370 减速箱减速比（实物为多少改多少） */
-#define BSP_MOTOR_GB370_GEAR_RATIO                 (30)
+/** GB370 减速箱减速比（标称 9.6:1，仅供参考；实际定标以下方 COUNTS_PER_OUTPUT_REV 为准） */
+#define BSP_MOTOR_GB370_GEAR_RATIO                 (9.6f)
 
 /** GB370 内置霍尔每电机轴转脉冲数（A 相单沿） */
 #define BSP_MOTOR_GB370_HALL_PPR                   (11)
@@ -61,8 +61,8 @@ extern "C" {
 /**
  * 右轮解码倍率：默认 X4 (PA12 + PA13 都开双沿中断，与左轮分辨率一致 1320 cnt/rev)。
  * 若 CPU 负担过大或高速漏脉冲明显，可切回 X2（仅 PA12 双沿，PA13 ISR 内读电平）。
- *   X4 → 1320 cnt/rev，与左轮一致，平衡环左右系数可共用
- *   X2 → 660  cnt/rev，CPU ISR 减半（推荐转速 > 1500 rpm 出轴侧时切此）
+ *   X4 → 404 cnt/rev（实测定标），与左轮一致，平衡环左右系数可共用
+ *   X2 → 约 202 cnt/rev，CPU ISR 减半（推荐转速 > 1500 rpm 出轴侧时切此）
  */
 #ifndef BSP_MOTOR_RIGHT_DECODE_X
 #define BSP_MOTOR_RIGHT_DECODE_X                   (4)
@@ -76,7 +76,7 @@ extern "C" {
  * 扫描原始未补偿曲线。
  */
 #ifndef BSP_MOTOR_RIGHT_FORWARD_SCALE_X1000
-#define BSP_MOTOR_RIGHT_FORWARD_SCALE_X1000        (950)
+#define BSP_MOTOR_RIGHT_FORWARD_SCALE_X1000        (980)
 #endif
 
 /**
@@ -137,10 +137,10 @@ extern "C" {
  * 的门槛值，取该值 +10~15‰ 余量即可。
  */
 #ifndef BSP_MOTOR_LEFT_FORWARD_RUNNING_DEADZONE_PM
-#define BSP_MOTOR_LEFT_FORWARD_RUNNING_DEADZONE_PM   (45)
+#define BSP_MOTOR_LEFT_FORWARD_RUNNING_DEADZONE_PM   (35)
 #endif
 #ifndef BSP_MOTOR_LEFT_REVERSE_RUNNING_DEADZONE_PM
-#define BSP_MOTOR_LEFT_REVERSE_RUNNING_DEADZONE_PM   (60)
+#define BSP_MOTOR_LEFT_REVERSE_RUNNING_DEADZONE_PM   (35)
 #endif
 #ifndef BSP_MOTOR_RIGHT_FORWARD_RUNNING_DEADZONE_PM
 #define BSP_MOTOR_RIGHT_FORWARD_RUNNING_DEADZONE_PM  (30)
@@ -166,20 +166,26 @@ extern "C" {
 #define BSP_MOTOR_RIGHT_FORWARD_KICK_PM   BSP_MOTOR_RIGHT_FORWARD_DEADZONE_PM
 #define BSP_MOTOR_RIGHT_REVERSE_KICK_PM   BSP_MOTOR_RIGHT_REVERSE_DEADZONE_PM
 
-#define BSP_MOTOR_LEFT_COUNTS_PER_OUTPUT_REV \
-    (BSP_MOTOR_GB370_GEAR_RATIO * BSP_MOTOR_GB370_HALL_PPR * BSP_MOTOR_LEFT_DECODE_X)
-#define BSP_MOTOR_RIGHT_COUNTS_PER_OUTPUT_REV \
-    (BSP_MOTOR_GB370_GEAR_RATIO * BSP_MOTOR_GB370_HALL_PPR * BSP_MOTOR_RIGHT_DECODE_X)
+/**
+ * 每输出轴一圈的编码器计数（实测定标值，优先于 gear×PPR×X 公式）。
+ *
+ * 标定方法：清零编码器 → 手转输出轴精确一圈 → 读 bsp_motor_get_left/right_count()。
+ * 当前值来自实测：左轮手转一圈 left_count = 404。
+ * 右轮尚未单独标定，暂与左轮一致（同型号电机，偏差通常 < 1%）。
+ * 改此值后角度/速度换算自动正确，无需修改业务代码。
+ */
+#define BSP_MOTOR_LEFT_COUNTS_PER_OUTPUT_REV      (404)
+#define BSP_MOTOR_RIGHT_COUNTS_PER_OUTPUT_REV     (404)
 
 /**
  * 速度差分窗口（毫秒）：update() 每次累计 1 ms，达到该值时做一次 count 差分，
  * 得到 cps（counts per second）；窗口越小响应越快，但低速时分辨率越粗。
  * 默认 20 ms ⇒ 50 Hz 速度刷新率，最低可分辨速度
- *      左轮 = 1000/20 = 50 cps  ≈ 50/1320 * 60 ≈ 2.27 rpm
- *      右轮 = 50 cps             ≈ 50/660  * 60 ≈ 4.55 rpm
+ *      左轮 = 1000/20 = 50 cps  ≈ 50/404 * 60 ≈ 7.43 rpm
+ *      右轮 = 50 cps             ≈ 50/404 * 60 ≈ 7.43 rpm
  */
 #ifndef BSP_MOTOR_SPEED_WINDOW_MS
-#define BSP_MOTOR_SPEED_WINDOW_MS                  (20u)
+#define BSP_MOTOR_SPEED_WINDOW_MS                  (10u)
 #endif
 
 /**

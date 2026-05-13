@@ -27,13 +27,14 @@
  *   ② **平衡内环（先调）**：
  *      a) 速度外环增益全 0（已是默认），目标是只跑内环；
  *      b) `app_balance_set_balance_gains(Kp, 0, Kd)`：
- *         - 把 Kp 从小开始（如 30），慢慢加大直到车体能短暂直立但前后晃；
- *         - 加 Kd（典型 Kp 的 1/4 ~ 1/8）抑制晃动；
+ *         - Kd 直接乘以陀螺仪角速率（~5ms 延迟），不经 pitch LPF；
+ *         - 把 Kp 从小开始（如 5），慢慢加大直到车体能短暂直立但前后晃；
+ *         - 加 Kd（典型 Kp × 0.15 ~ 0.25）抑制晃动；
  *         - Ki 暂留 0；
- *      c) 通过串口 / K230 实时注入并复位（`app_balance_reset()`）查看效果；
+ *      c) 通过串口 `bp 5000 0 1000`（Kp=5.0 Kd=1.0）实时注入查看效果；
  *      d) 出现"低头快速冲刺 / 抬头反向冲刺" → Kp 太大或 Kd 太小；
  *         "低头慢漂" → Kp 太小或方向接反；
- *         "正常一段后小幅振荡" → Kd 太大或采样噪声大。
+ *         "正常一段后小幅振荡" → Kd 太大或陀螺仪噪声大。
  *
  *   ③ **速度外环（后调）**：
  *      a) 内环已能直立 ≥ 5 s 后开此环；
@@ -113,23 +114,51 @@ extern "C" {
 #define APP_BALANCE_MAX_PWM_PERMILLE            (1000)
 #endif
 
+/**
+ * 输出零区阈值（permille）：|最终轮命令| < 此值时强制 Coast（0 电压）。
+ *
+ * 作用：消除死区映射在零点的 ±DZ 方波翻转振动。
+ * 代价：引入 ±(threshold / balance_Kp)° 的角度不敏感带。
+ *   例：threshold=8, Kp=25 → ±0.32° 不敏感带，对平衡车可接受。
+ * 设 0 禁用。
+ */
+#ifndef APP_BALANCE_ZERO_BAND_PM
+#define APP_BALANCE_ZERO_BAND_PM                (0)
+#endif
+
 /** 速度外环 D 项 EMA 滤波系数（0=禁用），速度环 D 项典型噪声大需要滤 */
 #ifndef APP_BALANCE_SPEED_D_FILTER_ALPHA
 #define APP_BALANCE_SPEED_D_FILTER_ALPHA        (0.20f)
 #endif
 
-/** 平衡内环 D 项 EMA 滤波系数（0=禁用） */
+/**
+ * 速度反馈低通滤波系数（0~1）。
+ *
+ * 编码器 20ms 差分窗口在低速时量化噪声严重（最小分辨率 50 cps），
+ * 直通到速度外环会被放大后注入平衡内环，造成 PWM 抖动加剧。
+ * 此 EMA 滤波器平滑速度测量，使速度外环带宽远低于平衡内环：
+ *   100 Hz × α=0.05 → 时间常数 200ms → 带宽 ~0.8 Hz（内环 ~15 Hz 的 1/20）。
+ * 调大 α → 外环响应更快但噪声耦合更强；调小 → 更平滑但漂移修正更慢。
+ */
+#ifndef APP_BALANCE_SPEED_LPF_ALPHA
+#define APP_BALANCE_SPEED_LPF_ALPHA             (0.05f)
+#endif
+
+/** 平衡内环 D 项 EMA 滤波系数（已废弃：D 项现直接使用陀螺仪角速率，不经此滤波）。
+ *  保留宏定义以兼容旧工程 -D 覆盖，但运行时不再使用。 */
 #ifndef APP_BALANCE_BALANCE_D_FILTER_ALPHA
-#define APP_BALANCE_BALANCE_D_FILTER_ALPHA      (0.10f)
+#define APP_BALANCE_BALANCE_D_FILTER_ALPHA      (0.0f)
 #endif
 
 /**
  * 俯仰角一阶低通滤波系数（0~1）。
- * MS901M 已内置 EKF，但主控侧仍加一层轻量 LPF 抑制串口帧抖动和单帧毛刺。
- * 控制环 100 Hz 下，0.35 约等效 18 ms 时间常数，延迟较小，适合作为平衡初值。
+ * MS901M 已内置 EKF，输出已经足够平滑；主控侧仅加极轻量 LPF 防串口帧毛刺。
+ * 平衡内环 D 项已改用陀螺仪角速率直通（不经此 LPF），P 项延迟由此系数决定。
+ * 100 Hz 下 α=0.8 约等效 4 ms 时间常数（1/2 个控制周期），几乎无相位滞后。
+ * 若 MS901M 输出足够干净，可设 1.0 完全禁用 LPF。
  */
 #ifndef APP_BALANCE_PITCH_LPF_ALPHA
-#define APP_BALANCE_PITCH_LPF_ALPHA             (0.35f)
+#define APP_BALANCE_PITCH_LPF_ALPHA             (1.0f)
 #endif
 
 /** 俯仰角软件极性翻转：当前装车 MS901M 前后方向与车体坐标相反，默认启用。 */

@@ -34,10 +34,12 @@
 
 typedef struct {
     pid_t   speed_pid;       /* 外环：输入 cps 误差，输出目标 tilt deg */
-    pid_t   balance_pid;     /* 内环：输入 tilt 误差 deg，输出 PWM permille */
+    pid_t   balance_pid;     /* 内环：仅 P+I，D 项已分离到 balance_kd */
     pid_t   yaw_pid;         /* Yaw 角度环：输入 yaw 误差 °，输出差分 PWM permille */
+    float   balance_kd;      /* 平衡内环 D 增益（直接乘陀螺仪角速率，绕开 LPF） */
     float   pitch_offset_deg;
     float   pitch_lpf_deg;
+    float   speed_lpf_cps;   /* 速度反馈 EMA 低通：抑制编码器量化噪声 */
     int8_t  pitch_sign;      /* +1 正常，-1 传感器前后反装时软件翻转 */
     int8_t  yaw_sign;        /* +1 正常，-1 gz_dps/yaw_deg 符号翻转 */
     bool    pitch_lpf_valid;
@@ -246,10 +248,10 @@ void app_balance_init(void)
         -(float)APP_BALANCE_MAX_TILT_DEG, (float)APP_BALANCE_MAX_TILT_DEG);
     pid_set_d_filter(&s_bal.speed_pid, APP_BALANCE_SPEED_D_FILTER_ALPHA);
 
-    /* 平衡内环：输出是 PWM permille，限幅 ±MAX_PWM */
+    /* 平衡内环：P+I 输出限幅 ±MAX_PWM，Kd 留在 PID 外部直接用陀螺仪 */
     pid_set_output_limit(&s_bal.balance_pid,
         -(float)APP_BALANCE_MAX_PWM_PERMILLE, (float)APP_BALANCE_MAX_PWM_PERMILLE);
-    pid_set_d_filter(&s_bal.balance_pid, APP_BALANCE_BALANCE_D_FILTER_ALPHA);
+    s_bal.balance_kd = 0.0f;
 
     /* Yaw 角度环：输出是差分 PWM permille，限幅 ±YAW_MAX_CORRECTION */
     pid_set_output_limit(&s_bal.yaw_pid,
@@ -257,7 +259,8 @@ void app_balance_init(void)
          (float)APP_BALANCE_YAW_MAX_CORRECTION_PM);
     pid_set_d_filter(&s_bal.yaw_pid, APP_BALANCE_YAW_D_FILTER_ALPHA);
 
-    s_bal.pitch_offset_deg = -0.8f;
+    s_bal.pitch_offset_deg = -0.0f;
+    s_bal.speed_lpf_cps = 0.0f;
     reset_pitch_filter();
     s_bal.pitch_sign =
 #if APP_BALANCE_PITCH_INVERT
@@ -288,6 +291,7 @@ void app_balance_reset(void)
 {
     pid_reset(&s_bal.speed_pid);
     pid_reset(&s_bal.balance_pid);
+    s_bal.speed_lpf_cps = 0.0f;
     reset_pitch_filter();
     reset_yaw_state();
 }
@@ -321,7 +325,8 @@ bool app_balance_get_yaw_inverted(void)
 
 void app_balance_set_balance_gains(float kp, float ki, float kd)
 {
-    pid_set_gains(&s_bal.balance_pid, kp, ki, kd);
+    pid_set_gains(&s_bal.balance_pid, kp, ki, 0.0f);
+    s_bal.balance_kd = kd;
 }
 
 void app_balance_set_speed_gains(float kp, float ki, float kd)
@@ -377,27 +382,47 @@ void app_balance_step(const app_balance_attitude_t *att,
     bsp_motor_get_feedback(&fb);
     int32_t avg_cps = (fb.left_speed_cps + fb.right_speed_cps) / 2;
 
-    /* 速度环的"测量值"是当前速度，"目标值"是 cmd->target_speed_cps */
+    /* 速度反馈 LPF：编码器 20ms 差分窗口在低速时量化噪声 ±50 cps，
+     * 直通会被速度环放大后耦合到平衡内环。此 EMA 将速度外环带宽
+     * 压到 ~1 Hz，远低于平衡内环 ~15 Hz，保证级联解耦。 */
+    float spd_alpha = APP_BALANCE_SPEED_LPF_ALPHA;
+    s_bal.speed_lpf_cps += spd_alpha * ((float)avg_cps - s_bal.speed_lpf_cps);
+
     float target_tilt_deg = pid_step(&s_bal.speed_pid,
         (float)cmd->target_speed_cps,
-        (float)avg_cps,
+        s_bal.speed_lpf_cps,
         s_dt_sec);
 
-    /* ---- 3) 平衡内环（100 Hz）：输入 tilt 误差 deg，输出 PWM permille ----
-     * pitch_meas = LPF((att->pitch_deg - offset) * pitch_sign)；
-     * 目标角是外环输出的 target_tilt_deg
-     * 误差 = target_tilt - pitch_meas（即"还需要倾多少度"）
-     * pitch_sign 用于软件修正 MS901M 前后方向装反。 */
-    float pwm_out = pid_step(&s_bal.balance_pid,
+    /* ---- 3) 平衡内环（PD 分离架构）----
+     * P+I 项：由 PID 库按 LPF 后的 pitch_meas 计算（位置反馈，精度优先）。
+     * D  项：直接取陀螺仪 pitch_rate_dps × pitch_sign，绕开 pitch LPF，
+     *        延迟仅 ~5ms（MS901M 内部处理），比微分滤波角快 20 倍以上。
+     *        公式与 PID 库 "D on measurement" 等价：d = -Kd × d(measured)/dt，
+     *        其中 d(measured)/dt ≈ pitch_rate_dps × pitch_sign。 */
+    float pi_out = pid_step(&s_bal.balance_pid,
         target_tilt_deg,
         pitch_meas,
         s_dt_sec);
+    float gyro_d = -s_bal.balance_kd * att->pitch_rate_dps
+                   * (float)s_bal.pitch_sign;
+    float pwm_out = pi_out + gyro_d;
+    if (pwm_out >  (float)APP_BALANCE_MAX_PWM_PERMILLE)
+        pwm_out =  (float)APP_BALANCE_MAX_PWM_PERMILLE;
+    if (pwm_out < -(float)APP_BALANCE_MAX_PWM_PERMILLE)
+        pwm_out = -(float)APP_BALANCE_MAX_PWM_PERMILLE;
 
     /* ---- 4) 转向叠加 + Yaw 角度环差分：left += yaw_corr, right -= yaw_corr ---- */
     float yaw_pm     = (float)cmd->target_yaw_pm * s_bal.yaw_kp;
     int16_t yaw_corr = yaw_angle_step(att, cmd);
     int16_t left_pm  = clamp_pwm_pm(pwm_out - yaw_pm + (float)yaw_corr);
     int16_t right_pm = clamp_pwm_pm(pwm_out + yaw_pm - (float)yaw_corr);
+
+#if APP_BALANCE_ZERO_BAND_PM > 0
+    if (left_pm  > -APP_BALANCE_ZERO_BAND_PM && left_pm  < APP_BALANCE_ZERO_BAND_PM)
+        left_pm  = 0;
+    if (right_pm > -APP_BALANCE_ZERO_BAND_PM && right_pm < APP_BALANCE_ZERO_BAND_PM)
+        right_pm = 0;
+#endif
 
     bsp_motor_set_output(left_pm, right_pm);
 
@@ -407,7 +432,7 @@ void app_balance_step(const app_balance_attitude_t *att,
     s_bal.diag.balance_out_pwm   = pwm_out;
     s_bal.diag.left_cmd_pm       = left_pm;
     s_bal.diag.right_cmd_pm      = right_pm;
-    s_bal.diag.speed_meas_cps    = avg_cps;
+    s_bal.diag.speed_meas_cps    = (int32_t)s_bal.speed_lpf_cps;
     s_bal.diag.driving           = true;
 }
 
@@ -554,7 +579,8 @@ static void print_scaled3(const char *tag, float kp, float ki, float kd)
 
 static void print_pid_status(void)
 {
-    print_scaled3("balance", s_bal.balance_pid.kp, s_bal.balance_pid.ki, s_bal.balance_pid.kd);
+    print_scaled3("balance", s_bal.balance_pid.kp, s_bal.balance_pid.ki, s_bal.balance_kd);
+    (void)printf("[pid] balance D-src=gyro_rate (bypasses pitch LPF)\r\n");
     print_scaled3("speed",   s_bal.speed_pid.kp,   s_bal.speed_pid.ki,   s_bal.speed_pid.kd);
     print_scaled3("yaw",     s_bal.yaw_pid.kp,     s_bal.yaw_pid.ki,     s_bal.yaw_pid.kd);
 }
