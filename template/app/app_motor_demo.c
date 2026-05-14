@@ -15,7 +15,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#define APP_MOTOR_DEMO_MAX_RPM                     (720u)
+#define APP_MOTOR_DEMO_MAX_RPM                     (1200u)
 #define APP_MOTOR_DEMO_DEFAULT_RPM                 (200u)
 #define APP_MOTOR_DEMO_BRAKE_MS                    (120u)
 #define APP_MOTOR_DEMO_RPM_STEP                    (20u)
@@ -38,10 +38,10 @@
 #define APP_MOTOR_CAL_PWM_START_PM     (0)
 #endif
 #ifndef APP_MOTOR_CAL_PWM_END_PM
-#define APP_MOTOR_CAL_PWM_END_PM       (100)
+#define APP_MOTOR_CAL_PWM_END_PM       (1000)
 #endif
 #ifndef APP_MOTOR_CAL_PWM_STEP_PM
-#define APP_MOTOR_CAL_PWM_STEP_PM      (5)
+#define APP_MOTOR_CAL_PWM_STEP_PM      (50)
 #endif
 #ifndef APP_MOTOR_CAL_DWELL_MS
 #define APP_MOTOR_CAL_DWELL_MS         (2000u)

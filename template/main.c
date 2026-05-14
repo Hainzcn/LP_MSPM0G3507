@@ -68,6 +68,22 @@
  * 可能比主控慢，给 3 s 窗口，避免初始化期红灯常亮误判为 fatal。 */
 #define MS901M_BOOT_TIMEOUT_MS   3000u
 
+/* ========================================================================== */
+/* MS901M 一次性参数配置工具（临时，用完改回 0）                                */
+/*                                                                              */
+/* 目标：设置主动上报速率 200Hz + 上报内容精简（0x01+0x02+0x03），保存 Flash。 */
+/*                                                                              */
+/* 带宽估算（115200 baud，8N1，有效吞吐 11520 B/s）：                          */
+/*   3 帧（0x01=11B + 0x02=13B + 0x03=17B）= 41 B/周期                         */
+/*   200Hz × 41B × 10bit = 82,000 bps < 115,200 bps → 占用 71%，余量 29% ✓    */
+/*   若保留默认 5 帧（0x01~0x05 = 69B/周期）→ 138 kbps > 115.2 kbps ✗        */
+/*                                                                              */
+/* 使用方法：                                                                   */
+/*   1. 将下方宏改为 1，编译烧录，上电；                                        */
+/*   2. 串口看到 "[ms901m-cfg] done" 后，将宏改回 0，重新编译烧录正常运行。     */
+/* ========================================================================== */
+#define MS901M_DO_CONFIGURE_200HZ   0   /* ← 临时改 1 配置一次，完成后改回 0 */
+
 /* 等待期间每拍 drain 字节数上限（≥ 单帧最大 17 B + 几帧裕度即可） */
 #define MS901M_DRAIN_CHUNK       64u
 
@@ -78,6 +94,55 @@
 #define LOAD_TEST_SPEED_KP       (0.0f)
 #define LOAD_TEST_SPEED_KI       (0.0f)
 #define LOAD_TEST_SPEED_KD       (0.0f)
+
+#if MS901M_DO_CONFIGURE_200HZ
+/**
+ * @brief  一次性配置 MS901M 上报速率为 200Hz，同时收窄上报内容并保存到 Flash。
+ *
+ *  发送顺序（每步间隔 20ms，Flash 写入后等 100ms）：
+ *    1. RETURNSET  = 0x07  → 仅上报姿态(0x01) + 四元数(0x02) + 陀螺/加速(0x03)
+ *    2. RETURNRATE = 0x01  → 200Hz
+ *    3. SAVE               → 持久化到 Flash，下次上电自动生效
+ *
+ *  保留四元数(0x02)而非磁力计(0x04)的理由：
+ *    MS901M 内部 EKF 已将磁力计融合到姿态解算中，输出的欧拉角/四元数已包含
+ *    磁力计贡献。主控无需原始磁力计数据重复融合；四元数表示避免万向节死锁，
+ *    可供未来扩展（如在线姿态预测、前馈补偿）直接使用。
+ *
+ *  带宽验证（115200 baud，8N1，有效吞吐 11520 B/s）：
+ *    0x01=11B + 0x02=13B + 0x03=17B = 41 B/周期
+ *    200Hz × 41B × 10bit = 82,000 bps < 115,200 bps → 占用 71%，余量 29% ✓
+ *
+ *  执行完毕后程序继续正常等待姿态帧（无需手动断电）。
+ */
+static void ms901m_configure_200hz_once(void)
+{
+    uint8_t frame[MS901M_CMD_FRAME_MAX];
+    size_t  len;
+
+    (void)printf("[ms901m-cfg] sending RETURNSET=0x07 (attitude+quat+gyro_acc) ...\r\n");
+    /* RETURNSET mask：bit0=姿态(0x01) | bit1=四元数(0x02) | bit2=陀螺加速(0x03) = 0x07 */
+    const uint8_t mask = (uint8_t)(MS901M_RETURN_MASK_ATTITUDE |
+                                   MS901M_RETURN_MASK_QUAT      |
+                                   MS901M_RETURN_MASK_GYRO_ACC);
+    len = ms901m_build_set_return_mask_cmd(mask, frame, sizeof(frame));
+    if (len > 0u) { bsp_imu_uart_write(frame, len); }
+    bsp_systick_delay_ms(20u);
+
+    (void)printf("[ms901m-cfg] sending RETURNRATE=200Hz ...\r\n");
+    len = ms901m_build_set_return_rate_cmd(MS901M_RETURN_RATE_200HZ, frame, sizeof(frame));
+    if (len > 0u) { bsp_imu_uart_write(frame, len); }
+    bsp_systick_delay_ms(20u);
+
+    (void)printf("[ms901m-cfg] saving to Flash (SAVE) ...\r\n");
+    len = ms901m_build_save_cmd(frame, sizeof(frame));
+    if (len > 0u) { bsp_imu_uart_write(frame, len); }
+    bsp_systick_delay_ms(100u);   /* Flash 写入需要较长时间 */
+
+    (void)printf("[ms901m-cfg] done. RETURNSET=0x07, RETURNRATE=200Hz saved.\r\n"
+                 "[ms901m-cfg] Set MS901M_DO_CONFIGURE_200HZ back to 0 and reflash.\r\n");
+}
+#endif /* MS901M_DO_CONFIGURE_200HZ */
 
 static void fatal_imu_init_failure(int32_t rc)
 {
@@ -134,6 +199,12 @@ int main(void)
     ms901m_init(4, 2000);
 
     (void)printf("\n[boot] MSPM0G3507 stage2.2 balance baseline start (MS901M / TB6612 / safety)\n");
+
+#if MS901M_DO_CONFIGURE_200HZ
+    /* 临时配置模式：写 RETURNSET+RETURNRATE+SAVE 后继续等姿态帧。
+     * 本次上电即以 200Hz 工作；Flash 保存后下次上电同样 200Hz。 */
+    ms901m_configure_200hz_once();
+#endif
 
     int32_t rc = wait_for_ms901m_attitude(MS901M_BOOT_TIMEOUT_MS);
     if (rc != 0) {

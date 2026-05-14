@@ -1,14 +1,11 @@
 /**
  * @file    app_balance.c
- * @brief   平衡车双环控制骨架实现，详见 app_balance.h。
+ * @brief   平衡车四级级联控制实现，详见 app_balance.h。
  *
- * 本模块是"骨架"：
- *   - 完整的级联 PID 数据流；
- *   - 完整的 safety 集成；
- *   - 完整的诊断输出；
- *   - 但**所有 PID 增益默认 0**，业务层未 set_gains 之前电机不会动。
+ *   速度环 (20 Hz) → 角度环 (100 Hz) → 角速度环 (200 Hz) → 电机输出
+ *   航向环 (50 Hz) ──────────────────→ 差分叠加 ──┘
  *
- * 业务层在准备好上车整定时调一次 `app_balance_set_*_gains()` 即可让车工作。
+ *   所有 PID 增益默认 0，业务层未 set_gains 之前电机不会动。
  */
 
 #include "app_balance.h"
@@ -33,10 +30,13 @@
 /* -------------------------------------------------------------------------- */
 
 typedef struct {
-    pid_t   speed_pid;       /* 外环：输入 cps 误差，输出目标 tilt deg */
-    pid_t   balance_pid;     /* 内环：仅 P+I，D 项已分离到 balance_kd */
-    pid_t   yaw_pid;         /* Yaw 角度环：输入 yaw 误差 °，输出差分 PWM permille */
-    float   balance_kd;      /* 平衡内环 D 增益（直接乘陀螺仪角速率，绕开 LPF） */
+    pid_t   speed_pid;       /* 速度外环 20 Hz：输入 cps 误差，输出目标 tilt deg */
+    pid_t   angle_pid;       /* 角度环 100 Hz：输入 tilt 误差 deg，输出目标角速率 °/s */
+    pid_t   rate_pid;        /* 角速度内环 200 Hz：输入角速率误差 °/s，输出 PWM permille */
+    pid_t   yaw_pid;         /* 航向环 50 Hz：输入 yaw 误差 °，输出差分 PWM permille */
+    float   target_rate_dps;    /* 角度环输出：角速度内环设定值 */
+    float   target_tilt_deg;    /* 速度外环输出：角度环设定值 */
+    int16_t cached_yaw_corr_pm; /* 航向环缓存的差分补偿，供 200 Hz 角速度环使用 */
     float   pitch_offset_deg;
     float   pitch_lpf_deg;
     float   speed_lpf_cps;   /* 速度反馈 EMA 低通：抑制编码器量化噪声 */
@@ -53,8 +53,10 @@ typedef struct {
 
 static balance_state_t s_bal;
 
-static const float s_dt_sec =
-    (float)APP_BALANCE_CONTROL_PERIOD_MS / 1000.0f;
+static const float s_dt_rate_sec  = (float)APP_BALANCE_RATE_PERIOD_MS  / 1000.0f;
+static const float s_dt_angle_sec = (float)APP_BALANCE_ANGLE_PERIOD_MS / 1000.0f;
+static const float s_dt_yaw_sec   = (float)APP_BALANCE_YAW_PERIOD_MS   / 1000.0f;
+static const float s_dt_speed_sec = (float)APP_BALANCE_SPEED_PERIOD_MS / 1000.0f;
 
 #define APP_BAL_CMD_BUF_LEN  48u
 #define APP_BAL_PID_SCALE    1000L
@@ -193,7 +195,7 @@ static int16_t yaw_angle_step(const app_balance_attitude_t *att,
     float raw_corr     = pid_step(&s_bal.yaw_pid,
                                    s_bal.yaw_target_deg,
                                    virtual_meas,
-                                   s_dt_sec);
+                                   s_dt_yaw_sec);
     int16_t corr_pm    = clamp_yaw_correction(raw_corr);
 
     s_bal.diag.yaw_error_deg     = err;
@@ -219,12 +221,12 @@ static int16_t yaw_angle_step(const app_balance_attitude_t *att,
     /* 直行：积分 gz_dps（经 yaw_sign 修正极性），PID 以"归零积分量"为目标。
      * D 项 = -Kd * d(yaw_gz_integrated)/dt ≈ -Kd * gz_dps * yaw_sign，
      * 天然提供角速率阻尼，无需单独引入速率反馈。 */
-    s_bal.yaw_gz_integrated += att->gz_dps * (float)s_bal.yaw_sign * s_dt_sec;
+    s_bal.yaw_gz_integrated += att->gz_dps * (float)s_bal.yaw_sign * s_dt_yaw_sec;
 
     float raw_corr  = pid_step(&s_bal.yaw_pid,
                                 0.0f,
                                 s_bal.yaw_gz_integrated,
-                                s_dt_sec);
+                                s_dt_yaw_sec);
     int16_t corr_pm = clamp_yaw_correction(raw_corr);
 
     s_bal.diag.yaw_error_deg     = -s_bal.yaw_gz_integrated; /* error = target - measured */
@@ -240,27 +242,37 @@ static int16_t yaw_angle_step(const app_balance_attitude_t *att,
 void app_balance_init(void)
 {
     pid_init(&s_bal.speed_pid);
-    pid_init(&s_bal.balance_pid);
+    pid_init(&s_bal.angle_pid);
+    pid_init(&s_bal.rate_pid);
     pid_init(&s_bal.yaw_pid);
 
-    /* 速度外环：输出是"目标 tilt deg"，限幅 ±MAX_TILT_DEG */
+    /* 速度外环 20 Hz：输出"目标 tilt deg"，限幅 ±MAX_TILT_DEG */
     pid_set_output_limit(&s_bal.speed_pid,
         -(float)APP_BALANCE_MAX_TILT_DEG, (float)APP_BALANCE_MAX_TILT_DEG);
     pid_set_d_filter(&s_bal.speed_pid, APP_BALANCE_SPEED_D_FILTER_ALPHA);
 
-    /* 平衡内环：P+I 输出限幅 ±MAX_PWM，Kd 留在 PID 外部直接用陀螺仪 */
-    pid_set_output_limit(&s_bal.balance_pid,
-        -(float)APP_BALANCE_MAX_PWM_PERMILLE, (float)APP_BALANCE_MAX_PWM_PERMILLE);
-    s_bal.balance_kd = 0.0f;
+    /* 角度环 100 Hz：输出"目标角速率 °/s"，限幅 ±MAX_TARGET_RATE_DPS */
+    pid_set_output_limit(&s_bal.angle_pid,
+        -(float)APP_BALANCE_MAX_TARGET_RATE_DPS,
+         (float)APP_BALANCE_MAX_TARGET_RATE_DPS);
 
-    /* Yaw 角度环：输出是差分 PWM permille，限幅 ±YAW_MAX_CORRECTION */
+    /* 角速度内环 200 Hz：输出 PWM permille，限幅 ±MAX_PWM */
+    pid_set_output_limit(&s_bal.rate_pid,
+        -(float)APP_BALANCE_MAX_PWM_PERMILLE,
+         (float)APP_BALANCE_MAX_PWM_PERMILLE);
+    pid_set_d_filter(&s_bal.rate_pid, APP_BALANCE_RATE_D_FILTER_ALPHA);
+
+    /* 航向环 50 Hz：输出差分 PWM permille，限幅 ±YAW_MAX_CORRECTION */
     pid_set_output_limit(&s_bal.yaw_pid,
         -(float)APP_BALANCE_YAW_MAX_CORRECTION_PM,
          (float)APP_BALANCE_YAW_MAX_CORRECTION_PM);
     pid_set_d_filter(&s_bal.yaw_pid, APP_BALANCE_YAW_D_FILTER_ALPHA);
 
-    s_bal.pitch_offset_deg = -0.0f;
-    s_bal.speed_lpf_cps = 0.0f;
+    s_bal.target_rate_dps    = 0.0f;
+    s_bal.target_tilt_deg    = 0.0f;
+    s_bal.cached_yaw_corr_pm = 0;
+    s_bal.pitch_offset_deg   = -0.0f;
+    s_bal.speed_lpf_cps      = 0.0f;
     reset_pitch_filter();
     s_bal.pitch_sign =
 #if APP_BALANCE_PITCH_INVERT
@@ -290,8 +302,12 @@ void app_balance_init(void)
 void app_balance_reset(void)
 {
     pid_reset(&s_bal.speed_pid);
-    pid_reset(&s_bal.balance_pid);
-    s_bal.speed_lpf_cps = 0.0f;
+    pid_reset(&s_bal.angle_pid);
+    pid_reset(&s_bal.rate_pid);
+    s_bal.target_rate_dps    = 0.0f;
+    s_bal.target_tilt_deg    = 0.0f;
+    s_bal.cached_yaw_corr_pm = 0;
+    s_bal.speed_lpf_cps      = 0.0f;
     reset_pitch_filter();
     reset_yaw_state();
 }
@@ -325,8 +341,12 @@ bool app_balance_get_yaw_inverted(void)
 
 void app_balance_set_balance_gains(float kp, float ki, float kd)
 {
-    pid_set_gains(&s_bal.balance_pid, kp, ki, 0.0f);
-    s_bal.balance_kd = kd;
+    pid_set_gains(&s_bal.angle_pid, kp, ki, kd);
+}
+
+void app_balance_set_rate_gains(float kp, float ki, float kd)
+{
+    pid_set_gains(&s_bal.rate_pid, kp, ki, kd);
 }
 
 void app_balance_set_speed_gains(float kp, float ki, float kd)
@@ -344,76 +364,86 @@ void app_balance_set_yaw_gains(float kp, float ki, float kd)
     pid_set_gains(&s_bal.yaw_pid, kp, ki, kd);
 }
 
-void app_balance_step(const app_balance_attitude_t *att,
-                      const app_balance_motion_cmd_t *cmd)
-{
-    if ((att == NULL) || (cmd == NULL)) {
-        return;
-    }
+/* -------------------------------------------------------------------------- */
+/* 多速率级联子函数                                                             */
+/* -------------------------------------------------------------------------- */
 
+/** 速度外环（20 Hz）：输入 cps 误差，输出目标 tilt deg → s_bal.target_tilt_deg */
+static void balance_step_speed(const app_balance_motion_cmd_t *cmd)
+{
+    bsp_motor_feedback_t fb;
+    bsp_motor_get_feedback(&fb);
+    int32_t avg_cps = (fb.left_speed_cps + fb.right_speed_cps) / 2;
+
+    float spd_alpha = APP_BALANCE_SPEED_LPF_ALPHA;
+    s_bal.speed_lpf_cps += spd_alpha * ((float)avg_cps - s_bal.speed_lpf_cps);
+
+    s_bal.target_tilt_deg = pid_step(&s_bal.speed_pid,
+        (float)cmd->target_speed_cps,
+        s_bal.speed_lpf_cps,
+        s_dt_speed_sec);
+
+    s_bal.diag.target_tilt_deg = s_bal.target_tilt_deg;
+    s_bal.diag.speed_meas_cps  = (int32_t)s_bal.speed_lpf_cps;
+}
+
+/** 角度环（100 Hz）：输入 tilt 误差 deg，输出目标角速率 °/s → s_bal.target_rate_dps */
+static void balance_step_angle(const app_balance_attitude_t *att)
+{
     float pitch_meas = filter_pitch(apply_pitch_orientation(att->pitch_deg));
 
-    /* ---- 1) safety tick：转交已经按车体坐标修正后的 attitude，拿状态 ---- */
+    s_bal.target_rate_dps = pid_step(&s_bal.angle_pid,
+        s_bal.target_tilt_deg,
+        pitch_meas,
+        s_dt_angle_sec);
+
+    s_bal.diag.pitch_meas_deg = pitch_meas;
+}
+
+/** 航向环（50 Hz）：输出差分补偿 → s_bal.cached_yaw_corr_pm */
+static void balance_step_yaw(const app_balance_attitude_t *att,
+                              const app_balance_motion_cmd_t *cmd)
+{
+    s_bal.cached_yaw_corr_pm = yaw_angle_step(att, cmd);
+}
+
+/**
+ * 角速度内环（200 Hz）：输入角速率误差 °/s，输出 PWM → bsp_motor_set_output。
+ *
+ * 同时执行 safety tick + 电机输出。safety 使用最近一次 100 Hz 角度环的 pitch_meas。
+ */
+static void balance_step_rate(const app_balance_attitude_t *att,
+                               const app_balance_motion_cmd_t *cmd)
+{
+    /* safety tick：使用角度环最新的 pitch_meas */
     app_safety_attitude_t sa = {
-        .pitch_deg = pitch_meas,
+        .pitch_deg      = s_bal.diag.pitch_meas_deg,
         .attitude_valid = att->attitude_valid,
     };
     (void)app_safety_tick(&sa);
 
     if (app_safety_is_startup_grace_active() ||
         !app_safety_can_drive() || !att->attitude_valid) {
-        /* 不允许驱动：不调 set_output（静默期等待姿态稳定，故障态由 safety 下发 brake/coast）；
-         * 同时 reset PID 内部历史，避免下次 ARMED 时 i_term / d 历史跨段污染。 */
         app_balance_reset();
-        s_bal.diag.target_tilt_deg   = 0.0f;
-        s_bal.diag.pitch_meas_deg    = sa.pitch_deg;
         s_bal.diag.balance_out_pwm   = 0.0f;
         s_bal.diag.yaw_correction_pm = 0;
         s_bal.diag.yaw_error_deg     = 0.0f;
         s_bal.diag.left_cmd_pm       = 0;
         s_bal.diag.right_cmd_pm      = 0;
-        s_bal.diag.speed_meas_cps    = 0;
         s_bal.diag.driving           = false;
         return;
     }
 
-    /* ---- 2) 速度外环（100 Hz）：输入 cps 误差，输出目标 tilt deg ---- */
-    bsp_motor_feedback_t fb;
-    bsp_motor_get_feedback(&fb);
-    int32_t avg_cps = (fb.left_speed_cps + fb.right_speed_cps) / 2;
+    /* 角速度 PD：输入 = 目标角速率 - 实测角速率，输出 = PWM permille */
+    float measured_rate = att->pitch_rate_dps * (float)s_bal.pitch_sign;
+    float pwm_out = pid_step(&s_bal.rate_pid,
+        s_bal.target_rate_dps,
+        measured_rate,
+        s_dt_rate_sec);
 
-    /* 速度反馈 LPF：编码器 20ms 差分窗口在低速时量化噪声 ±50 cps，
-     * 直通会被速度环放大后耦合到平衡内环。此 EMA 将速度外环带宽
-     * 压到 ~1 Hz，远低于平衡内环 ~15 Hz，保证级联解耦。 */
-    float spd_alpha = APP_BALANCE_SPEED_LPF_ALPHA;
-    s_bal.speed_lpf_cps += spd_alpha * ((float)avg_cps - s_bal.speed_lpf_cps);
-
-    float target_tilt_deg = pid_step(&s_bal.speed_pid,
-        (float)cmd->target_speed_cps,
-        s_bal.speed_lpf_cps,
-        s_dt_sec);
-
-    /* ---- 3) 平衡内环（PD 分离架构）----
-     * P+I 项：由 PID 库按 LPF 后的 pitch_meas 计算（位置反馈，精度优先）。
-     * D  项：直接取陀螺仪 pitch_rate_dps × pitch_sign，绕开 pitch LPF，
-     *        延迟仅 ~5ms（MS901M 内部处理），比微分滤波角快 20 倍以上。
-     *        公式与 PID 库 "D on measurement" 等价：d = -Kd × d(measured)/dt，
-     *        其中 d(measured)/dt ≈ pitch_rate_dps × pitch_sign。 */
-    float pi_out = pid_step(&s_bal.balance_pid,
-        target_tilt_deg,
-        pitch_meas,
-        s_dt_sec);
-    float gyro_d = -s_bal.balance_kd * att->pitch_rate_dps
-                   * (float)s_bal.pitch_sign;
-    float pwm_out = pi_out + gyro_d;
-    if (pwm_out >  (float)APP_BALANCE_MAX_PWM_PERMILLE)
-        pwm_out =  (float)APP_BALANCE_MAX_PWM_PERMILLE;
-    if (pwm_out < -(float)APP_BALANCE_MAX_PWM_PERMILLE)
-        pwm_out = -(float)APP_BALANCE_MAX_PWM_PERMILLE;
-
-    /* ---- 4) 转向叠加 + Yaw 角度环差分：left += yaw_corr, right -= yaw_corr ---- */
+    /* 转向叠加 + 航向环差分补偿 */
     float yaw_pm     = (float)cmd->target_yaw_pm * s_bal.yaw_kp;
-    int16_t yaw_corr = yaw_angle_step(att, cmd);
+    int16_t yaw_corr = s_bal.cached_yaw_corr_pm;
     int16_t left_pm  = clamp_pwm_pm(pwm_out - yaw_pm + (float)yaw_corr);
     int16_t right_pm = clamp_pwm_pm(pwm_out + yaw_pm - (float)yaw_corr);
 
@@ -426,14 +456,10 @@ void app_balance_step(const app_balance_attitude_t *att,
 
     bsp_motor_set_output(left_pm, right_pm);
 
-    /* ---- 5) 诊断写回 ---- */
-    s_bal.diag.target_tilt_deg   = target_tilt_deg;
-    s_bal.diag.pitch_meas_deg    = pitch_meas;
-    s_bal.diag.balance_out_pwm   = pwm_out;
-    s_bal.diag.left_cmd_pm       = left_pm;
-    s_bal.diag.right_cmd_pm      = right_pm;
-    s_bal.diag.speed_meas_cps    = (int32_t)s_bal.speed_lpf_cps;
-    s_bal.diag.driving           = true;
+    s_bal.diag.balance_out_pwm = pwm_out;
+    s_bal.diag.left_cmd_pm     = left_pm;
+    s_bal.diag.right_cmd_pm    = right_pm;
+    s_bal.diag.driving         = true;
 }
 
 void app_balance_get_diag(app_balance_diag_t *out)
@@ -451,9 +477,12 @@ void app_balance_get_diag(app_balance_diag_t *out)
 #define APP_BAL_IMU_DRAIN_CHUNK     64u
 
 /* 调度相位（1 ms tick 倍数） */
-#define APP_BAL_PHASE_CTRL_TICKS    APP_BALANCE_CONTROL_PERIOD_MS  /* 100 Hz */
-#define APP_BAL_PHASE_LED_TICKS     200u                            /* 5 Hz */
-#define APP_BAL_PHASE_LOG_TICKS     1000u                           /* 1 Hz */
+#define APP_BAL_PHASE_RATE_TICKS    APP_BALANCE_RATE_PERIOD_MS     /* 200 Hz */
+#define APP_BAL_PHASE_ANGLE_TICKS   APP_BALANCE_ANGLE_PERIOD_MS    /* 100 Hz */
+#define APP_BAL_PHASE_YAW_TICKS     APP_BALANCE_YAW_PERIOD_MS      /*  50 Hz */
+#define APP_BAL_PHASE_SPEED_TICKS   APP_BALANCE_SPEED_PERIOD_MS    /*  20 Hz */
+#define APP_BAL_PHASE_LED_TICKS     200u                            /*   5 Hz */
+#define APP_BAL_PHASE_LOG_TICKS     1000u                           /*   1 Hz */
 
 /* 浮点字段格式化辅助（与 app_telemetry.c 同款，避开 AC6 printf("%f") 浮点路径） */
 #define BAL_F2_X100(v)  ((int32_t)((v) * 100.0f + ((v) >= 0.0f ? 0.5f : -0.5f)))
@@ -579,19 +608,19 @@ static void print_scaled3(const char *tag, float kp, float ki, float kd)
 
 static void print_pid_status(void)
 {
-    print_scaled3("balance", s_bal.balance_pid.kp, s_bal.balance_pid.ki, s_bal.balance_kd);
-    (void)printf("[pid] balance D-src=gyro_rate (bypasses pitch LPF)\r\n");
+    print_scaled3("rate",    s_bal.rate_pid.kp,    s_bal.rate_pid.ki,    s_bal.rate_pid.kd);
+    print_scaled3("angle",   s_bal.angle_pid.kp,   s_bal.angle_pid.ki,   s_bal.angle_pid.kd);
     print_scaled3("speed",   s_bal.speed_pid.kp,   s_bal.speed_pid.ki,   s_bal.speed_pid.kd);
     print_scaled3("yaw",     s_bal.yaw_pid.kp,     s_bal.yaw_pid.ki,     s_bal.yaw_pid.kd);
+    (void)printf("[pid] loops: rate 200Hz, angle 100Hz, yaw 50Hz, speed 20Hz\r\n");
 }
 
 static void print_pid_help(void)
 {
-    (void)printf("[pid] UART commands: bp <kp_x1000> <ki_x1000> <kd_x1000>, "
-                 "sp <kp_x1000> <ki_x1000> <kd_x1000>, "
-                 "yp <kp_x1000> <ki_x1000> <kd_x1000>, "
+    (void)printf("[pid] UART commands: rp/bp/sp/yp <kp_x1000> <ki_x1000> <kd_x1000>, "
                  "yi0/yi1, pid?, pid0, lt, lt0, t/test\r\n");
-    (void)printf("[pid] example: bp 8000 0 1000 ; sp 2 0 0 ; yp 500 0 100 ; yi1\r\n");
+    (void)printf("[pid] rp=rate(200Hz) bp=angle(100Hz) sp=speed(20Hz) yp=yaw(50Hz)\r\n");
+    (void)printf("[pid] example: rp 1000 0 0 ; bp 5000 0 0 ; sp 2 0 0 ; yp 500 0 100\r\n");
 }
 
 static void send_lt_header(void)
@@ -676,6 +705,7 @@ static bool handle_pid_command(const char *cmd)
 
     if ((cmd[0] == 'p') && (cmd[1] == 'i') && (cmd[2] == 'd') &&
         (cmd[3] == '0') && (cmd[4] == '\0')) {
+        app_balance_set_rate_gains(0.0f, 0.0f, 0.0f);
         app_balance_set_balance_gains(0.0f, 0.0f, 0.0f);
         app_balance_set_speed_gains(0.0f, 0.0f, 0.0f);
         app_balance_set_yaw_gains(0.0f, 0.0f, 0.0f);
@@ -699,15 +729,27 @@ static bool handle_pid_command(const char *cmd)
         }
     }
 
+    if ((cmd[0] == 'r') && (cmd[1] == 'p') && is_field_separator(cmd[2])) {
+        float kp, ki, kd;
+        if (!parse_pid_triplet(&cmd[2], &kp, &ki, &kd)) {
+            (void)printf("[pid] bad rp command, use: rp 1000 0 0\r\n");
+            return true;
+        }
+        app_balance_set_rate_gains(kp, ki, kd);
+        app_balance_reset();
+        print_scaled3("rate", kp, ki, kd);
+        return true;
+    }
+
     if ((cmd[0] == 'b') && (cmd[1] == 'p') && is_field_separator(cmd[2])) {
         float kp, ki, kd;
         if (!parse_pid_triplet(&cmd[2], &kp, &ki, &kd)) {
-            (void)printf("[pid] bad bp command, use: bp 8000 0 1000\r\n");
+            (void)printf("[pid] bad bp command, use: bp 5000 0 0\r\n");
             return true;
         }
         app_balance_set_balance_gains(kp, ki, kd);
         app_balance_reset();
-        print_scaled3("balance", kp, ki, kd);
+        print_scaled3("angle", kp, ki, kd);
         return true;
     }
 
@@ -860,9 +902,7 @@ bool app_balance_run(void)
             return true;
         }
 
-        /* ---- 1 kHz：IMU drain + 电机 1 ms 节拍 -----------------------------
-         *   IMU UART RX 半满中断已把字节排入 256 B 环缓，本拍只做拷贝 + 解析；
-         *   bsp_motor_update() 必须 1 kHz 调（QEI 软扩 + brake_pulse 倒计时）。 */
+        /* ---- 1 kHz：IMU drain + 电机 1 ms 节拍 ----------------------------- */
         uint8_t buf[APP_BAL_IMU_DRAIN_CHUNK];
         size_t  got = bsp_imu_uart_rx_pop_bulk(buf, sizeof(buf));
         if (got > 0u) {
@@ -870,9 +910,8 @@ bool app_balance_run(void)
         }
         bsp_motor_update();
 
-        /* ---- 100 Hz：电池采样 + 控制环（safety + balance step） ------------ */
-        if ((tick_count % APP_BAL_PHASE_CTRL_TICKS) == 0u) {
-            bsp_battery_update();
+        /* ---- 200 Hz：四级级联控制 + 电机输出 ------------------------------ */
+        if ((tick_count % APP_BAL_PHASE_RATE_TICKS) == 0u) {
             ms901m_get_snapshot(&snap);
 
             app_balance_attitude_t att = {
@@ -882,11 +921,32 @@ bool app_balance_run(void)
                 .gz_dps         = snap.gz_dps,
                 .attitude_valid = snap.has_attitude,
             };
-            app_balance_step(&att, &cmd);
 
-            bsp_motor_feedback_t fb_lt;
-            bsp_motor_get_feedback(&fb_lt);
-            send_lt_sample(tick_count, &cmd, &fb_lt);
+            /* 20 Hz 速度外环（每 50 ticks）—— 最先跑，更新 target_tilt_deg */
+            if ((tick_count % APP_BAL_PHASE_SPEED_TICKS) == 0u) {
+                balance_step_speed(&cmd);
+            }
+
+            /* 100 Hz 角度环（每 10 ticks）—— 更新 target_rate_dps */
+            if ((tick_count % APP_BAL_PHASE_ANGLE_TICKS) == 0u) {
+                bsp_battery_update();
+                balance_step_angle(&att);
+            }
+
+            /* 50 Hz 航向环（每 20 ticks）—— 更新 cached_yaw_corr_pm */
+            if ((tick_count % APP_BAL_PHASE_YAW_TICKS) == 0u) {
+                balance_step_yaw(&att, &cmd);
+            }
+
+            /* 200 Hz 角速度内环（每 5 ticks）—— 每拍都跑，输出 PWM */
+            balance_step_rate(&att, &cmd);
+
+            /* 100 Hz LT 采样 */
+            if ((tick_count % APP_BAL_PHASE_ANGLE_TICKS) == 0u) {
+                bsp_motor_feedback_t fb_lt;
+                bsp_motor_get_feedback(&fb_lt);
+                send_lt_sample(tick_count, &cmd, &fb_lt);
+            }
         }
 
         /* ---- 5 Hz：LED_G 绿心跳 + LED_R 跌倒 / 低压告警 ------------------- */
