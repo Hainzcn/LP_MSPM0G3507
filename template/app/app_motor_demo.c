@@ -15,19 +15,10 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#define APP_MOTOR_DEMO_MAX_RPM                     (1200u)
-#define APP_MOTOR_DEMO_DEFAULT_RPM                 (200u)
+#define APP_MOTOR_DEMO_MAX_RPM                     (300u)
+#define APP_MOTOR_DEMO_DEFAULT_RPM                 (300u)
 #define APP_MOTOR_DEMO_BRAKE_MS                    (120u)
 #define APP_MOTOR_DEMO_RPM_STEP                    (20u)
-#define APP_MOTOR_SYNC_PERIOD_MS                   (50u)
-/*
- * BSP 右路基础补偿接管了正转稳态误差（~13 rpm @1000‰），PI 只需处理瞬态与反转残差，
- * 因此 Kp 从 8 降至 4，Ki 从 1 降至 0（纯比例）以避免积分抖动。
- * 若反转仍有残余偏差可将 Ki 恢复为 1。
- */
-#define APP_MOTOR_SYNC_KP_PM_PER_RPM               (4)
-#define APP_MOTOR_SYNC_KI_PM_PER_RPM_STEP          (0)
-#define APP_MOTOR_SYNC_MAX_CORRECTION_PM           (200)
 
 #define APP_MOTOR_LOG_PERIOD_MS                    (100u)
 #define APP_MOTOR_HEARTBEAT_PERIOD_MS              (250u)
@@ -38,10 +29,10 @@
 #define APP_MOTOR_CAL_PWM_START_PM     (0)
 #endif
 #ifndef APP_MOTOR_CAL_PWM_END_PM
-#define APP_MOTOR_CAL_PWM_END_PM       (1000)
+#define APP_MOTOR_CAL_PWM_END_PM       (50)
 #endif
 #ifndef APP_MOTOR_CAL_PWM_STEP_PM
-#define APP_MOTOR_CAL_PWM_STEP_PM      (50)
+#define APP_MOTOR_CAL_PWM_STEP_PM      (2)
 #endif
 #ifndef APP_MOTOR_CAL_DWELL_MS
 #define APP_MOTOR_CAL_DWELL_MS         (2000u)
@@ -70,7 +61,6 @@ static uint32_t        s_cal_last_sample_ms = 0u;
 
 /* 校准进入时保存的原始状态，结束/中止后恢复 */
 static int16_t         s_cal_saved_pwm_pm        = 0;
-static bool            s_cal_saved_sync_enabled  = false;
 static bool            s_cal_saved_deadzone_comp = false;
 static bool            s_cal_saved_cal_mode      = false;
 static bool            s_cal_saved_right_fwd_scale = false;
@@ -80,17 +70,6 @@ static uint16_t s_target_rpm = APP_MOTOR_DEMO_DEFAULT_RPM;
 static int16_t  s_target_pwm_pm =
     (int16_t)((APP_MOTOR_DEMO_DEFAULT_RPM * BSP_MOTOR_PWM_MAX_PERMILLE +
         (APP_MOTOR_DEMO_MAX_RPM / 2u)) / APP_MOTOR_DEMO_MAX_RPM);
-
-static app_motor_demo_sync_diag_t s_sync = {
-    .enabled = true,
-    .kp_pm_per_rpm = APP_MOTOR_SYNC_KP_PM_PER_RPM,
-    .ki_pm_per_rpm_step = APP_MOTOR_SYNC_KI_PM_PER_RPM_STEP,
-    .correction_pm = 0,
-    .left_cmd_pm = 0,
-    .right_cmd_pm = 0,
-    .rpm_error = 0,
-};
-static int16_t s_sync_i_pm = 0;
 
 static int16_t rpm_to_pwm_pm(uint16_t rpm)
 {
@@ -115,38 +94,6 @@ uint16_t app_motor_demo_get_speed_rpm(void)
     return s_target_rpm;
 }
 
-void app_motor_demo_set_sync_enabled(bool enabled)
-{
-    s_sync.enabled = enabled;
-    if (!enabled) {
-        app_motor_demo_reset_sync();
-    }
-}
-
-void app_motor_demo_set_sync_gains(int16_t kp_pm_per_rpm,
-                                   int16_t ki_pm_per_rpm_step)
-{
-    s_sync.kp_pm_per_rpm = kp_pm_per_rpm;
-    s_sync.ki_pm_per_rpm_step = ki_pm_per_rpm_step;
-}
-
-void app_motor_demo_reset_sync(void)
-{
-    s_sync_i_pm = 0;
-    s_sync.correction_pm = 0;
-    s_sync.left_cmd_pm = s_target_pwm_pm;
-    s_sync.right_cmd_pm = s_target_pwm_pm;
-    s_sync.rpm_error = 0;
-}
-
-void app_motor_demo_get_sync_diag(app_motor_demo_sync_diag_t *out)
-{
-    if (out == NULL) {
-        return;
-    }
-    *out = s_sync;
-}
-
 static int16_t clamp_pm(int32_t v)
 {
     if (v > BSP_MOTOR_PWM_MAX_PERMILLE) {
@@ -158,68 +105,16 @@ static int16_t clamp_pm(int32_t v)
     return (int16_t)v;
 }
 
-static int16_t clamp_sync_correction(int32_t v)
+static void apply_motor_output(void)
 {
-    if (v > APP_MOTOR_SYNC_MAX_CORRECTION_PM) {
-        return APP_MOTOR_SYNC_MAX_CORRECTION_PM;
-    }
-    if (v < -APP_MOTOR_SYNC_MAX_CORRECTION_PM) {
-        return -APP_MOTOR_SYNC_MAX_CORRECTION_PM;
-    }
-    return (int16_t)v;
-}
-
-static void apply_motor_output(int16_t correction_pm)
-{
-    int16_t left_pm  = clamp_pm((int32_t)s_target_pwm_pm + correction_pm);
-    int16_t right_pm = clamp_pm((int32_t)s_target_pwm_pm - correction_pm);
-
-    s_sync.left_cmd_pm  = left_pm;
-    s_sync.right_cmd_pm = right_pm;
-    bsp_motor_set_output(left_pm, right_pm);
-}
-
-static int16_t rpm_to_i16(float rpm)
-{
-    if (rpm >= 0.0f) {
-        return (int16_t)(rpm + 0.5f);
-    }
-    return (int16_t)(rpm - 0.5f);
-}
-
-static void motor_sync_step(const bsp_motor_feedback_t *feedback, bool running)
-{
-    if ((feedback == NULL) || !running) {
-        return;
-    }
-
-    if (!s_sync.enabled) {
-        s_sync.rpm_error = 0;
-        s_sync.correction_pm = 0;
-        apply_motor_output(0);
-        return;
-    }
-
-    int16_t left_rpm = rpm_to_i16(feedback->left_speed_rpm);
-    int16_t right_rpm = rpm_to_i16(feedback->right_speed_rpm);
-    int16_t error = (int16_t)(right_rpm - left_rpm);
-
-    int32_t i_term = (int32_t)s_sync_i_pm +
-        ((int32_t)error * (int32_t)s_sync.ki_pm_per_rpm_step);
-    s_sync_i_pm = clamp_sync_correction(i_term);
-    s_sync.rpm_error = error;
-
-    int32_t correction = ((int32_t)error * (int32_t)s_sync.kp_pm_per_rpm) +
-        (int32_t)s_sync_i_pm;
-    s_sync.correction_pm = clamp_sync_correction(correction);
-    apply_motor_output(s_sync.correction_pm);
+    bsp_motor_set_output(s_target_pwm_pm, s_target_pwm_pm);
 }
 
 static void apply_run_output_if_needed(bool running)
 {
     if (running) {
         bsp_motor_enable(true);
-        apply_motor_output(s_sync.enabled ? s_sync.correction_pm : 0);
+        apply_motor_output();
     }
 }
 
@@ -332,11 +227,9 @@ static int8_t cal_current_dir(void)
 
 static void cal_apply_step(uint32_t now_ms)
 {
-    s_cal_pm_now       = cal_pm_for_step(s_cal_step_idx, cal_current_dir());
-    s_cal_step_start_ms = now_ms;
+    s_cal_pm_now        = cal_pm_for_step(s_cal_step_idx, cal_current_dir());
+    s_cal_step_start_ms  = now_ms;
     s_cal_last_sample_ms = now_ms;
-    s_sync_i_pm        = 0;
-    s_sync.correction_pm = 0;
     bsp_motor_set_output(s_cal_pm_now, s_cal_pm_now);
     print_cal_step(cal_current_dir(), s_cal_step_idx, s_cal_pm_now);
 }
@@ -348,15 +241,11 @@ bool app_motor_demo_cal_start(void)
         return false;
     }
 
-    s_cal_saved_pwm_pm       = s_target_pwm_pm;
-    s_cal_saved_sync_enabled = s_sync.enabled;
-    s_cal_saved_deadzone_comp = bsp_motor_get_deadzone_comp_enabled();
-    s_cal_saved_cal_mode     = bsp_motor_get_calibration_mode();
+    s_cal_saved_pwm_pm          = s_target_pwm_pm;
+    s_cal_saved_deadzone_comp   = bsp_motor_get_deadzone_comp_enabled();
+    s_cal_saved_cal_mode        = bsp_motor_get_calibration_mode();
     s_cal_saved_right_fwd_scale = bsp_motor_get_right_forward_scale_enabled();
 
-    s_sync.enabled = false;
-    s_sync_i_pm    = 0;
-    s_sync.correction_pm = 0;
     /* apply_comp=1：扫描时启用当前运行补偿系统（静摩擦起转 → 动摩擦运行）；
      * apply_comp=0：输出原始 PWM，用于重新采集未补偿的起转曲线。 */
     bsp_motor_set_right_forward_scale_enabled(s_cal_apply_comp);
@@ -388,10 +277,7 @@ void app_motor_demo_cal_abort(void)
     bsp_motor_set_right_forward_scale_enabled(s_cal_saved_right_fwd_scale);
     brake_now();
 
-    s_target_pwm_pm  = s_cal_saved_pwm_pm;
-    s_sync.enabled   = s_cal_saved_sync_enabled;
-    s_sync_i_pm      = 0;
-    s_sync.correction_pm = 0;
+    s_target_pwm_pm = s_cal_saved_pwm_pm;
 }
 
 bool app_motor_demo_cal_is_active(void)
@@ -428,10 +314,7 @@ static bool handle_calibration_tick(uint32_t now_ms, bsp_motor_feedback_t *feedb
                 /* 反向也完成 */
                 print_cal_done(dir, false);
                 s_cal_phase = APP_CAL_IDLE;
-                s_target_pwm_pm  = s_cal_saved_pwm_pm;
-                s_sync.enabled   = s_cal_saved_sync_enabled;
-                s_sync_i_pm      = 0;
-                s_sync.correction_pm = 0;
+                s_target_pwm_pm = s_cal_saved_pwm_pm;
                 bsp_motor_set_calibration_mode(s_cal_saved_cal_mode);
                 bsp_motor_set_deadzone_comp_enabled(s_cal_saved_deadzone_comp);
                 bsp_motor_set_right_forward_scale_enabled(s_cal_saved_right_fwd_scale);
@@ -462,7 +345,7 @@ static bool handle_calibration_tick(uint32_t now_ms, bsp_motor_feedback_t *feedb
 static void print_ctrl_help(void)
 {
     (void)printf("[ctrl] UART commands: '+'/'-' step %urpm, '<rpm><Enter>' set speed, "
-                 "'b' brake, 'r' run, 's' sync on/off, 'p' print sync, "
+                 "'b' brake, 'r' run, "
                  "'d' calib comp on/off, "
                  "'c' calib sweep, 'x' abort calib, 'l'/'load' enter load mode\r\n",
         (unsigned int)APP_MOTOR_DEMO_RPM_STEP);
@@ -505,7 +388,6 @@ static bool process_log_uart_commands(bool *running)
             ch == (uint8_t)' ') {
             if (rpm_pending) {
                 app_motor_demo_set_speed_rpm(rpm_acc);
-                app_motor_demo_reset_sync();
                 apply_run_output_if_needed(*running);
                 (void)printf("[ctrl] set target=%urpm pwm=%d/1000\r\n",
                     (unsigned int)s_target_rpm, (int)s_target_pwm_pm);
@@ -522,7 +404,6 @@ static bool process_log_uart_commands(bool *running)
         case (uint8_t)'+':
             app_motor_demo_set_speed_rpm(
                 (uint16_t)(s_target_rpm + APP_MOTOR_DEMO_RPM_STEP));
-            app_motor_demo_reset_sync();
             apply_run_output_if_needed(*running);
             (void)printf("[ctrl] target=%urpm pwm=%d/1000\r\n",
                 (unsigned int)s_target_rpm, (int)s_target_pwm_pm);
@@ -530,7 +411,6 @@ static bool process_log_uart_commands(bool *running)
         case (uint8_t)'-':
             app_motor_demo_set_speed_rpm((s_target_rpm > APP_MOTOR_DEMO_RPM_STEP) ?
                 (uint16_t)(s_target_rpm - APP_MOTOR_DEMO_RPM_STEP) : 0u);
-            app_motor_demo_reset_sync();
             apply_run_output_if_needed(*running);
             (void)printf("[ctrl] target=%urpm pwm=%d/1000\r\n",
                 (unsigned int)s_target_rpm, (int)s_target_pwm_pm);
@@ -544,34 +424,9 @@ static bool process_log_uart_commands(bool *running)
         case (uint8_t)'r':
         case (uint8_t)'R':
             *running = true;
-            app_motor_demo_reset_sync();
             apply_run_output_if_needed(*running);
             (void)printf("[ctrl] run target=%urpm pwm=%d/1000\r\n",
                 (unsigned int)s_target_rpm, (int)s_target_pwm_pm);
-            break;
-        case (uint8_t)'s':
-        case (uint8_t)'S':
-            app_motor_demo_set_sync_enabled(!s_sync.enabled);
-            apply_run_output_if_needed(*running);
-            (void)printf("[ctrl] sync=%s kp=%d ki=%d maxCorr=%d\r\n",
-                s_sync.enabled ? "on" : "off",
-                (int)s_sync.kp_pm_per_rpm,
-                (int)s_sync.ki_pm_per_rpm_step,
-                APP_MOTOR_SYNC_MAX_CORRECTION_PM);
-            break;
-        case (uint8_t)'p':
-        case (uint8_t)'P':
-            (void)printf(
-                "[ctrl] sync=%s err=%d corr=%d cmdL=%d cmdR=%d kp=%d ki=%d cal_apply_comp=%u rf_scale=%u\r\n",
-                s_sync.enabled ? "on" : "off",
-                (int)s_sync.rpm_error,
-                (int)s_sync.correction_pm,
-                (int)s_sync.left_cmd_pm,
-                (int)s_sync.right_cmd_pm,
-                (int)s_sync.kp_pm_per_rpm,
-                (int)s_sync.ki_pm_per_rpm_step,
-                s_cal_apply_comp ? 1u : 0u,
-                bsp_motor_get_right_forward_scale_enabled() ? 1u : 0u);
             break;
         case (uint8_t)'d':
         case (uint8_t)'D':
@@ -612,27 +467,8 @@ static void print_boot_banner(void)
     (void)printf("[boot] target=%urpm pwm=%d/1000 max=%urpm\r\n",
         (unsigned int)s_target_rpm, (int)s_target_pwm_pm,
         (unsigned int)APP_MOTOR_DEMO_MAX_RPM);
-    (void)printf("[boot] motor sync enabled kp=%d ki=%d maxCorr=%d period=%ums\r\n",
-        (int)s_sync.kp_pm_per_rpm,
-        (int)s_sync.ki_pm_per_rpm_step,
-        APP_MOTOR_SYNC_MAX_CORRECTION_PM,
-        (unsigned int)APP_MOTOR_SYNC_PERIOD_MS);
     (void)printf("[boot] send 'l' or 'load' on UART to enter load balance mode\r\n");
     print_ctrl_help();
-}
-
-static void handle_sync_tick(uint32_t now_ms,
-                             uint32_t *last_sync_ms,
-                             bool running,
-                             bsp_motor_feedback_t *feedback)
-{
-    if ((now_ms - *last_sync_ms) < APP_MOTOR_SYNC_PERIOD_MS) {
-        return;
-    }
-
-    *last_sync_ms = now_ms;
-    bsp_motor_get_feedback(feedback);
-    motor_sync_step(feedback, running);
 }
 
 static void print_feedback_log(uint32_t now_ms,
@@ -644,8 +480,7 @@ static void print_feedback_log(uint32_t now_ms,
 
     (void)printf(
         "[enc] t=%lums L=%ld(%ld.%02ld deg) R=%ld(%ld.%02ld deg) "
-        "rpmL=%ld rpmR=%ld target=%urpm state=%s sync=%u "
-        "err=%d corr=%d cmdL=%d cmdR=%d\r\n",
+        "rpmL=%ld rpmR=%ld target=%urpm state=%s pwm=%d\r\n",
         (unsigned long)now_ms,
         (long)feedback->left_count,
         (long)(left_cdeg / 100),
@@ -657,11 +492,7 @@ static void print_feedback_log(uint32_t now_ms,
         (long)feedback->right_speed_rpm,
         (unsigned int)s_target_rpm,
         running ? "run" : "brake",
-        s_sync.enabled ? 1u : 0u,
-        (int)s_sync.rpm_error,
-        (int)s_sync.correction_pm,
-        (int)s_sync.left_cmd_pm,
-        (int)s_sync.right_cmd_pm);
+        (int)s_target_pwm_pm);
 }
 
 static void handle_log_tick(uint32_t now_ms,
@@ -691,15 +522,13 @@ static void handle_led_tick(uint32_t now_ms, uint32_t *last_led_ms)
 bool app_motor_demo_run(void)
 {
     bool running = true;
-    uint32_t last_sync_ms = 0u;
     uint32_t last_log_ms  = 0u;
     uint32_t last_led_ms  = 0u;
     uint32_t last_batt_ms = 0u;
     bsp_motor_feedback_t feedback;
 
     bsp_motor_enable(true);
-    app_motor_demo_reset_sync();
-    apply_motor_output(0);
+    apply_motor_output();
     print_boot_banner();
 
     for (;;) {
@@ -721,13 +550,11 @@ bool app_motor_demo_run(void)
             bsp_battery_update();
         }
 
-        /* 校准期间：用 cal tick 替代 sync tick 和 enc 日志 */
+        /* 校准期间：用 cal tick 替代 enc 日志 */
         if (handle_calibration_tick(now_ms, &feedback)) {
             handle_led_tick(now_ms, &last_led_ms);
             continue;
         }
-
-        handle_sync_tick(now_ms, &last_sync_ms, running, &feedback);
 
         handle_log_tick(now_ms, &last_log_ms, running, &feedback);
         handle_led_tick(now_ms, &last_led_ms);

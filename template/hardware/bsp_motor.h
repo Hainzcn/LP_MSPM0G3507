@@ -50,22 +50,27 @@ extern "C" {
 #define BSP_MOTOR_PWM_MAX_PERMILLE                 (1000)
 
 /** GB370 减速箱减速比（标称 9.6:1，仅供参考；实际定标以下方 COUNTS_PER_OUTPUT_REV 为准） */
-#define BSP_MOTOR_GB370_GEAR_RATIO                 (9.6f)
+#define BSP_MOTOR_GB370_GEAR_RATIO                 (34.0f)
 
 /** GB370 内置霍尔每电机轴转脉冲数（A 相单沿） */
-#define BSP_MOTOR_GB370_HALL_PPR                   (11)
+#define BSP_MOTOR_GB370_HALL_PPR                   (500)
 
 /** 左轮 QEI mode 3 = X4 解码，每输出轴一圈的计数 */
 #define BSP_MOTOR_LEFT_DECODE_X                    (4)
 
 /**
- * 右轮解码倍率：默认 X4 (PA12 + PA13 都开双沿中断，与左轮分辨率一致 1320 cnt/rev)。
- * 若 CPU 负担过大或高速漏脉冲明显，可切回 X2（仅 PA12 双沿，PA13 ISR 内读电平）。
- *   X4 → 404 cnt/rev（实测定标），与左轮一致，平衡环左右系数可共用
- *   X2 → 约 202 cnt/rev，CPU ISR 减半（推荐转速 > 1500 rpm 出轴侧时切此）
+ * 右轮解码倍率：500 PPR × 34:1 减速电机下，X4 在 180 RPM 出轴侧即产生
+ * 204,000 边沿/s（204 边/ms），已超过下方雪崩兜底阈值（200），导致 ISR
+ * 被强制关闭 50 ms，右轮速度瞬间归零；且 X4 在 32 MHz CPU 下 ISR 占用约
+ * 51%，严重挤占主循环。
+ *
+ * 因此本电机固定使用 X2（仅 PA12 双沿，PA13 ISR 内读电平判向）：
+ *   X2 → 34,000 cnt/rev（500 × 34 × 2），180 RPM 下边沿率 = 102 边/ms，
+ *         ISR CPU 占用约 26%，雪崩阈值（300）有 3× 余量，安全稳定。
+ *   X4 → 68,000 cnt/rev，高速下不可用（ISR 过载 + 雪崩触发，见上）。
  */
 #ifndef BSP_MOTOR_RIGHT_DECODE_X
-#define BSP_MOTOR_RIGHT_DECODE_X                   (4)
+#define BSP_MOTOR_RIGHT_DECODE_X                   (2)
 #endif
 
 /**
@@ -76,7 +81,7 @@ extern "C" {
  * 扫描原始未补偿曲线。
  */
 #ifndef BSP_MOTOR_RIGHT_FORWARD_SCALE_X1000
-#define BSP_MOTOR_RIGHT_FORWARD_SCALE_X1000        (980)
+#define BSP_MOTOR_RIGHT_FORWARD_SCALE_X1000        (1000)
 #endif
 
 /**
@@ -125,7 +130,10 @@ extern "C" {
 /**
  * 动摩擦死区（Running Dead Zone）—— 平衡车模式下的核心补偿参数。
  *
- * 功能：非零 PID 命令经线性映射后，最小实际输出被抬升到此门槛值。
+ * 功能：非零 PID 命令经线性映射后，最小实际输出被抬升到此门槛值，
+ *       确保任何非零命令均能让电机实际转动，消除正反向死区不对称导致
+ *       的"小倾角单侧反转"现象。
+ *
  * 设定原则：≥ 实测静摩擦起转 PWM（确保任何非零命令都能让电机响应）。
  *
  * 平衡车模式下（static_dz_enabled = false）此值被无条件应用：
@@ -133,20 +141,50 @@ extern "C" {
  *   - PID 输出 ±1‰ 时电机也能拿到 ≥门槛的实际电压；
  *   - 倒立摆物理特性 + D 项角速率响应保证 10-20ms 内自然突破静摩擦。
  *
- * 标定方法：对每路电机扫描找到"从 0 开始加 PWM，编码器首次产生计数"
- * 的门槛值，取该值 +10~15‰ 余量即可。
+ * 标定方法（每次换新电机后必做）：
+ *   在 app_motor_demo 标定模式下，对每路电机从 0 缓慢扫描 PWM（步进 1‰，
+ *   每步等 50 ms），记录编码器计数首次发生变化时的 PWM 值；
+ *   取该值 +10~15‰ 余量填入对应宏。
+ *
+ * 当前值（2026-05-16 临时占位，500PPR×34:1 新电机待标定）：
+ *   参考旧 GB370（9.6:1）标定值约 50-68‰，取保守上界 65‰ 作为初始值。
+ *   标定完成后替换为实测值，预计可降至 45~55‰ 区间。
+ *
+ * ⚠ 若 running_dz 设为 0：小命令直接原路返回 → 低于物理死区 → 电机不响应；
+ *   正反向物理死区不对称 → 某方向先突破 → 出现单侧反转。
  */
 #ifndef BSP_MOTOR_LEFT_FORWARD_RUNNING_DEADZONE_PM
-#define BSP_MOTOR_LEFT_FORWARD_RUNNING_DEADZONE_PM   (43)
+#define BSP_MOTOR_LEFT_FORWARD_RUNNING_DEADZONE_PM   (40)   /* TODO: 标定后替换 */
 #endif
 #ifndef BSP_MOTOR_LEFT_REVERSE_RUNNING_DEADZONE_PM
-#define BSP_MOTOR_LEFT_REVERSE_RUNNING_DEADZONE_PM   (65)
+#define BSP_MOTOR_LEFT_REVERSE_RUNNING_DEADZONE_PM   (40)   /* TODO: 标定后替换 */
 #endif
 #ifndef BSP_MOTOR_RIGHT_FORWARD_RUNNING_DEADZONE_PM
-#define BSP_MOTOR_RIGHT_FORWARD_RUNNING_DEADZONE_PM  (50)
+#define BSP_MOTOR_RIGHT_FORWARD_RUNNING_DEADZONE_PM  (40)   /* TODO: 标定后替换 */
 #endif
 #ifndef BSP_MOTOR_RIGHT_REVERSE_RUNNING_DEADZONE_PM
-#define BSP_MOTOR_RIGHT_REVERSE_RUNNING_DEADZONE_PM  (40)
+#define BSP_MOTOR_RIGHT_REVERSE_RUNNING_DEADZONE_PM  (40)   /* TODO: 标定后替换 */
+#endif
+
+/**
+ * Sigma-delta dither 累加器触发门槛（permille）。
+ *   控制脉冲发射频率：累加器达到此值时触发一次脉冲。
+ *   值越小 → 脉冲越频繁 → 电机响应越快（但平滑度略降）。
+ *   建议与 running_dz 相同或略小。
+ */
+#ifndef BSP_MOTOR_DITHER_THRESHOLD_PM
+#define BSP_MOTOR_DITHER_THRESHOLD_PM                (20)
+#endif
+
+/**
+ * Sigma-delta dither 脉冲输出幅度（permille）。
+ *   控制每次脉冲的 PWM 强度，需 > 死区阈值以确保负载下有效驱动。
+ *   与 threshold 独立配置；pulse > threshold 时引入增益因子 = pulse/threshold，
+ *   等效于子死区区域输出被放大，PID 增益需相应缩小。
+ *   取值建议：刚好能可靠驱动负载的最小值（如 120~200）。
+ */
+#ifndef BSP_MOTOR_DITHER_PULSE_PM
+#define BSP_MOTOR_DITHER_PULSE_PM                    (200)
 #endif
 
 /**
@@ -170,19 +208,27 @@ extern "C" {
  * 每输出轴一圈的编码器计数（实测定标值，优先于 gear×PPR×X 公式）。
  *
  * 标定方法：清零编码器 → 手转输出轴精确一圈 → 读 bsp_motor_get_left/right_count()。
- * 当前值来自实测：左轮手转一圈 left_count = 404。
- * 右轮尚未单独标定，暂与左轮一致（同型号电机，偏差通常 < 1%）。
- * 改此值后角度/速度换算自动正确，无需修改业务代码。
+ *
+ * 左轮（TIMG8 硬件 QEI，X4）：500 PPR × 34:1 × 4 = 68,000 cnt/rev
+ *   最低可分辨速度（10ms 窗口）：1000/10 / 68000 × 60 ≈ 0.09 rpm
+ *
+ * 右轮（GPIO ISR，X2）：500 PPR × 34:1 × 2 = 34,000 cnt/rev
+ *   X2 原因：X4 在 180 RPM 出轴侧边沿率 = 204 边/ms，已触发雪崩兜底（阈值 200）
+ *   导致速度读数归零；X2 将此降至 102 边/ms，ISR CPU 占用约 26%（32 MHz 下）。
+ *   最低可分辨速度（10ms 窗口）：1000/10 / 34000 × 60 ≈ 0.18 rpm
+ *
+ * 建议后续将右轮迁移至第二路硬件 QEI（TIMG 空闲实例），彻底消除 ISR 负担，
+ * 同时恢复与左轮一致的 X4 分辨率（68,000 cnt/rev）。
  */
-#define BSP_MOTOR_LEFT_COUNTS_PER_OUTPUT_REV      (404)
-#define BSP_MOTOR_RIGHT_COUNTS_PER_OUTPUT_REV     (404)
+#define BSP_MOTOR_LEFT_COUNTS_PER_OUTPUT_REV      (68000)
+#define BSP_MOTOR_RIGHT_COUNTS_PER_OUTPUT_REV     (34000)
 
 /**
  * 速度差分窗口（毫秒）：update() 每次累计 1 ms，达到该值时做一次 count 差分，
  * 得到 cps（counts per second）；窗口越小响应越快，但低速时分辨率越粗。
- * 默认 20 ms ⇒ 50 Hz 速度刷新率，最低可分辨速度
- *      左轮 = 1000/20 = 50 cps  ≈ 50/404 * 60 ≈ 7.43 rpm
- *      右轮 = 50 cps             ≈ 50/404 * 60 ≈ 7.43 rpm
+ * 当前 10 ms ⇒ 100 Hz 速度刷新率，最低可分辨速度
+ *      左轮 = 1000/10 = 100 cps  ≈ 100/68000 × 60 ≈ 0.09 rpm（硬件 QEI X4）
+ *      右轮 = 100 cps             ≈ 100/34000 × 60 ≈ 0.18 rpm（GPIO ISR X2）
  */
 #ifndef BSP_MOTOR_SPEED_WINDOW_MS
 #define BSP_MOTOR_SPEED_WINDOW_MS                  (10u)
@@ -190,15 +236,23 @@ extern "C" {
 
 /**
  * 右编码器 ISR 雪崩保护（Stage 2.4 新增）：
- *   ─ `BSP_MOTOR_ENC_IRQ_QUENCH_PER_MS`：单毫秒边沿率上限。手动转编码器极快也只
- *     会到几 kHz/ms 级别，超过该阈值唯一可能是引脚浮空 + 噪声 / 编码器电源异常
- *     引发的 ISR 雪崩。默认 200 = 200 kHz 边沿率告警线，远高于实际机械极限。
+ *   ─ `BSP_MOTOR_ENC_IRQ_QUENCH_PER_MS`：单毫秒边沿率上限（边/ms）。
+ *     低于此值：正常计数。超过此值：判定为噪声/浮空雪崩，关中断保护 CPU。
+ *
+ *     500 PPR × 34:1 电机在 X2 解码下：
+ *       180 RPM → 102 边/ms，300 RPM → 170 边/ms，最高约 530 RPM → 300 边/ms。
+ *     阈值设为 300，可覆盖正常运行范围，同时保留浮空噪声（数万边/ms）保护。
+ *
+ *     ⚠️  旧值 200 对本电机 X2@180 RPM 有 102 边/ms 余量（安全），
+ *           但对 X4 模式在 180 RPM 即产生 204 边/ms，触发雪崩误判（根因）。
+ *           已将右轮切为 X2，阈值升至 300 双重保险。
+ *
  *   ─ `BSP_MOTOR_ENC_IRQ_QUENCH_DURATION_MS`：触发后关闭 PA12/PA13 中断的毫秒数。
  *     期间编码器边沿丢失，但主循环 / SysTick / printf 能正常推进；到期后由
  *     `bsp_motor_update()` 重新打开。
  */
 #ifndef BSP_MOTOR_ENC_IRQ_QUENCH_PER_MS
-#define BSP_MOTOR_ENC_IRQ_QUENCH_PER_MS            (200u)
+#define BSP_MOTOR_ENC_IRQ_QUENCH_PER_MS            (300u)
 #endif
 
 #ifndef BSP_MOTOR_ENC_IRQ_QUENCH_DURATION_MS
@@ -335,6 +389,18 @@ void bsp_motor_set_running_dz_enabled(bool enabled);
 
 /** 查询动摩擦死区补偿分开关状态。 */
 bool bsp_motor_get_running_dz_enabled(void);
+
+/**
+ * @brief 启用/禁用 Sigma-Delta dither 死区模式。
+ *
+ *        启用后替代 running_dz 逻辑：对低于死区阈值的命令使用累加器产生
+ *        时间平均脉冲输出，避免高频正负切换引起机械振颤。
+ *        建议同时禁用 running_dz 以避免冲突。
+ */
+void bsp_motor_set_dither_dz_enabled(bool enabled);
+
+/** 查询 sigma-delta dither 死区模式状态。 */
+bool bsp_motor_get_dither_dz_enabled(void);
 
 /**
  * @brief 切换静态死区强制模式（legacy cal-mode）。

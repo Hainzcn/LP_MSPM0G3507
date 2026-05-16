@@ -30,29 +30,6 @@ void app_motor_demo_set_speed_rpm(uint16_t rpm);
 /** 读取当前 demo 目标转速配置。 */
 uint16_t app_motor_demo_get_speed_rpm(void);
 
-typedef struct {
-    bool    enabled;
-    int16_t kp_pm_per_rpm;
-    int16_t ki_pm_per_rpm_step;
-    int16_t correction_pm;
-    int16_t left_cmd_pm;
-    int16_t right_cmd_pm;
-    int16_t rpm_error;
-} app_motor_demo_sync_diag_t;
-
-/** 开关双轮同步服务；关闭时左右轮都输出目标转速对应的同一 PWM。 */
-void app_motor_demo_set_sync_enabled(bool enabled);
-
-/** 配置同步环增益：误差定义为 rpmR - rpmL，输出为左右差分 PWM 补偿。 */
-void app_motor_demo_set_sync_gains(int16_t kp_pm_per_rpm,
-                                   int16_t ki_pm_per_rpm_step);
-
-/** 清同步环积分与诊断；改变目标转速或重新启动前可调用。 */
-void app_motor_demo_reset_sync(void);
-
-/** 读取同步环诊断快照。 */
-void app_motor_demo_get_sync_diag(app_motor_demo_sync_diag_t *out);
-
 /* ========================================================================== */
 /* 电机校准扫描                                                                 */
 /* ========================================================================== */

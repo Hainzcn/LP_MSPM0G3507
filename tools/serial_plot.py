@@ -405,10 +405,12 @@ class RealTimeCanvas(FigureCanvasQTAgg):
 
 
 class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self, buffer, worker, window_sec=10.0):
+    def __init__(self, buffer, port, baud, window_sec=10.0):
         super().__init__()
         self.buffer = buffer
-        self.worker = worker
+        self.port = port
+        self.baud = baud
+        self.worker = None
         self.window_sec = window_sec
         self.auto_scroll = True
         self._frame_idx = 0
@@ -446,14 +448,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.send_yp_btn = QtWidgets.QPushButton("发送角度环PID")
         self.send_sp_btn = QtWidgets.QPushButton("发送速度环PID")
         self.send_lt_btn = QtWidgets.QPushButton("发送lt")
+        self.reopen_serial_btn = QtWidgets.QPushButton("重新打开串口")
         self.send_bp_btn.setFixedHeight(28)
         self.send_yp_btn.setFixedHeight(28)
         self.send_sp_btn.setFixedHeight(28)
         self.send_lt_btn.setFixedHeight(28)
+        self.reopen_serial_btn.setFixedHeight(28)
         self.send_bp_btn.clicked.connect(self._send_balance_pid_params)
         self.send_yp_btn.clicked.connect(self._send_angle_pid_params)
         self.send_sp_btn.clicked.connect(self._send_speed_pid_params)
         self.send_lt_btn.clicked.connect(self._send_lt_command)
+        self.reopen_serial_btn.clicked.connect(self._reopen_serial_port)
 
         pid_layout.addWidget(QtWidgets.QLabel("平衡环 bp"))
         for name, edit in [("Kp", self.bp_kp_edit), ("Ki", self.bp_ki_edit), ("Kd", self.bp_kd_edit)]:
@@ -487,6 +492,7 @@ class MainWindow(QtWidgets.QMainWindow):
         pid_layout.insertWidget(0, title_label)
         pid_layout.addStretch(1)
         pid_layout.addWidget(self.send_lt_btn)
+        pid_layout.addWidget(self.reopen_serial_btn)
 
         self.canvas = RealTimeCanvas()
         self.toolbar = NavigationToolbar2QT(self.canvas, self)
@@ -501,7 +507,6 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.status_bar = self.statusBar()
         self.status_bar.addPermanentWidget(self.status_label)
-        self.worker.command_sent.connect(self._on_command_sent)
 
         self._update_title()
 
@@ -511,6 +516,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._timer = QtCore.QTimer(self)
         self._timer.timeout.connect(self._refresh)
         self._timer.start(self._refresh_interval_ms)
+        self._start_serial_worker(show_message=False)
 
     @staticmethod
     def _read_pid_triplet(kp_edit, ki_edit, kd_edit):
@@ -518,6 +524,32 @@ class MainWindow(QtWidgets.QMainWindow):
         ki = float(ki_edit.text().strip())
         kd = float(kd_edit.text().strip())
         return kp, ki, kd
+
+    def _start_serial_worker(self, show_message):
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.stop()
+            self.worker.wait(1200)
+
+        self.worker = SerialWorker(self.port, self.baud)
+        self.worker.data_ready.connect(self.buffer.append)
+        self.worker.error_occurred.connect(self._on_worker_error)
+        self.worker.finished.connect(self._on_worker_finished)
+        self.worker.command_sent.connect(self._on_command_sent)
+        self.worker.start()
+
+        if show_message:
+            self.status_bar.showMessage(f"串口已重新打开: {self.port} @ {self.baud}", 2500)
+
+    def _reopen_serial_port(self):
+        self._start_serial_worker(show_message=True)
+
+    def _send_command(self, cmd, display_text=None):
+        if self.worker is None or not self.worker.isRunning():
+            QtWidgets.QMessageBox.warning(self, "串口未连接", "串口线程未运行，请先点击“重新打开串口”。")
+            return
+        self.worker.send_text(cmd)
+        text = display_text if display_text is not None else cmd.strip()
+        self.status_bar.showMessage(f"已加入发送队列: {text}", 2500)
 
     def _send_balance_pid_params(self):
         try:
@@ -527,8 +559,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         cmd = f"bp {kp:g} {ki:g} {kd:g}\n"
-        self.worker.send_text(cmd)
-        self.status_bar.showMessage(f"已加入发送队列: {cmd.strip()}", 2500)
+        self._send_command(cmd)
 
     def _send_angle_pid_params(self):
         try:
@@ -538,8 +569,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         cmd = f"yp {kp:g} {ki:g} {kd:g}\n"
-        self.worker.send_text(cmd)
-        self.status_bar.showMessage(f"已加入发送队列: {cmd.strip()}", 2500)
+        self._send_command(cmd)
 
     def _send_speed_pid_params(self):
         try:
@@ -549,16 +579,20 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         cmd = f"sp {kp:g} {ki:g} {kd:g}\n"
-        self.worker.send_text(cmd)
-        self.status_bar.showMessage(f"已加入发送队列: {cmd.strip()}", 2500)
+        self._send_command(cmd)
 
     def _on_command_sent(self, text):
         self.status_bar.showMessage(f"已发送: {text}", 2500)
 
     def _send_lt_command(self):
         cmd = "lt\n"
-        self.worker.send_text(cmd)
-        self.status_bar.showMessage("已加入发送队列: lt", 2500)
+        self._send_command(cmd, "lt")
+
+    def _on_worker_error(self, msg):
+        QtWidgets.QMessageBox.critical(self, "串口错误", msg)
+
+    def _on_worker_finished(self, count):
+        print(f"\n[串口] 已关闭，共接收 {count} 行")
 
     def _update_title(self):
         status = "自动" if self.auto_scroll else "暂停"
@@ -672,6 +706,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event):
         self._timer.stop()
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.stop()
+            self.worker.wait(2000)
         super().closeEvent(event)
 
 
@@ -713,27 +750,15 @@ def main():
 
     buffer = RingBuffer(maxlen=args.max_points)
 
-    worker = SerialWorker(args.port, args.baud)
-    worker.data_ready.connect(buffer.append)
-
-    def on_error(msg):
-        QtWidgets.QMessageBox.critical(None, "串口错误", msg)
-
-    def on_finished(count):
-        print(f"\n[串口] 已关闭，共接收 {count} 行")
-
-    worker.error_occurred.connect(on_error)
-    worker.finished.connect(on_finished)
-    worker.start()
-
-    window = MainWindow(buffer, worker, window_sec=args.window)
+    window = MainWindow(buffer, args.port, args.baud, window_sec=args.window)
     window.show()
 
     try:
         ret = app.exec()
     finally:
-        worker.stop()
-        worker.wait(2000)
+        if window.worker is not None and window.worker.isRunning():
+            window.worker.stop()
+            window.worker.wait(2000)
         print("程序已退出。")
     sys.exit(ret)
 

@@ -66,6 +66,9 @@ typedef struct {
     bool     deadzone_comp_enabled;   /* 总开关：false 时跳过全部死区逻辑 */
     bool     static_dz_enabled;       /* 静摩擦补偿分开关：false 时跳过 apply_static_deadzone */
     bool     running_dz_enabled;      /* 动摩擦补偿分开关：false 时跳过 apply_running_deadzone */
+    bool     dither_dz_enabled;       /* sigma-delta dither 模式：替代 running_dz */
+    float    left_dither_accum;       /* 左通道 sigma-delta 累加器 */
+    float    right_dither_accum;      /* 右通道 sigma-delta 累加器 */
     bool     calibration_mode;     /* true: commit 固定走静态 DZ；详见 .h */
     bool     right_forward_scale_enabled;
     bool     enabled;
@@ -184,6 +187,44 @@ static int16_t apply_deadzone_mapping(int16_t permille, int32_t dz)
 static int16_t apply_running_deadzone(int16_t permille, bool is_left)
 {
     return apply_deadzone_mapping(permille, get_running_dz_pm(permille, is_left));
+}
+
+/**
+ * Sigma-delta dither 死区处理（替代 running_dz）。
+ *   |cmd| >= running_dz：正常线性映射，累加器归零。
+ *   |cmd| <  running_dz：累加 cmd，达到 threshold 时发射 pulse 幅度脉冲。
+ *
+ *   两参数解耦：
+ *     THRESHOLD_PM — 累加器触发门槛（控制脉冲频率）
+ *     PULSE_PM    — 脉冲输出幅度（控制力矩大小）
+ *   触发后从累加器减去 threshold（非 pulse），因此：
+ *     脉冲间隔 ≈ threshold / cmd ticks
+ *     等效增益 = pulse / threshold（子死区区域的输出被放大此因子）
+ */
+static int16_t apply_dither_deadzone(int16_t permille, bool is_left, float *accum)
+{
+    int32_t dz = get_running_dz_pm(permille, is_left);
+    if (dz <= 0) {
+        return permille;
+    }
+
+    int32_t mag = (permille > 0) ? (int32_t)permille : -(int32_t)permille;
+    if (mag >= dz) {
+        *accum = 0.0f;
+        return apply_deadzone_mapping(permille, dz);
+    }
+
+    const float threshold = (float)BSP_MOTOR_DITHER_THRESHOLD_PM;
+    *accum += (float)permille;
+
+    if (*accum >= threshold) {
+        *accum -= threshold;
+        return (int16_t)BSP_MOTOR_DITHER_PULSE_PM;
+    } else if (*accum <= -threshold) {
+        *accum += threshold;
+        return (int16_t)-BSP_MOTOR_DITHER_PULSE_PM;
+    }
+    return 0;
 }
 
 /** Static 死区映射（= 静摩擦门槛，cal 模式 / 旧单门槛行为）。 */
@@ -340,6 +381,10 @@ static void commit_channel(int16_t cmd_pm, bool is_left)
             if (s_motor.static_dz_enabled) {
                 pm = apply_static_deadzone(pm, is_left);
             }
+        } else if (s_motor.dither_dz_enabled) {
+            float *accum = is_left ? &s_motor.left_dither_accum
+                                   : &s_motor.right_dither_accum;
+            pm = apply_dither_deadzone(pm, is_left, accum);
         } else if (*running_p) {
             if (s_motor.running_dz_enabled) {
                 pm = apply_running_deadzone(pm, is_left);
@@ -505,6 +550,9 @@ void bsp_motor_init(void)
     s_motor.deadzone_comp_enabled  = true;
     s_motor.static_dz_enabled      = true;
     s_motor.running_dz_enabled     = true;
+    s_motor.dither_dz_enabled      = false;
+    s_motor.left_dither_accum      = 0.0f;
+    s_motor.right_dither_accum     = 0.0f;
     s_motor.calibration_mode       = false;
     s_motor.right_forward_scale_enabled = true;
     s_motor.enabled                = false;
@@ -619,6 +667,8 @@ void bsp_motor_stop(void)
     s_motor.right_cmd_pm = 0;
     s_motor.left_actual_pwm_pm = 0;
     s_motor.right_actual_pwm_pm = 0;
+    s_motor.left_dither_accum  = 0.0f;
+    s_motor.right_dither_accum = 0.0f;
     clear_motion_state();
     set_dir_left (DIR_COAST);
     set_dir_right(DIR_COAST);
@@ -633,6 +683,8 @@ void bsp_motor_brake(void)
     s_motor.right_cmd_pm = 0;
     s_motor.left_actual_pwm_pm = 0;
     s_motor.right_actual_pwm_pm = 0;
+    s_motor.left_dither_accum  = 0.0f;
+    s_motor.right_dither_accum = 0.0f;
     clear_motion_state();
     set_dir_left (DIR_BRAKE);
     set_dir_right(DIR_BRAKE);
@@ -703,6 +755,23 @@ void bsp_motor_set_running_dz_enabled(bool enabled)
 bool bsp_motor_get_running_dz_enabled(void)
 {
     return s_motor.running_dz_enabled;
+}
+
+void bsp_motor_set_dither_dz_enabled(bool enabled)
+{
+    if (s_motor.dither_dz_enabled == enabled) {
+        return;
+    }
+    s_motor.dither_dz_enabled = enabled;
+    s_motor.left_dither_accum  = 0.0f;
+    s_motor.right_dither_accum = 0.0f;
+    commit_left (s_motor.left_cmd_pm);
+    commit_right(s_motor.right_cmd_pm);
+}
+
+bool bsp_motor_get_dither_dz_enabled(void)
+{
+    return s_motor.dither_dz_enabled;
 }
 
 void bsp_motor_set_calibration_mode(bool enabled)

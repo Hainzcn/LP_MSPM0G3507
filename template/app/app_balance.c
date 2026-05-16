@@ -37,6 +37,7 @@ typedef struct {
     float   target_rate_dps;    /* 角度环输出：角速度内环设定值 */
     float   target_tilt_deg;    /* 速度外环输出：角度环设定值 */
     int16_t cached_yaw_corr_pm; /* 航向环缓存的差分补偿，供 200 Hz 角速度环使用 */
+    float   rate_lpf_dps;       /* 角速度测量 EMA 低通（抑制振动耦合噪声） */
     float   pitch_offset_deg;
     float   pitch_lpf_deg;
     float   speed_lpf_cps;   /* 速度反馈 EMA 低通：抑制编码器量化噪声 */
@@ -271,7 +272,8 @@ void app_balance_init(void)
     s_bal.target_rate_dps    = 0.0f;
     s_bal.target_tilt_deg    = 0.0f;
     s_bal.cached_yaw_corr_pm = 0;
-    s_bal.pitch_offset_deg   = -0.0f;
+    s_bal.rate_lpf_dps       = 0.0f;
+    s_bal.pitch_offset_deg   = -0.8f;
     s_bal.speed_lpf_cps      = 0.0f;
     reset_pitch_filter();
     s_bal.pitch_sign =
@@ -307,6 +309,7 @@ void app_balance_reset(void)
     s_bal.target_rate_dps    = 0.0f;
     s_bal.target_tilt_deg    = 0.0f;
     s_bal.cached_yaw_corr_pm = 0;
+    s_bal.rate_lpf_dps       = 0.0f;
     s_bal.speed_lpf_cps      = 0.0f;
     reset_pitch_filter();
     reset_yaw_state();
@@ -434,8 +437,12 @@ static void balance_step_rate(const app_balance_attitude_t *att,
         return;
     }
 
+    /* 角速度测量低通滤波：alpha=0.5 EMA，抑制振动耦合噪声（tau≈10ms@200Hz） */
+    float raw_rate = att->pitch_rate_dps * (float)s_bal.pitch_sign;
+    s_bal.rate_lpf_dps += 0.5f * (raw_rate - s_bal.rate_lpf_dps);
+    float measured_rate = s_bal.rate_lpf_dps;
+
     /* 角速度 PD：输入 = 目标角速率 - 实测角速率，输出 = PWM permille */
-    float measured_rate = att->pitch_rate_dps * (float)s_bal.pitch_sign;
     float pwm_out = pid_step(&s_bal.rate_pid,
         s_bal.target_rate_dps,
         measured_rate,
@@ -884,6 +891,7 @@ bool app_balance_run(void)
     bsp_motor_set_calibration_mode(false);
     bsp_motor_set_static_dz_enabled(false);
     bsp_motor_set_running_dz_enabled(true);
+    bsp_motor_set_dither_dz_enabled(false);
 
     /* 主循环上电默认无运动指令（K230 通讯接入后由 MOTION_CMD 帧覆盖） */
     app_balance_motion_cmd_t cmd = { .target_speed_cps = 0, .target_yaw_pm = 0 };
