@@ -26,7 +26,8 @@
  *   ④ **速度外环（20 Hz，内环稳定后再调）**：
  *      `app_balance_set_speed_gains(Kp, Ki, 0)`：
  *         - 输出"目标俯仰角偏移"（°），钳到 ±APP_BALANCE_MAX_TILT_DEG；
- *         - 串口 `sp 2 0 0`（Kp=0.002）实时注入。
+ *         - 串口 `sp 5 0 0`（Kp=0.005，速度已归一化 /10）实时注入；
+ *           归一化后 0.1 rev/s ≈ 510，sp 5 产生 ~2.5° 倾角，安全可用。
  *
  *   ⑤ **航向环（50 Hz，最后调）**：
  *      `app_balance_set_yaw_gains(Kp, Ki, Kd)`：
@@ -111,11 +112,12 @@ extern "C" {
  * 编码器 20ms 差分窗口在低速时量化噪声严重（最小分辨率 50 cps），
  * 直通到速度外环会被放大后注入平衡内环，造成 PWM 抖动加剧。
  * 此 EMA 滤波器平滑速度测量，使速度外环带宽远低于平衡内环：
- *   100 Hz × α=0.05 → 时间常数 200ms → 带宽 ~0.8 Hz（内环 ~15 Hz 的 1/20）。
+ *   20 Hz × α=0.15 → 时间常数 ~280ms → 带宽 ~0.6 Hz（内环 ~12 Hz 的 1/20）。
+ *   带宽公式（20 Hz 下）：α = dt/(dt+τ)，dt=0.05s；α=0.15 → τ=283ms → BW≈0.56Hz。
  * 调大 α → 外环响应更快但噪声耦合更强；调小 → 更平滑但漂移修正更慢。
  */
 #ifndef APP_BALANCE_SPEED_LPF_ALPHA
-#define APP_BALANCE_SPEED_LPF_ALPHA             (0.05f)
+#define APP_BALANCE_SPEED_LPF_ALPHA             (0.15f)   /* 20 Hz 下 ~0.8 Hz 带宽；原 0.5 带宽 3.2 Hz 过快导致速度环与平衡环耦合振荡 */
 #endif
 
 /** 角度环输出"目标角速率"绝对值上限（°/s），防止角度环输出过大 */
@@ -139,9 +141,11 @@ extern "C" {
 #define APP_BALANCE_PITCH_LPF_ALPHA             (1.0f)
 #endif
 
-/** 俯仰角软件极性翻转：当前装车 MS901M 前后方向与车体坐标相反，默认启用。 */
+/** 俯仰角软件极性翻转：已通过 bsp_motor_set_invert(true,true) 修正电机极性，
+ *  pitch_sign 无需再做补偿翻转，默认 0（不翻转）。
+ *  若日后移除 motor invert（改为硬件接线修正），需将此宏改回 1。 */
 #ifndef APP_BALANCE_PITCH_INVERT
-#define APP_BALANCE_PITCH_INVERT                (1)
+#define APP_BALANCE_PITCH_INVERT                (0)
 #endif
 
 /**
@@ -158,6 +162,41 @@ extern "C" {
  */
 #ifndef APP_BALANCE_YAW_INVERT
 #define APP_BALANCE_YAW_INVERT                  (1)
+#endif
+
+/**
+ * 速度反馈极性翻转：当编码器"前进方向"与平衡环"正PWM方向"相反时置 1。
+ *
+ * 判别方法（不启用速度环，仅观察心跳 v= 字段）：
+ *   - 使小车在地面以正常平衡状态漂移（平衡环正常驱动，轮子向前）；
+ *   - 若心跳日志 v= 为负值 → 编码器方向倒置，设 1；
+ *   - 若 v= 为正值 → 方向正确，设 0（默认）。
+ * 也可运行时串口 `si0` / `si1` 切换，效果等同。
+ */
+#ifndef APP_BALANCE_SPEED_INVERT
+#define APP_BALANCE_SPEED_INVERT                (0)
+#endif
+
+/**
+ * 速度反馈量纲缩放因子。
+ *
+ * 本系统编码器分辨率极高（左轮 68000 cnt/rev，右轮 34000 cnt/rev），
+ * 典型平衡漂移速度（~0.1 rev/s）即对应 avg_cps ≈ 5100。
+ * 若直接将原始 cps 送入速度 PID：
+ *   - Kp = 0.001（sp 1）时 tilt = 5.1°，立刻接近 ±10° 饱和上限，
+ *     导致极限环振荡——这正是"sp 后立即大幅抖动"的根因。
+ *
+ * 此因子将 avg_cps 除以该值后再进 PID：
+ *   - SCALE=10 → 5100 cps → 510（归一化 cps）
+ *   - sp 1（Kp=0.001）× 510 = 0.51°，从极小扰动开始调试，安全
+ *   - sp 5（Kp=0.005）× 510 = 2.55°，中等制动
+ *   - sp 20（Kp=0.02） × 510 = 10.2°，接近最大倾角（饱和）
+ *
+ * target_speed_cps（K230 运动指令）单位同步归一化：
+ *   K230 发送 target = 500 ≡ 5000 raw cps ≡ 约 0.15 rev/s 向前。
+ */
+#ifndef APP_BALANCE_SPEED_CPS_SCALE
+#define APP_BALANCE_SPEED_CPS_SCALE             (10)
 #endif
 
 /** Yaw 角度环开关：直行时闭环锁定航向，抑制原地偏航。 */
@@ -264,6 +303,20 @@ void app_balance_set_yaw_inverted(bool inverted);
 
 /** @return true = 当前已启用 Yaw 轴软件翻转。 */
 bool app_balance_get_yaw_inverted(void);
+
+/**
+ * @brief 设置速度反馈极性翻转。
+ *
+ * 当编码器"前进方向"（avg_cps 增大的方向）与平衡环"正PWM前进方向"相反时，
+ * 速度环为正反馈，任何 Kp 都会立即发散。启用后翻转 avg_cps 符号使其变为负反馈。
+ * 修改后自动 reset 速度环状态。
+ *
+ * 等效串口命令：`si0`（正常）/ `si1`（翻转）。
+ */
+void app_balance_set_speed_inverted(bool inverted);
+
+/** @return true = 当前已启用速度反馈软件翻转。 */
+bool app_balance_get_speed_inverted(void);
 
 /** 设置角度环增益（输入：tilt 误差 deg；输出：目标角速率 °/s）。 */
 void app_balance_set_balance_gains(float kp, float ki, float kd);

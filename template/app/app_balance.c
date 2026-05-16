@@ -43,6 +43,7 @@ typedef struct {
     float   speed_lpf_cps;   /* 速度反馈 EMA 低通：抑制编码器量化噪声 */
     int8_t  pitch_sign;      /* +1 正常，-1 传感器前后反装时软件翻转 */
     int8_t  yaw_sign;        /* +1 正常，-1 gz_dps/yaw_deg 符号翻转 */
+    int8_t  speed_sign;      /* +1 正常，-1 编码器方向与平衡环正向相反时翻转 */
     bool    pitch_lpf_valid;
     float   yaw_kp;          /* 转向开环系数 */
     float   yaw_target_deg;     /* [源 0] EKF 模式：锁定目标航向（°） */
@@ -273,7 +274,7 @@ void app_balance_init(void)
     s_bal.target_tilt_deg    = 0.0f;
     s_bal.cached_yaw_corr_pm = 0;
     s_bal.rate_lpf_dps       = 0.0f;
-    s_bal.pitch_offset_deg   = -0.8f;
+    s_bal.pitch_offset_deg   = 0.8f;
     s_bal.speed_lpf_cps      = 0.0f;
     reset_pitch_filter();
     s_bal.pitch_sign =
@@ -284,6 +285,12 @@ void app_balance_init(void)
 #endif
     s_bal.yaw_sign =
 #if APP_BALANCE_YAW_INVERT
+        -1;
+#else
+        1;
+#endif
+    s_bal.speed_sign =
+#if APP_BALANCE_SPEED_INVERT
         -1;
 #else
         1;
@@ -342,6 +349,19 @@ bool app_balance_get_yaw_inverted(void)
     return (s_bal.yaw_sign < 0);
 }
 
+void app_balance_set_speed_inverted(bool inverted)
+{
+    s_bal.speed_sign = inverted ? (int8_t)-1 : (int8_t)1;
+    pid_reset(&s_bal.speed_pid);
+    s_bal.speed_lpf_cps   = 0.0f;
+    s_bal.target_tilt_deg = 0.0f;
+}
+
+bool app_balance_get_speed_inverted(void)
+{
+    return (s_bal.speed_sign < 0);
+}
+
 void app_balance_set_balance_gains(float kp, float ki, float kd)
 {
     pid_set_gains(&s_bal.angle_pid, kp, ki, kd);
@@ -376,13 +396,25 @@ static void balance_step_speed(const app_balance_motion_cmd_t *cmd)
 {
     bsp_motor_feedback_t fb;
     bsp_motor_get_feedback(&fb);
-    int32_t avg_cps = (fb.left_speed_cps + fb.right_speed_cps) / 2;
+    /* speed_sign：+1 = 编码器正向与平衡环正向一致；-1 = 方向相反（需翻转）。
+     * 可用串口 si0/si1 在线切换，或修改 APP_BALANCE_SPEED_INVERT 宏重编译。
+     * 诊断方法：不开速度环，看心跳 v= 字段；小车漂移时 v 应与漂移方向同号。
+     *
+     * 量纲归一化：除以 APP_BALANCE_SPEED_CPS_SCALE（默认 10）。
+     * 原始 avg_cps 在典型漂移速度（0.1 rev/s）下约为 5100，若直接用于 PID，
+     * sp 1（Kp=0.001）即产生 5.1° 倾角指令，立即触发饱和极限环。
+     * 归一化后 → 510，sp 1 对应 0.51°，从安全值开始调试。
+     * target_speed_cps 同步归一化，保持误差量纲一致。 */
+    int32_t avg_cps_raw = ((fb.left_speed_cps + fb.right_speed_cps) / 2)
+                          * (int32_t)s_bal.speed_sign;
+    float norm_cps = (float)avg_cps_raw / (float)APP_BALANCE_SPEED_CPS_SCALE;
 
     float spd_alpha = APP_BALANCE_SPEED_LPF_ALPHA;
-    s_bal.speed_lpf_cps += spd_alpha * ((float)avg_cps - s_bal.speed_lpf_cps);
+    s_bal.speed_lpf_cps += spd_alpha * (norm_cps - s_bal.speed_lpf_cps);
 
+    float target_norm = (float)cmd->target_speed_cps / (float)APP_BALANCE_SPEED_CPS_SCALE;
     s_bal.target_tilt_deg = pid_step(&s_bal.speed_pid,
-        (float)cmd->target_speed_cps,
+        target_norm,
         s_bal.speed_lpf_cps,
         s_dt_speed_sec);
 
@@ -625,9 +657,12 @@ static void print_pid_status(void)
 static void print_pid_help(void)
 {
     (void)printf("[pid] UART commands: rp/bp/sp/yp <kp_x1000> <ki_x1000> <kd_x1000>, "
-                 "yi0/yi1, pid?, pid0, lt, lt0, t/test\r\n");
+                 "yi0/yi1, si0/si1, pid?, pid0, lt, lt0, t/test\r\n");
     (void)printf("[pid] rp=rate(200Hz) bp=angle(100Hz) sp=speed(20Hz) yp=yaw(50Hz)\r\n");
-    (void)printf("[pid] example: rp 1000 0 0 ; bp 5000 0 0 ; sp 2 0 0 ; yp 500 0 100\r\n");
+    (void)printf("[pid] yi0/yi1=yaw_invert  si0/si1=speed_invert(si?=query+v_meas)\r\n");
+    (void)printf("[pid] example: rp 1800 0 0 ; bp 35000 2000 0 ; sp 5 0 0 ; yp 8000 0 0\r\n");
+    (void)printf("[pid] sp note: speed fb is normalized by /10 (SCALE=10); "
+                 "sp 5 at 0.1rev/s drift -> ~2.5deg tilt cmd\r\n");
 }
 
 static void send_lt_header(void)
@@ -798,6 +833,24 @@ static bool handle_pid_command(const char *cmd)
         return true;
     }
 
+    /* si? / si0 / si1：速度反馈极性翻转查询 / 复位 / 启用。
+     * 诊断：先发 pid0 把速度环增益清零，使小车漂移后看心跳 v= 值符号：
+     *   v= 正值时向前漂移 → 方向正确 (si0)；v= 负值 → 需要翻转 (si1)。 */
+    if ((cmd[0] == 's') && (cmd[1] == 'i') &&
+        ((cmd[2] == '\0') || (cmd[2] == '?'))) {
+        (void)printf("[speed] invert=%u (v_meas=%ldcps)\r\n",
+                     app_balance_get_speed_inverted() ? 1u : 0u,
+                     (long)s_bal.diag.speed_meas_cps);
+        return true;
+    }
+    if ((cmd[0] == 's') && (cmd[1] == 'i') &&
+        ((cmd[2] == '0') || (cmd[2] == '1')) && (cmd[3] == '\0')) {
+        app_balance_set_speed_inverted(cmd[2] == '1');
+        (void)printf("[speed] invert=%u\r\n",
+                     app_balance_get_speed_inverted() ? 1u : 0u);
+        return true;
+    }
+
     if ((cmd[0] == 'h') && (cmd[1] == '\0')) {
         print_pid_help();
         return true;
@@ -885,12 +938,24 @@ bool app_balance_run(void)
     uint32_t last_enc_irq  = bsp_motor_get_enc_irq_count();
     ms901m_snapshot_t snap = { 0 };
 
-    /* 平衡车死区策略：禁用静摩擦 kick，仅用 running DZ 无条件映射。
-     * 倒立摆物理特性保证：电机不响应 → 倾角增大 → PID 输出自然增大 → 超越静摩擦。
-     * 无需状态机检测"是否已启动"，避免方向翻转时 kick 脉冲引发机械振颤。 */
+    /* 电机极性修正：TB6612 驱动信号与电机安装方向反相（正 PWM → 物理后退）。
+     * 软件 invert 等效于修正接线，使正 PWM = 物理前进 = 编码器增大，
+     * 保证三者（PWM / 物理方向 / 编码器）符号一致，速度环可正常工作。
+     * 对应地：pitch_sign 改回 +1（见 APP_BALANCE_PITCH_INVERT=0），
+     * 数学等价于原 pitch_sign=-1+无 invert，平衡行为不变。 */
+    bsp_motor_set_invert(true, true);
+
+    /* 平衡车死区策略：完全禁用死区补偿重映射。
+     *
+     * running_dz 重映射在零点附近产生符号翻转跳变（±40 permille 瞬变），
+     * 在 200Hz 内环下表现为持续颤动。对倒立摆而言此补偿弊大于利：
+     *   - 小命令无效 → 倾角增大 → PID 输出增大 → 自然超越物理死区（积分效应）
+     *   - 角速度内环加小 Ki 可进一步消除稳态死区导致的残余误差
+     * 禁用后电机在极低命令时可能有短暂不响应，但平衡环自修复。 */
+    bsp_motor_set_deadzone_comp_enabled(false);
     bsp_motor_set_calibration_mode(false);
     bsp_motor_set_static_dz_enabled(false);
-    bsp_motor_set_running_dz_enabled(true);
+    bsp_motor_set_running_dz_enabled(false);
     bsp_motor_set_dither_dz_enabled(false);
 
     /* 主循环上电默认无运动指令（K230 通讯接入后由 MOTION_CMD 帧覆盖） */

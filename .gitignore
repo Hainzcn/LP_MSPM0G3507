@@ -18,3 +18,5 @@ syscfg.bat
 .clangd
 eide.yml
 /.*
+/docs/chore
+/tools/motor_calib/result
