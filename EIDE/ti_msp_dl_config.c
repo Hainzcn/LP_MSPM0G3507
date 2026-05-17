@@ -336,8 +336,6 @@ SYSCONFIG_WEAK void SYSCFG_DL_UART_K230_init(void)
 
     /* Configure DMA Receive Event */
     DL_UART_Main_enableDMAReceiveEvent(UART_K230_INST, DL_UART_DMA_INTERRUPT_RX);
-    /* Configure DMA Transmit Event */
-    DL_UART_Main_enableDMATransmitEvent(UART_K230_INST);
     /* Configure FIFOs */
     DL_UART_Main_enableFIFOs(UART_K230_INST);
     DL_UART_Main_setRXFIFOThreshold(UART_K230_INST, DL_UART_RX_FIFO_LEVEL_1_2_FULL);
@@ -369,7 +367,7 @@ static const DL_DMA_Config gDMA_CH0Config = {
     .srcIncrement   = DL_DMA_ADDR_UNCHANGED,
     .destWidth      = DL_DMA_WIDTH_WORD,
     .srcWidth       = DL_DMA_WIDTH_WORD,
-    .trigger        = UART_K230_INST_DMA_TRIGGER_0,
+    .trigger        = UART_K230_INST_DMA_TRIGGER,
     .triggerType    = DL_DMA_TRIGGER_TYPE_EXTERNAL,
 };
 
@@ -377,24 +375,8 @@ SYSCONFIG_WEAK void SYSCFG_DL_DMA_CH0_init(void)
 {
     DL_DMA_initChannel(DMA, DMA_CH0_CHAN_ID , (DL_DMA_Config *) &gDMA_CH0Config);
 }
-static const DL_DMA_Config gDMA_CH1Config = {
-    .transferMode   = DL_DMA_SINGLE_TRANSFER_MODE,
-    .extendedMode   = DL_DMA_NORMAL_MODE,
-    .destIncrement  = DL_DMA_ADDR_UNCHANGED,
-    .srcIncrement   = DL_DMA_ADDR_UNCHANGED,
-    .destWidth      = DL_DMA_WIDTH_WORD,
-    .srcWidth       = DL_DMA_WIDTH_WORD,
-    .trigger        = UART_K230_INST_DMA_TRIGGER_1,
-    .triggerType    = DL_DMA_TRIGGER_TYPE_EXTERNAL,
-};
-
-SYSCONFIG_WEAK void SYSCFG_DL_DMA_CH1_init(void)
-{
-    DL_DMA_initChannel(DMA, DMA_CH1_CHAN_ID , (DL_DMA_Config *) &gDMA_CH1Config);
-}
 SYSCONFIG_WEAK void SYSCFG_DL_DMA_init(void){
     SYSCFG_DL_DMA_CH0_init();
-    SYSCFG_DL_DMA_CH1_init();
 }
 
 

@@ -18,12 +18,14 @@
 #include "bsp_log_uart.h"
 #include "bsp_motor.h"
 #include "bsp_systick.h"
+#include "k230_protocol.h"
 #include "ms901m.h"
 #include "pid.h"
 #include "ti_msp_dl_config.h"
 
 #include <stdio.h>
 #include <stddef.h>
+#include <string.h>
 
 /* -------------------------------------------------------------------------- */
 /* 内部状态                                                                    */
@@ -931,6 +933,117 @@ static const char *safety_state_to_str(app_safety_state_t s)
     }
 }
 
+/* ========================================================================== */
+/* K230 通讯（Stage 4 IMU TX 一分二方案）                                      */
+/* ========================================================================== */
+
+#define K230_HEARTBEAT_TIMEOUT_MS   500u
+#define K230_RX_DRAIN_CHUNK         64u
+
+static k230_parser_t s_k230_parser;
+static uint32_t      s_k230_last_rx_ms = 0u;
+static bool          s_k230_online     = false;
+
+static void k230_comm_init(void)
+{
+    k230_parser_init(&s_k230_parser);
+    s_k230_last_rx_ms = bsp_systick_get_ms();
+    s_k230_online     = false;
+}
+
+/** 从 K230 UART RX 环缓取字节 → 喂帧解析器 → 分发已完成帧。 */
+static void k230_drain_and_dispatch(app_balance_motion_cmd_t *cmd,
+                                    uint32_t now_ms)
+{
+    uint8_t buf[K230_RX_DRAIN_CHUNK];
+    size_t got = bsp_k230_uart_rx_pop_bulk(buf, sizeof(buf));
+    for (size_t i = 0u; i < got; ++i) {
+        if (!k230_parser_feed(&s_k230_parser, buf[i])) {
+            continue;
+        }
+        s_k230_last_rx_ms = now_ms;
+        s_k230_online     = true;
+
+        switch (s_k230_parser.cmd) {
+        case K230_CMD_MOTION_CMD:
+            if (s_k230_parser.len == sizeof(k230_motion_cmd_t)) {
+                k230_motion_cmd_t mc;
+                memcpy(&mc, s_k230_parser.payload, sizeof(mc));
+                cmd->target_speed_cps = (int32_t)mc.target_v;
+                cmd->target_yaw_pm    = (int16_t)mc.target_omega;
+            }
+            break;
+
+        case K230_CMD_PID_INJECT:
+            if (s_k230_parser.len == sizeof(k230_pid_inject_t)) {
+                k230_pid_inject_t pi;
+                memcpy(&pi, s_k230_parser.payload, sizeof(pi));
+                switch (pi.pid_id) {
+                case 0u: app_balance_set_balance_gains(pi.kp, pi.ki, pi.kd); break;
+                case 1u: app_balance_set_rate_gains(pi.kp, pi.ki, pi.kd);    break;
+                case 2u: app_balance_set_speed_gains(pi.kp, pi.ki, pi.kd);   break;
+                case 3u: app_balance_set_yaw_gains(pi.kp, pi.ki, pi.kd);     break;
+                default: break;
+                }
+            }
+            break;
+
+        case K230_CMD_HEARTBEAT_K230:
+            break;
+
+        default:
+            break;
+        }
+    }
+}
+
+/** 心跳超时检查：K230 离线 → 运动指令归零，报警。 */
+static void k230_check_timeout(app_balance_motion_cmd_t *cmd,
+                                uint32_t now_ms)
+{
+    if ((now_ms - s_k230_last_rx_ms) > K230_HEARTBEAT_TIMEOUT_MS) {
+        if (s_k230_online) {
+            s_k230_online = false;
+            (void)printf("[k230] heartbeat timeout -> zero cmd\r\n");
+        }
+        cmd->target_speed_cps = 0;
+        cmd->target_yaw_pm    = 0;
+    }
+}
+
+/** 20 Hz：发送 VEHICLE_STATUS 帧给 K230。 */
+static void k230_send_vehicle_status(void)
+{
+    bsp_motor_feedback_t fb;
+    bsp_motor_get_feedback(&fb);
+
+    k230_vehicle_status_t vs;
+    vs.avg_cps      = (fb.left_speed_cps + fb.right_speed_cps) / 2;
+    vs.safety_state = (uint8_t)app_safety_get_state();
+    vs.bat_mv       = (uint16_t)bsp_battery_get_mv();
+
+    uint8_t frame[K230_PROTO_MAX_FRAME];
+    size_t len = k230_encode_frame(K230_CMD_VEHICLE_STATUS,
+        &vs, (uint8_t)sizeof(vs), frame, sizeof(frame));
+    if (len > 0u) {
+        bsp_k230_uart_write_blocking(frame, len);
+    }
+}
+
+/** 1 Hz：发送 HEARTBEAT_MCU 帧给 K230。 */
+static void k230_send_heartbeat(uint32_t now_ms)
+{
+    k230_heartbeat_t hb;
+    hb.uptime_ms = now_ms;
+
+    uint8_t frame[K230_PROTO_MAX_FRAME];
+    size_t len = k230_encode_frame(K230_CMD_HEARTBEAT_MCU,
+        &hb, (uint8_t)sizeof(hb), frame, sizeof(frame));
+    if (len > 0u) {
+        bsp_k230_uart_write_blocking(frame, len);
+    }
+}
+
 bool app_balance_run(void)
 {
     uint32_t tick_count    = 0u;
@@ -961,6 +1074,8 @@ bool app_balance_run(void)
     /* 主循环上电默认无运动指令（K230 通讯接入后由 MOTION_CMD 帧覆盖） */
     app_balance_motion_cmd_t cmd = { .target_speed_cps = 0, .target_yaw_pm = 0 };
 
+    k230_comm_init();
+
     print_pid_help();
     print_pid_status();
 
@@ -975,12 +1090,16 @@ bool app_balance_run(void)
             return true;
         }
 
-        /* ---- 1 kHz：IMU drain + 电机 1 ms 节拍 ----------------------------- */
-        uint8_t buf[APP_BAL_IMU_DRAIN_CHUNK];
-        size_t  got = bsp_imu_uart_rx_pop_bulk(buf, sizeof(buf));
-        if (got > 0u) {
-            ms901m_feed_bytes(buf, got);
+        /* ---- 1 kHz：IMU drain + K230 drain + 电机 1 ms 节拍 ----------------- */
+        {
+            uint8_t imu_buf[APP_BAL_IMU_DRAIN_CHUNK];
+            size_t  got = bsp_imu_uart_rx_pop_bulk(imu_buf, sizeof(imu_buf));
+            if (got > 0u) {
+                ms901m_feed_bytes(imu_buf, got);
+            }
         }
+        k230_drain_and_dispatch(&cmd, tick_count);
+        k230_check_timeout(&cmd, tick_count);
         bsp_motor_update();
 
         /* ---- 200 Hz：四级级联控制 + 电机输出 ------------------------------ */
@@ -998,6 +1117,7 @@ bool app_balance_run(void)
             /* 20 Hz 速度外环（每 50 ticks）—— 最先跑，更新 target_tilt_deg */
             if ((tick_count % APP_BAL_PHASE_SPEED_TICKS) == 0u) {
                 balance_step_speed(&cmd);
+                k230_send_vehicle_status();
             }
 
             /* 100 Hz 角度环（每 10 ticks）—— 更新 target_rate_dps */
@@ -1037,8 +1157,10 @@ bool app_balance_run(void)
             }
         }
 
-        /* ---- 1 Hz：XDS-UART 调试日志 -------------------------------------- */
+        /* ---- 1 Hz：XDS-UART 调试日志 + K230 心跳 TX ------------------------- */
         if (!s_bal.lt_stream_enabled && ((tick_count % APP_BAL_PHASE_LOG_TICKS) == 0u)) {
+            k230_send_heartbeat(tick_count);
+
             uint32_t total_rx = bsp_k230_uart_total_rx();
             uint32_t delta_rx = total_rx - last_total_rx;
             last_total_rx = total_rx;
@@ -1059,6 +1181,7 @@ bool app_balance_run(void)
             (void)printf("[hb] t=%lus state=%s pitch=%c%ld.%02lu inv=%u tilt*=%c%ld.%02lu "
                          "pwm=%c%ld.%02lu yawErr=%c%ld.%02lu yawCorr=%d L=%ld R=%ld v=%ldcps "
                          "batt=%lumV ms901m_g=%lu/b=%lu log_ovr=%lu k230_rx=%lub/s "
+                         "k230_g=%lu/b=%lu k230_%s "
                          "encL=%ld encR=%ld encISR=%lu/s%s\n",
                 (unsigned long)(tick_count / 1000u),
                 safety_state_to_str(app_safety_get_state()),
@@ -1075,6 +1198,9 @@ bool app_balance_run(void)
                 (unsigned long)ms901m_bad_frames(),
                 (unsigned long)log_ovr,
                 (unsigned long)delta_rx,
+                (unsigned long)s_k230_parser.good_frames,
+                (unsigned long)s_k230_parser.bad_frames,
+                s_k230_online ? "ON" : "OFF",
                 (long)left_cnt, (long)right_cnt,
                 (unsigned long)delta_enc_irq,
                 encQuenched ? " [ISR_QUENCH!]" : "");

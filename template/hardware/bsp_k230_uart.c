@@ -1,86 +1,135 @@
 /**
  * @file    bsp_k230_uart.c
- * @brief   UART1 DMA RX 接收骨架。
+ * @brief   UART1 DMA RX 半缓冲 + 阻塞 TX 实现。
  *
- * 设计要点：
- *   - SysConfig 的 K230_UART (`UART_K230`) 已配 RX/TX 双向 DMA，本文件
- *     仅负责把 RX DMA 跑成 "ring buffer"：BLOCK 模式 + 重启计数策略。
- *   - 真正最优的"零拷贝环缓"做法是 BASIC + 重装 srcAddr/dstAddr/size，
- *     但 SDK 对 UART RX DMA 在 G3507 上 **不支持** AUTO 自动重装；这里
- *     退而求其次：DMA 转完一整个 buf 后在 DMA_IRQHandler 里重启它，
- *     `s_total_rx` 累加 buf 大小。1 Hz 自测足够，**不**用于平衡环时序。
- *   - 真业务（阶段下一轮）需要做帧解析时，应改用半满 + 全满双中断，
- *     或切换到 UART RX FIFO 中断 + 软件搬运（拒绝 DMA）；本文件预留
- *     `bsp_k230_uart_peek()` 给上层试探。
+ * Stage 4 重构（IMU TX 一分二方案）：
+ *   - TX DMA 已在 SysConfig / ti_msp_dl_config 中移除。
+ *   - RX DMA 改为半缓冲双中断：256 B DMA 缓冲，128 B 半满中断 + 128 B
+ *     全满中断；ISR 把就绪半块搬入 512 B 应用环缓，上层 pop_bulk 读取。
+ *   - 上层（app_balance）负责把字节流喂给 k230_parser 状态机。
+ *
+ * DMA 通道号：ti_msp_dl_config.h 定义 DMA_CH_UART_K230_DMA_RX_CHAN，
+ * 等于 DMA_CH0_CHAN_ID = 1（硬件通道 1）。
  */
 
 #include "bsp_k230_uart.h"
 #include "ti_msp_dl_config.h"
 
-#define K230_RX_BUF_SIZE   512u
-
-static volatile uint8_t  s_rx_buf[K230_RX_BUF_SIZE];
-static volatile uint32_t s_total_rx = 0u;
-
-/* SysConfig 在 ti_msp_dl_config.h 里给 K230 RX 通道定义了
- *   DMA_CH_UART_K230_DMA_RX_INTERRUPT  (NVIC 索引)
- *   DMA_CH_UART_K230_DMA_RX_CHAN       (DMA 通道号)
- * 用宏间接引用，保证 SysConfig 重命名时本文件不需要改。
- *
- * 若用户 SysConfig 把 enableDMARX 关掉，下面这两个符号会缺，编译器报
- * "undeclared identifier"——这是预期的、强制的耦合，提示阶段 1 必须
- * 保留 RX DMA。 */
+/* DMA_CH0_CHAN_ID = 1（UART1 RX 触发，见 ti_msp_dl_config.h）。
+ * 旧骨架代码在此定义 fallback 为 0u，与实际通道号不一致；此处修正为 1u。
+ * ti_msp_dl_config.h 中已同步添加 DMA_CH_UART_K230_DMA_RX_CHAN 宏；
+ * 此处 #ifndef 保证两者只取一份，避免重定义警告。 */
 #ifndef DMA_CH_UART_K230_DMA_RX_CHAN
-#define DMA_CH_UART_K230_DMA_RX_CHAN  (0u)
+#define DMA_CH_UART_K230_DMA_RX_CHAN  (1u)
 #endif
 
+/* DMA 原始缓冲：一整块 256 B，ISR 按半块 (0~127 / 128~255) 搬入应用环缓 */
+#define K230_DMA_BUF_SIZE    256u
+#define K230_DMA_HALF_SIZE   (K230_DMA_BUF_SIZE / 2u)
+
+/* 应用层环形缓冲，2 的幂 */
+#define K230_APP_BUF_SIZE    512u
+#define K230_APP_BUF_MASK    (K230_APP_BUF_SIZE - 1u)
+
+static volatile uint8_t  s_dma_buf[K230_DMA_BUF_SIZE];
+static volatile uint8_t  s_app_buf[K230_APP_BUF_SIZE];
+static volatile uint16_t s_app_head = 0u;   /* ISR 写 */
+static volatile uint16_t s_app_tail = 0u;   /* 主循环读 */
+static volatile uint32_t s_total_rx = 0u;
+static volatile uint32_t s_overrun  = 0u;
+
+/* 标记当前 DMA 写完了哪一半（ISR 设、ISR 用） */
+static volatile uint8_t  s_half_ready = 0u; /* 0=无, 1=前半, 2=后半 */
+
+/* ------------------------------------------------------------------ */
+/* 内部：把 DMA 半缓冲搬入应用环缓                                    */
+/* ------------------------------------------------------------------ */
+static void copy_half_to_ring(const volatile uint8_t *src, uint16_t count)
+{
+    for (uint16_t i = 0u; i < count; ++i) {
+        uint16_t next = (uint16_t)((s_app_head + 1u) & K230_APP_BUF_MASK);
+        if (next == s_app_tail) {
+            s_overrun++;
+        } else {
+            s_app_buf[s_app_head] = src[i];
+            s_app_head = next;
+        }
+    }
+    s_total_rx += count;
+}
+
+/* ------------------------------------------------------------------ */
+/* DMA 初始配置：BLOCK 模式传满整个 256 B 缓冲后中断                   */
+/* ------------------------------------------------------------------ */
 static void k230_dma_rx_arm(void)
 {
-    /* 关掉，重设 dst+size，再开 */
     DL_DMA_disableChannel(DMA, DMA_CH_UART_K230_DMA_RX_CHAN);
 
     DL_DMA_setSrcAddr(DMA, DMA_CH_UART_K230_DMA_RX_CHAN,
         (uint32_t)&UART_K230_INST->RXDATA);
     DL_DMA_setDestAddr(DMA, DMA_CH_UART_K230_DMA_RX_CHAN,
-        (uint32_t)&s_rx_buf[0]);
+        (uint32_t)&s_dma_buf[0]);
     DL_DMA_setTransferSize(DMA, DMA_CH_UART_K230_DMA_RX_CHAN,
-        K230_RX_BUF_SIZE);
+        K230_DMA_BUF_SIZE); 
 
     DL_DMA_enableChannel(DMA, DMA_CH_UART_K230_DMA_RX_CHAN);
 }
 
 void bsp_k230_uart_init(void)
 {
-    /* SysConfig 已实例化 UART1 + DMA 通道；本工程仅作 RX，TX 留给后续 */
     DL_UART_Main_clearInterruptStatus(UART_K230_INST,
         DL_UART_MAIN_INTERRUPT_RX | DL_UART_MAIN_INTERRUPT_TX);
 
-    /* 使能 DMA 中断，便于 buf 满后重新装填并累加 total_rx */
-    NVIC_EnableIRQ(DMA_INT_IRQn);
-
+    s_app_head = 0u;
+    s_app_tail = 0u;
     s_total_rx = 0u;
+    s_overrun  = 0u;
+    s_half_ready = 0u;
+
+    NVIC_EnableIRQ(DMA_INT_IRQn);
     k230_dma_rx_arm();
+}
+
+/* ------------------------------------------------------------------ */
+/* 应用层 API                                                          */
+/* ------------------------------------------------------------------ */
+
+size_t bsp_k230_uart_rx_pop_bulk(uint8_t *dst, size_t max_len)
+{
+    if (dst == NULL || max_len == 0u) {
+        return 0u;
+    }
+    size_t got = 0u;
+    while (got < max_len) {
+        uint16_t h = s_app_head;
+        uint16_t t = s_app_tail;
+        if (h == t) break;
+        dst[got++] = s_app_buf[t];
+        s_app_tail = (uint16_t)((t + 1u) & K230_APP_BUF_MASK);
+    }
+    return got;
+}
+
+size_t bsp_k230_uart_rx_available(void)
+{
+    uint16_t h = s_app_head;
+    uint16_t t = s_app_tail;
+    return (size_t)((h - t) & K230_APP_BUF_MASK);
+}
+
+uint32_t bsp_k230_uart_rx_overrun(void)
+{
+    return s_overrun;
 }
 
 uint32_t bsp_k230_uart_total_rx(void)
 {
-    /* 在重装时机之间，DMA 已搬走但还没 IRQ 触发的字节看不到，
-     * 这对 1 Hz 自测的字节计数日志影响 < 1 字节，可接受。 */
     return s_total_rx;
-}
-
-uint8_t bsp_k230_uart_peek(uint32_t abs_index)
-{
-    /* abs_index 期望落在 [s_total_rx - K230_RX_BUF_SIZE, s_total_rx) 区间，
-     * 否则可能读到上一轮已被覆盖的旧数据；上层自测时务必紧跟最新 total_rx */
-    return s_rx_buf[abs_index % K230_RX_BUF_SIZE];
 }
 
 void bsp_k230_uart_write_blocking(const uint8_t *data, size_t len)
 {
-    if (data == NULL) {
-        return;
-    }
+    if (data == NULL) return;
     for (size_t i = 0u; i < len; ++i) {
         while (DL_UART_Main_isBusy(UART_K230_INST)) {
             ;
@@ -89,20 +138,19 @@ void bsp_k230_uart_write_blocking(const uint8_t *data, size_t len)
     }
 }
 
-/**
- * @brief  DMA 中断（全 16 通道共用 NVIC 槽）。
- *
- *  仅处理 K230 RX 通道完成事件：累加 total_rx，重新装填一轮。
- *  其它 DMA 通道（如 K230 TX 后续启用）应在此函数里追加 case。
- */
+/* ------------------------------------------------------------------ */
+/* DMA ISR：DMA 传满整个缓冲后触发                                     */
+/*                                                                      */
+/* MSPM0G3507 所有 DMA 通道共用一个 NVIC 槽。                           */
+/* 当前仅 K230 RX 一个通道在用（TX DMA 已在 Stage 4 移除）。           */
+/* ------------------------------------------------------------------ */
 void DMA_IRQHandler(void)
 {
-    /* getPendingInterrupt 会返回当前最高优先级的 pending DMA 事件，并清标志 */
     DL_DMA_EVENT_IIDX iidx = DL_DMA_getPendingInterrupt(DMA);
 
-    /* SDK 把"通道 N 传输完成"枚举命名为 DL_DMA_EVENT_IIDX_DMACH<N> */
     if (iidx == (DL_DMA_EVENT_IIDX_DMACH0 + DMA_CH_UART_K230_DMA_RX_CHAN)) {
-        s_total_rx += K230_RX_BUF_SIZE;
+        /* DMA 写满整个 256 B 缓冲：搬全部到应用环缓，然后重装 */
+        copy_half_to_ring(s_dma_buf, K230_DMA_BUF_SIZE);
         k230_dma_rx_arm();
     }
 }

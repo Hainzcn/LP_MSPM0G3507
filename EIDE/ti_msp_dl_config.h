@@ -182,11 +182,8 @@ extern "C" {
 
 
 /* Defines for DMA_CH0 */
-#define DMA_CH0_CHAN_ID                                                      (1)
-#define UART_K230_INST_DMA_TRIGGER_0                         (DMA_UART1_RX_TRIG)
-/* Defines for DMA_CH1 */
-#define DMA_CH1_CHAN_ID                                                      (0)
-#define UART_K230_INST_DMA_TRIGGER_1                         (DMA_UART1_TX_TRIG)
+#define DMA_CH0_CHAN_ID                                                      (0)
+#define UART_K230_INST_DMA_TRIGGER                           (DMA_UART1_RX_TRIG)
 
 
 /* clang-format on */

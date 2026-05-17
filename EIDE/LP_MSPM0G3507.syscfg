@@ -177,12 +177,17 @@ LOG_UART.peripheral.txPin.$assign          = "PA10";
 LOG_UART.peripheral.rxPin.$assign          = "PA11";
 
 /* ========================================================================== */
-/* UART1 —— K230 通讯 (DMA TX/RX)                                              */
+/* UART1 —— K230 通讯 (DMA RX only)                                            */
 /*   TX = PB6, RX = PB7, 921600 8N1                                            */
 /*   注：PB6/PB7 在 MSPM0G3507 LQFP-64 上是 UART1 引脚（不是 UART3）。         */
 /*       UART3 在本器件上的合法 TX/RX 组合是 PA26/PA25 或 PB12/PA13 等，       */
 /*       与本项目的 TB6612 BIN1/BIN2 / 右编码器 B 相冲突，因此用 UART1。       */
-/*   DMA 子模块由 SDK 在 enabledDMA*Triggers != "None" 时自动实例化            */
+/*                                                                              */
+/*   Stage 4（IMU TX 一分二方案）：                                            */
+/*     MS901M TX 线 Y 分到 K230 侧独立 UART RX，K230 直接解析 200 Hz IMU 帧   */
+/*     → 主控不再需要通过 UART1 TX DMA 推送 IMU 遥测 → TX DMA 移除。          */
+/*     MCU→K230 仅发送速度/状态/心跳等低频帧（~240 B/s），阻塞写即可。        */
+/*     RX DMA 保留：接收 K230 下发的 MOTION_CMD 运动指令。                     */
 /* ========================================================================== */
 const K230_UART = UART.addInstance();
 K230_UART.$name                            = "UART_K230";
@@ -190,8 +195,6 @@ K230_UART.targetBaudRate                   = 921600;
 K230_UART.enableFIFO                       = true;
 K230_UART.enabledDMARXTriggers             = "DL_UART_DMA_INTERRUPT_RX";
 K230_UART.enableDMARX                      = true;
-K230_UART.enabledDMATXTriggers             = "DL_UART_DMA_INTERRUPT_TX";
-K230_UART.enableDMATX                      = true;
 K230_UART.peripheral.$assign               = "UART1";
 K230_UART.peripheral.txPin.$assign         = "PB6";
 K230_UART.peripheral.rxPin.$assign         = "PB7";
