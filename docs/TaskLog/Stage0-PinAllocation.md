@@ -33,7 +33,7 @@
 | **左/右编码器解码方式** | **左 = 硬件 QEI（TIMG8 + PB15/PB16，2-Pin Mode，Stage 2.3 起从 J12 迁到 BP）；右 = GPIO 双边沿中断（Stage 2.2 起升 X4 解码，PA12/PA13 都开中断）** | MSPM0G3507 仅 TIMG8 支持 SysConfig QEI 模块 |
 | TB6612 控制方式 | 2 PWM + 4 方向 + 1 STBY | 共 7 根线 |
 | TB6612 PWM 频率 | 20 kHz（建议 15~25 kHz） | 避开人耳与 IMU 通带 |
-| K230 串口波特率 | 921600 8N1，**仅 RX DMA**（Stage 4 起 TX DMA 移除，MCU→K230 阻塞写） | 占 UART1（PB6/PB7）+ 1 个 DMA 通道 |
+| K230 串口波特率 | 115200 8N1，**仅 RX DMA**（Stage 4 起 TX DMA 移除，MCU→K230 阻塞写） | 占 UART1（PB6/PB7）+ 1 个 DMA 通道 |
 | XDS-UART0 | 保留为开发期日志 | J21/J22 保持 ON |
 
 > **架构变更说明**：原计划"双路硬件 QEI"经 SDK 源码核对（[QEIMSPM0.syscfg.js](file:///A:/Program%20Files/ti/mspm0_sdk_2_10_00_04/source/ti/driverlib/.meta/qei/QEIMSPM0.syscfg.js) 第 175 行 `TIMG(8|9|10|11)` 过滤器 + [Common.js](file:///A:/Program%20Files/ti/mspm0_sdk_2_10_00_04/source/ti/driverlib/.meta/Common.js) 第 1774 行 `getTimerInstances("QEI")`）确认 **MSPM0G3507 上只有 TIMG8 支持硬件 QEI**（TIMG9/10/11 该器件不存在）。因此：
@@ -211,7 +211,7 @@
 | 外设 | **UART1**（不是 UART3，UART3 让给 IMU MS901M） |
 | 引脚 | TX = PB6，RX = PB7 |
 | 电平 | 3.3 V（K230 GPIO 也是 3.3 V，可直连，注意共地） |
-| 波特率 | 921600 8N1 |
+| 波特率 | 115200 8N1 |
 | 流控 | 无（不接 RTS/CTS） |
 | DMA | **仅 RX 占 1 个 DMA 通道**（Stage 4 起移除 TX DMA；MCU→K230 改为阻塞写，~240 B/s 占用率 < 0.03%） |
 | 帧格式 | `0xAA 0x55 \| LEN \| CMD \| PAYLOAD \| CRC16 \| 0x55 0xAA` |

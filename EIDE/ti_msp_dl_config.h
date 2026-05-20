@@ -159,9 +159,9 @@ extern "C" {
 #define GPIO_UART_K230_IOMUX_TX                                  (IOMUX_PINCM23)
 #define GPIO_UART_K230_IOMUX_RX_FUNC                   IOMUX_PINCM24_PF_UART1_RX
 #define GPIO_UART_K230_IOMUX_TX_FUNC                   IOMUX_PINCM23_PF_UART1_TX
-#define UART_K230_BAUD_RATE                                             (921600)
-#define UART_K230_IBRD_32_MHZ_921600_BAUD                                    (2)
-#define UART_K230_FBRD_32_MHZ_921600_BAUD                                   (11)
+#define UART_K230_BAUD_RATE                                             (115200)
+#define UART_K230_IBRD_32_MHZ_115200_BAUD                                   (17)
+#define UART_K230_FBRD_32_MHZ_115200_BAUD                                   (23)
 
 
 

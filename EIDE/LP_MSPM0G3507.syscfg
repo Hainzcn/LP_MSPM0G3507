@@ -178,7 +178,7 @@ LOG_UART.peripheral.rxPin.$assign          = "PA11";
 
 /* ========================================================================== */
 /* UART1 —— K230 通讯 (DMA RX only)                                            */
-/*   TX = PB6, RX = PB7, 921600 8N1                                            */
+/*   TX = PB6, RX = PB7, 115200 8N1                                            */
 /*   注：PB6/PB7 在 MSPM0G3507 LQFP-64 上是 UART1 引脚（不是 UART3）。         */
 /*       UART3 在本器件上的合法 TX/RX 组合是 PA26/PA25 或 PB12/PA13 等，       */
 /*       与本项目的 TB6612 BIN1/BIN2 / 右编码器 B 相冲突，因此用 UART1。       */
@@ -191,7 +191,7 @@ LOG_UART.peripheral.rxPin.$assign          = "PA11";
 /* ========================================================================== */
 const K230_UART = UART.addInstance();
 K230_UART.$name                            = "UART_K230";
-K230_UART.targetBaudRate                   = 921600;
+K230_UART.targetBaudRate                   = 115200;
 K230_UART.enableFIFO                       = true;
 K230_UART.enabledDMARXTriggers             = "DL_UART_DMA_INTERRUPT_RX";
 K230_UART.enableDMARX                      = true;

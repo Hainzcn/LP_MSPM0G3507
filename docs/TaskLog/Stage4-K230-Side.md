@@ -18,11 +18,11 @@ K230 需要占用 **两路独立 UART**：
 | UART 用途 | K230 引脚 | 连接目标 | 波特率 |
 |-----------|----------|---------|--------|
 | IMU 直通 | 某路 UART RX（见下） | MS901M TX 线 Y 分出来的支路 | **115200** |
-| MCU 命令 | 某路 UART TX + RX | MCU PB6 (TX→K230 RX) / MCU PB7 (RX←K230 TX) | **921600** |
+| MCU 命令 | 某路 UART TX + RX | MCU PB6 (TX→K230 RX) / MCU PB7 (RX←K230 TX) | **115200** |
 
 > CanMV K230 板载多路 UART，推荐分配：
 > - `UART(1)`：115200，接 MS901M TX Y 分线（**仅 RX 使用**）
-> - `UART(2)`：921600，接 MCU UART1（TX+RX 双向）
+> - `UART(2)`：115200，接 MCU UART1（TX+RX 双向）
 
 **电平**：MS901M / MCU / K230 全部 3.3 V，直连兼容，**严格共 GND**（一根 GND 线从 MCU GND 接到 K230 GND）。
 
@@ -329,7 +329,7 @@ from machine import UART
 
 # ---- 硬件初始化 ----
 uart_imu = UART(1, baudrate=115200, bits=8, parity=None, stop=1)   # MS901M Y分线
-uart_mcu = UART(2, baudrate=921600, bits=8, parity=None, stop=1)   # MCU UART1
+uart_mcu = UART(2, baudrate=115200, bits=8, parity=None, stop=1)   # MCU UART1
 
 imu = MS901MParser()
 mcu_parser = MCUFrameParser()
@@ -442,7 +442,7 @@ while True:
 
 ### 7.2 单步验证 MCU 命令链路（无 K230 侧主逻辑）
 
-在 PC 上用任意串口工具连接 MCU PB6（921600 8N1），应能看到：
+在 PC 上用任意串口工具连接 MCU PB6（115200 8N1），应能看到：
 - 每 50 ms 一帧 `AA 55 07 01 ...` (VEHICLE_STATUS)
 - 每 1000 ms 一帧 `AA 55 04 02 ...` (HEARTBEAT_MCU)
 

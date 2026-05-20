@@ -327,11 +327,11 @@ SYSCONFIG_WEAK void SYSCFG_DL_UART_K230_init(void)
     DL_UART_Main_init(UART_K230_INST, (DL_UART_Main_Config *) &gUART_K230Config);
     /*
      * Configure baud rate by setting oversampling and baud rate divisors.
-     *  Target baud rate: 921600
-     *  Actual baud rate: 920863.31
+     *  Target baud rate: 115200
+     *  Actual baud rate: 115211.52
      */
     DL_UART_Main_setOversampling(UART_K230_INST, DL_UART_OVERSAMPLING_RATE_16X);
-    DL_UART_Main_setBaudRateDivisor(UART_K230_INST, UART_K230_IBRD_32_MHZ_921600_BAUD, UART_K230_FBRD_32_MHZ_921600_BAUD);
+    DL_UART_Main_setBaudRateDivisor(UART_K230_INST, UART_K230_IBRD_32_MHZ_115200_BAUD, UART_K230_FBRD_32_MHZ_115200_BAUD);
 
 
     /* Configure DMA Receive Event */
