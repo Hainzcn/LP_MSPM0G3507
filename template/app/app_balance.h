@@ -320,6 +320,62 @@ extern "C" {
 #endif
 
 /* ========================================================================== */
+/* 陀螺零漂在线估计                                                             */
+/*                                                                            */
+/*  设计动机：                                                                  */
+/*    MS901M 的 gy_dps（pitch 轴）/ gz_dps（yaw 轴）是 raw 陀螺读数，含温漂、    */
+/*    安装应力等带来的 DC 偏置（典型 ±0.5°/s，温度变化时漂移更甚）。            */
+/*    平衡内环把 gy_dps 直接当 d(pitch)/dt 用，导致："静止时陀螺读 +0.3°/s →     */
+/*    内环误以为车在向前倒 → 持续输出负 PWM → 车真的歪 → 角度环看到 pitch 变 →  */
+/*    target_rate 反向 → 工作点持续偏离 pitch=0"。这就是"抖动后越来越歪"的根因。 */
+/*                                                                            */
+/*  解决方案：                                                                  */
+/*    1) 上电自校零阶段同时累加 gy/gz 平均值作为 bias 初值（已在 autozero 中）；   */
+/*    2) 运行时在 "quiet 窗口"（K230 速度命令 ≈ 0 + measured_rate ≈ 0           */
+/*       + target_rate ≈ 0 + 未在转向）下，以极慢 EMA 跟踪 gy/gz 长期均值。      */
+/*    3) balance_step_rate 用 (gy_dps - gy_bias) 作为 raw_rate；                */
+/*       yaw_angle_step source=1 用 (gz_dps - gz_bias) 做积分。                 */
+/*                                                                            */
+/*  与 EKF pitch 加速度耦合的区别：                                              */
+/*    这里只补 IMU 传感器的 DC 偏置，不能修复 EKF 在剧烈加速时 pitch_deg 的瞬时    */
+/*    漂移；后者需要单独的 "conditional integration"（前一轮分析 §3），后续补。   */
+/* ========================================================================== */
+
+/** 0 = 禁用陀螺零漂在线学习（仅用上电校零的 bias）；1 = 启用 quiet 窗口慢漂学习。 */
+#ifndef APP_BALANCE_GYRO_BIAS_LEARN_ENABLED
+#define APP_BALANCE_GYRO_BIAS_LEARN_ENABLED          (1)
+#endif
+
+/**
+ * 在线学习 EMA 系数（在 200Hz 内环每拍判定 quiet 时应用）。
+ *   α = 0.0005 → 时间常数 τ ≈ 10s @200Hz，足够慢以避免"误学"。
+ *   调大 → 收敛快但易学错；调小 → 更稳但温度变化跟不上。
+ */
+#ifndef APP_BALANCE_GYRO_BIAS_LEARN_ALPHA
+#define APP_BALANCE_GYRO_BIAS_LEARN_ALPHA            (0.0005f)
+#endif
+
+/** Quiet 判据：|measured_rate| 与 |target_rate| 都须 < 此值（°/s），意为车体角速度小且角度环未在大力调整。 */
+#ifndef APP_BALANCE_GYRO_BIAS_LEARN_RATE_LIMIT_DPS
+#define APP_BALANCE_GYRO_BIAS_LEARN_RATE_LIMIT_DPS   (5.0f)
+#endif
+
+/** Quiet 判据：|K230 target_speed_cps| 须 < 此值（即上层未要求行进）。 */
+#ifndef APP_BALANCE_GYRO_BIAS_LEARN_SPEED_LIMIT_CPS
+#define APP_BALANCE_GYRO_BIAS_LEARN_SPEED_LIMIT_CPS  (200)
+#endif
+
+/** Quiet debounce：连续满足条件多少节拍后才开始学习（防一帧扰动误学）。200Hz × 40 = 200ms。 */
+#ifndef APP_BALANCE_GYRO_BIAS_LEARN_DEBOUNCE_TICKS
+#define APP_BALANCE_GYRO_BIAS_LEARN_DEBOUNCE_TICKS   (40u)
+#endif
+
+/** 学到的 bias 绝对值上限（°/s），防止极端学错把控制器拖坏。MS901M 实际零漂典型 < 2°/s。 */
+#ifndef APP_BALANCE_GYRO_BIAS_LIMIT_DPS
+#define APP_BALANCE_GYRO_BIAS_LIMIT_DPS              (5.0f)
+#endif
+
+/* ========================================================================== */
 /* 输入结构体                                                                   */
 /* ========================================================================== */
 

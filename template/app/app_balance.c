@@ -47,6 +47,12 @@ typedef struct {
     int8_t  yaw_sign;        /* +1 正常，-1 gz_dps/yaw_deg 符号翻转 */
     int8_t  speed_sign;      /* +1 正常，-1 编码器方向与平衡环正向相反时翻转 */
     bool    pitch_lpf_valid;
+    /* 陀螺 DC 零漂在线估计（原始 IMU body frame，不含 pitch_sign / yaw_sign）。
+     * 必须 raw_gy/gz - bias，再做 sign 翻转，再喂给控制环。 */
+    float    gy_bias_dps;     /* pitch 轴陀螺零漂（°/s） */
+    float    gz_bias_dps;     /* yaw   轴陀螺零漂（°/s） */
+    uint32_t bias_still_ticks; /* 连续满足 quiet 判据的节拍计数（200Hz 内环） */
+    bool     gyro_bias_valid;  /* true = 已经过启动自校准，运行时学习才被启用 */
     float   yaw_kp;          /* 转向开环系数 */
     float   yaw_target_deg;     /* [源 0] EKF 模式：锁定目标航向（°） */
     bool    yaw_target_valid;   /* [源 0] EKF 模式：首次有效 yaw 才初始化 */
@@ -64,6 +70,14 @@ static const float s_dt_speed_sec = (float)APP_BALANCE_SPEED_PERIOD_MS / 1000.0f
 
 #define APP_BAL_CMD_BUF_LEN  48u
 #define APP_BAL_PID_SCALE    1000L
+
+/* 前向声明：陀螺零漂在线学习器（定义靠近 auto_calibrate_imu，紧接 K230 通讯段）。
+ * balance_step_rate（位于本文件中段）需在拍尾调用此函数，定义远在其后，
+ * 必须前向声明以避免严格编译器（AC6/GCC -Werror=implicit-function-declaration）报错。 */
+static void update_gyro_bias_estimator(float gy_raw_imu, float gz_raw_imu,
+                                       float target_rate, float meas_rate,
+                                       int32_t target_speed_cps,
+                                       int16_t target_yaw_pm);
 
 /* -------------------------------------------------------------------------- */
 /* 内部辅助                                                                    */
@@ -222,10 +236,15 @@ static int16_t yaw_angle_step(const app_balance_attitude_t *att,
         return 0;
     }
 
-    /* 直行：积分 gz_dps（经 yaw_sign 修正极性），PID 以"归零积分量"为目标。
+    /* 直行：积分 (gz_dps - gz_bias)（经 yaw_sign 修正极性），PID 以"归零积分量"为目标。
      * D 项 = -Kd * d(yaw_gz_integrated)/dt ≈ -Kd * gz_dps * yaw_sign，
-     * 天然提供角速率阻尼，无需单独引入速率反馈。 */
-    s_bal.yaw_gz_integrated += att->gz_dps * (float)s_bal.yaw_sign * s_dt_yaw_sec;
+     * 天然提供角速率阻尼，无需单独引入速率反馈。
+     *
+     * ⚠️ 扣 gz_bias 至关重要：若不扣，30~60s 直行后 yaw_gz_integrated 会因
+     *    陀螺 z 轴 DC 零漂积累 1°+ 假航向偏差，让 yaw PID 修正一个根本不存在
+     *    的偏航，结果就是车持续画弧。 */
+    s_bal.yaw_gz_integrated += (att->gz_dps - s_bal.gz_bias_dps) *
+                                (float)s_bal.yaw_sign * s_dt_yaw_sec;
 
     float raw_corr  = pid_step(&s_bal.yaw_pid,
                                 0.0f,
@@ -288,6 +307,10 @@ void app_balance_init(void)
     s_bal.rate_lpf_dps       = 0.0f;
     s_bal.pitch_offset_deg   = 0.8f;
     s_bal.speed_lpf_cps      = 0.0f;
+    s_bal.gy_bias_dps        = 0.0f;
+    s_bal.gz_bias_dps        = 0.0f;
+    s_bal.bias_still_ticks   = 0u;
+    s_bal.gyro_bias_valid    = false;
     reset_pitch_filter();
     s_bal.pitch_sign =
 #if APP_BALANCE_PITCH_INVERT
@@ -330,6 +353,11 @@ void app_balance_reset(void)
     s_bal.cached_yaw_corr_pm = 0;
     s_bal.rate_lpf_dps       = 0.0f;
     s_bal.speed_lpf_cps      = 0.0f;
+    /* 注意：gy_bias_dps / gz_bias_dps / gyro_bias_valid 不在此清零。
+     * 陀螺零漂是物理传感器特性（温漂 + 安装应力），与 PID 内部状态无关，
+     * FALLEN → ARMED 再起时若清掉 bias 会丢失启动校准结果，立刻引入持续漂移。
+     * 只清 quiet 计数以让在线学习从干净状态重新启动。 */
+    s_bal.bias_still_ticks   = 0u;
     reset_pitch_filter();
     reset_yaw_state();
 }
@@ -481,18 +509,32 @@ static void balance_step_rate(const app_balance_attitude_t *att,
         return;
     }
 
-    /* 角速度测量低通滤波：APP_BALANCE_RATE_MEAS_LPF_ALPHA EMA，抑制振动耦合噪声。
-     * 注意区别于 APP_BALANCE_RATE_D_FILTER_ALPHA（后者作用于 PID 内部 D 项）。 */
-    float raw_rate = att->pitch_rate_dps * (float)s_bal.pitch_sign;
-    s_bal.rate_lpf_dps += APP_BALANCE_RATE_MEAS_LPF_ALPHA *
-                          (raw_rate - s_bal.rate_lpf_dps);
-    float measured_rate = s_bal.rate_lpf_dps;
+    /* 角速度测量值处理（顺序：扣 IMU 零漂 → pitch_sign 翻转 → EMA 低通）：
+     *
+     *   ① 先扣 gy_bias_dps：bias 存储在原始 IMU body frame，不含 pitch_sign。
+     *      若未做启动校准 bias=0，等效旧行为；校准后 bias≈+0.3°/s 被精确抵消。
+     *   ② 然后做 pitch_sign 翻转：业务层期望"车头上扬为正"的角速率。
+     *   ③ 最后 LPF：抑制振动耦合噪声。
+     *
+     *   注意：此处 LPF 不同于 PID 内部 D 项滤波（APP_BALANCE_RATE_D_FILTER_ALPHA）。 */
+    float gy_corrected_imu = att->pitch_rate_dps - s_bal.gy_bias_dps;
+    float raw_rate         = gy_corrected_imu * (float)s_bal.pitch_sign;
+    s_bal.rate_lpf_dps    += APP_BALANCE_RATE_MEAS_LPF_ALPHA *
+                              (raw_rate - s_bal.rate_lpf_dps);
+    float measured_rate    = s_bal.rate_lpf_dps;
 
     /* 角速度 PD：输入 = 目标角速率 - 实测角速率，输出 = PWM permille */
     float pwm_out = pid_step(&s_bal.rate_pid,
         s_bal.target_rate_dps,
         measured_rate,
         s_dt_rate_sec);
+
+    /* 运行时陀螺零漂在线学习（200Hz 调用）：放在 pid_step 之后、电机输出之前。
+     *   用原始 IMU body frame gy/gz（未经 sign 翻转、未减 bias）以匹配 bias 定义；
+     *   quiet 判据用经 sign 翻转的 measured / target rate（与 PID 同框架）。 */
+    update_gyro_bias_estimator(att->pitch_rate_dps, att->gz_dps,
+                                s_bal.target_rate_dps, measured_rate,
+                                cmd->target_speed_cps, cmd->target_yaw_pm);
 
     /* 转向叠加 + 航向环差分补偿 */
     float yaw_pm     = (float)cmd->target_yaw_pm * s_bal.yaw_kp;
@@ -1061,32 +1103,43 @@ static void k230_send_heartbeat(uint32_t now_ms)
 }
 
 /* ========================================================================== */
-/* 上电自校零（pitch_offset_deg）                                              */
+/* 上电自校准：pitch_offset_deg + gy_bias_dps + gz_bias_dps                    */
 /* ========================================================================== */
 
 /**
- * 上电静止采样自校零：阻塞 APP_BALANCE_PITCH_AUTOZERO_MS 毫秒，连续取
- * MS901M pitch_deg 平均，写入 pitch_offset_deg。
+ * 上电静止采样自校准：阻塞 APP_BALANCE_PITCH_AUTOZERO_MS 毫秒，对通过静止
+ * 判据的样本同步累加 pitch_deg、gy_dps、gz_dps，最终各取平均：
+ *   - 平均 pitch_deg → app_balance_set_pitch_offset()
+ *   - 平均 gy_dps    → s_bal.gy_bias_dps（内环 raw_rate 减此值）
+ *   - 平均 gz_dps    → s_bal.gz_bias_dps（yaw 积分模式减此值）
+ *
+ * ⚠️ 必须扣 bias 的根因：
+ *   MS901M raw 陀螺 ±0.3~1°/s DC 偏置 + EKF pitch_deg 无零漂，二者放在级联控
+ *   制器里时，内环看到 measured_rate = gy_dps 含 +0.3°/s，会输出持续 ~0.5 PWM
+ *   permille 让车真歪 → 角度环看到 pitch 变化反向补 → 二者抢权 → "抖动后越来
+ *   越歪"。这里把 bias 在启动期就量出来扣掉。
  *
  * 调用前提：
- *   - app_balance_init() 已设置默认 pitch_offset = 0.8°（兜底）
- *   - main 已调用 wait_for_ms901m_attitude（即第一帧 0x01 已就绪）
+ *   - main 已调用 wait_for_ms901m_attitude（第一帧 0x01 已就绪）
  *   - 电机 set_invert + dz 配置完成，但 200Hz PID 调度尚未开始（PWM=0）
  *
  * 静止判据（任一不满足则丢样）：
  *   - |gy_dps| / |gz_dps| ≤ AUTOZERO_RATE_DEADBAND_DPS（陀螺接近 0）
  *   - |a_mag² - 1g²| 在 ±2·DEV_G 范围内（加速度模长接近 1g）
  *
- * 容错：若有效样本 < 20（约 200 ms 静止数据），不写入 offset，沿用 init 默认值。
+ * 容错：
+ *   - 有效样本 < 20：sum/n 失真，不写入任何 bias / offset，沿用 init 默认值；
+ *   - bias 平均后限幅到 ±APP_BALANCE_GYRO_BIAS_LIMIT_DPS，防极端值拖坏控制器。
  *
  * ⚠️ 用户须知：上电期间必须把小车维持在"标准直立 + 完全静止"姿态 1.5 秒。
- *    校零失败时日志会打印 [autozero] FAILED，应断电重试。
+ *    校准失败时日志会打印 [autocal] FAILED，应断电重试。
  */
-static void auto_zero_pitch_offset(void)
+static void auto_calibrate_imu(void)
 {
 #if APP_BALANCE_PITCH_AUTOZERO_MS == 0
-    (void)printf("[autozero] disabled by APP_BALANCE_PITCH_AUTOZERO_MS=0; "
-                 "using init default %c%ld.%02lu deg\r\n",
+    (void)printf("[autocal] disabled by APP_BALANCE_PITCH_AUTOZERO_MS=0; "
+                 "pitch_offset=%c%ld.%02lu deg, gyro bias not initialized "
+                 "(rate loop will see raw gyro DC offset)\r\n",
                  BAL_F2_S(s_bal.pitch_offset_deg),
                  (long)BAL_F2_I(s_bal.pitch_offset_deg),
                  (unsigned long)BAL_F2_F(s_bal.pitch_offset_deg));
@@ -1094,11 +1147,13 @@ static void auto_zero_pitch_offset(void)
 #else
     const uint32_t end_ms = bsp_systick_get_ms() + APP_BALANCE_PITCH_AUTOZERO_MS;
     float    sum_pitch     = 0.0f;
+    float    sum_gy        = 0.0f;
+    float    sum_gz        = 0.0f;
     uint32_t n_samples     = 0u;
     uint32_t n_rejected    = 0u;
     uint32_t last_sample_ms = bsp_systick_get_ms();
 
-    (void)printf("[autozero] sampling pitch for %lums "
+    (void)printf("[autocal] sampling pitch+gyro for %lums "
                  "(keep car upright and STILL)\r\n",
                  (unsigned long)APP_BALANCE_PITCH_AUTOZERO_MS);
 
@@ -1141,6 +1196,8 @@ static void auto_zero_pitch_offset(void)
             }
 
             sum_pitch += s.pitch_deg;
+            sum_gy    += s.gy_dps;
+            sum_gz    += s.gz_dps;
             n_samples++;
         }
 
@@ -1148,24 +1205,110 @@ static void auto_zero_pitch_offset(void)
     }
 
     if (n_samples >= 20u) {
-        float new_offset = sum_pitch / (float)n_samples;
+        float new_offset  = sum_pitch / (float)n_samples;
+        float new_gy_bias = sum_gy    / (float)n_samples;
+        float new_gz_bias = sum_gz    / (float)n_samples;
+
+        /* bias 限幅：异常大说明小车未真静止或 IMU 故障，宁可拒绝 */
+        const float bias_lim = (float)APP_BALANCE_GYRO_BIAS_LIMIT_DPS;
+        if (new_gy_bias >  bias_lim) new_gy_bias =  bias_lim;
+        if (new_gy_bias < -bias_lim) new_gy_bias = -bias_lim;
+        if (new_gz_bias >  bias_lim) new_gz_bias =  bias_lim;
+        if (new_gz_bias < -bias_lim) new_gz_bias = -bias_lim;
+
         app_balance_set_pitch_offset(new_offset);
-        (void)printf("[autozero] OK pitch_offset=%c%ld.%02lu deg "
+        s_bal.gy_bias_dps     = new_gy_bias;
+        s_bal.gz_bias_dps     = new_gz_bias;
+        s_bal.gyro_bias_valid = true;
+        s_bal.bias_still_ticks = 0u;   /* 确保运行时学习从干净状态启动 */
+
+        (void)printf("[autocal] OK pitch_offset=%c%ld.%02lu deg "
+                     "gy_bias=%c%ld.%02lu gz_bias=%c%ld.%02lu dps "
                      "(n=%lu, rejected=%lu)\r\n",
                      BAL_F2_S(new_offset),
                      (long)BAL_F2_I(new_offset),
                      (unsigned long)BAL_F2_F(new_offset),
+                     BAL_F2_S(new_gy_bias),
+                     (long)BAL_F2_I(new_gy_bias),
+                     (unsigned long)BAL_F2_F(new_gy_bias),
+                     BAL_F2_S(new_gz_bias),
+                     (long)BAL_F2_I(new_gz_bias),
+                     (unsigned long)BAL_F2_F(new_gz_bias),
                      (unsigned long)n_samples,
                      (unsigned long)n_rejected);
     } else {
-        (void)printf("[autozero] FAILED n=%lu rejected=%lu; "
-                     "keep car still & power-cycle. Using init default %c%ld.%02lu\r\n",
+        (void)printf("[autocal] FAILED n=%lu rejected=%lu; keep car still & "
+                     "power-cycle. Using init default pitch=%c%ld.%02lu and "
+                     "gy_bias=0 (rate loop will see raw gyro DC offset!)\r\n",
                      (unsigned long)n_samples,
                      (unsigned long)n_rejected,
                      BAL_F2_S(s_bal.pitch_offset_deg),
                      (long)BAL_F2_I(s_bal.pitch_offset_deg),
                      (unsigned long)BAL_F2_F(s_bal.pitch_offset_deg));
     }
+#endif
+}
+
+/**
+ * 运行时陀螺零漂在线学习（200Hz 内环每拍调用）。
+ *
+ *   仅在 "quiet 窗口" 内学习：
+ *     - 上层未要求行进：|target_speed_cps| < SPEED_LIMIT_CPS
+ *     - 角度环未在大力调整：|target_rate| < RATE_LIMIT_DPS
+ *     - 车体角速度小：|measured_rate| < RATE_LIMIT_DPS
+ *     - 未在转向：target_yaw_pm == 0
+ *     - 连续满足 DEBOUNCE_TICKS 拍后才开学（防一帧扰动误学）
+ *
+ *   学习规则：bias += α * (gy_raw - bias)，等价 LPF(gy_raw)；
+ *   物理意义：quiet 时 gy_raw 的长期均值 = 真实零漂。
+ *
+ *   ⚠️ gy_bias / gz_bias 均存储于"原始 IMU body frame"，
+ *      不含 pitch_sign / yaw_sign（与 ms901m_snapshot 直接对应）。
+ */
+static void update_gyro_bias_estimator(float gy_raw_imu, float gz_raw_imu,
+                                       float target_rate, float meas_rate,
+                                       int32_t target_speed_cps,
+                                       int16_t target_yaw_pm)
+{
+#if !APP_BALANCE_GYRO_BIAS_LEARN_ENABLED
+    (void)gy_raw_imu; (void)gz_raw_imu; (void)target_rate; (void)meas_rate;
+    (void)target_speed_cps; (void)target_yaw_pm;
+    return;
+#else
+    if (!s_bal.gyro_bias_valid) {
+        /* 启动校准未完成（autocal FAILED），不在线学习，避免学到运动数据。 */
+        return;
+    }
+
+    int32_t spd_abs = (target_speed_cps < 0) ? -target_speed_cps : target_speed_cps;
+    float   meas_abs = (meas_rate    < 0.0f) ? -meas_rate    : meas_rate;
+    float   tgt_abs  = (target_rate  < 0.0f) ? -target_rate  : target_rate;
+
+    bool quiet = (spd_abs  < APP_BALANCE_GYRO_BIAS_LEARN_SPEED_LIMIT_CPS) &&
+                 (meas_abs < APP_BALANCE_GYRO_BIAS_LEARN_RATE_LIMIT_DPS)  &&
+                 (tgt_abs  < APP_BALANCE_GYRO_BIAS_LEARN_RATE_LIMIT_DPS)  &&
+                 (target_yaw_pm == 0);
+
+    if (!quiet) {
+        s_bal.bias_still_ticks = 0u;
+        return;
+    }
+
+    if (s_bal.bias_still_ticks < APP_BALANCE_GYRO_BIAS_LEARN_DEBOUNCE_TICKS) {
+        s_bal.bias_still_ticks++;
+        return;
+    }
+
+    const float a = APP_BALANCE_GYRO_BIAS_LEARN_ALPHA;
+    s_bal.gy_bias_dps += a * (gy_raw_imu - s_bal.gy_bias_dps);
+    s_bal.gz_bias_dps += a * (gz_raw_imu - s_bal.gz_bias_dps);
+
+    /* 二次限幅：防 EMA 在长期单边噪声下逐步爬出范围 */
+    const float bias_lim = (float)APP_BALANCE_GYRO_BIAS_LIMIT_DPS;
+    if (s_bal.gy_bias_dps >  bias_lim) s_bal.gy_bias_dps =  bias_lim;
+    if (s_bal.gy_bias_dps < -bias_lim) s_bal.gy_bias_dps = -bias_lim;
+    if (s_bal.gz_bias_dps >  bias_lim) s_bal.gz_bias_dps =  bias_lim;
+    if (s_bal.gz_bias_dps < -bias_lim) s_bal.gz_bias_dps = -bias_lim;
 #endif
 }
 
@@ -1211,10 +1354,10 @@ bool app_balance_run(void)
     print_pid_help();
     print_pid_status();
 
-    /* 上电自校零 pitch_offset：阻塞采样 1.5s 静止姿态。
+    /* 上电自校准 pitch_offset + gy/gz 零漂：阻塞采样 1.5s 静止姿态。
      * 必须在 200Hz PID 调度（for(;;) 中 bsp_motor_set_output）启动之前完成，
-     * 否则 PWM 会基于错误的零点输出。校零期间电机已 enable 但 PWM=0。 */
-    auto_zero_pitch_offset();
+     * 否则 PWM 会基于错误的零点输出。校准期间电机已 enable 但 PWM=0。 */
+    auto_calibrate_imu();
 
     /* 校零完成 → 清掉这段时间累积的 K230 字节，再做 k230_comm_init()
      * 把 last_rx_ms 时间戳刷到"现在"，避免主循环第一拍就触发心跳超时报警。 */
@@ -1322,6 +1465,7 @@ bool app_balance_run(void)
 
             (void)printf("[hb] t=%lus state=%s pitch=%c%ld.%02lu inv=%u tilt*=%c%ld.%02lu "
                          "pwm=%c%ld.%02lu yawErr=%c%ld.%02lu yawCorr=%d L=%ld R=%ld v=%ldcps "
+                         "gyB=%c%ld.%02lu/%c%ld.%02lu%s "
                          "batt=%lumV ms901m_g=%lu/b=%lu log_ovr=%lu k230_rx=%lub/s "
                          "k230_g=%lu/b=%lu k230_%s "
                          "encL=%ld encR=%ld encISR=%lu/s%s\n",
@@ -1335,6 +1479,9 @@ bool app_balance_run(void)
                 (int)diag.yaw_correction_pm,
                 (long)diag.left_cmd_pm, (long)diag.right_cmd_pm,
                 (long)diag.speed_meas_cps,
+                BAL_F2_S(s_bal.gy_bias_dps), (long)BAL_F2_I(s_bal.gy_bias_dps), (unsigned long)BAL_F2_F(s_bal.gy_bias_dps),
+                BAL_F2_S(s_bal.gz_bias_dps), (long)BAL_F2_I(s_bal.gz_bias_dps), (unsigned long)BAL_F2_F(s_bal.gz_bias_dps),
+                s_bal.gyro_bias_valid ? "" : "*",
                 (unsigned long)batt_mv,
                 (unsigned long)ms901m_good_frames(),
                 (unsigned long)ms901m_bad_frames(),
