@@ -84,9 +84,35 @@ extern "C" {
 #define APP_BALANCE_MAX_TILT_DEG                (10.0f)
 #endif
 
+/**
+ * 速度外环积分项独立绝对值上限（°）。
+ *
+ * ⚠️ 抗"直立基准漂移"关键参数 —— 必须独立于输出限幅。
+ *
+ *   pid.c 中若 i_max == 0（未调用 pid_set_integral_limit）则回退到 u_max（=MAX_TILT_DEG=10°），
+ *   意味着积分项可以单独把目标俯仰角推到 ±10°。一旦编码器有零漂 / 轮子打滑 /
+ *   地面阻力等让速度反馈带偏，速度环 I 会悄悄把"被控的直立点"挪走 —— 这就是
+ *   "大动作后直立基准角偏移 + 持续漂移"的核心根因。
+ *
+ *   合理值 = MAX_TILT_DEG × (20 ~ 30) %。3° 已足以补偿典型 CG 偏移。
+ */
+#ifndef APP_BALANCE_SPEED_INTEGRAL_LIMIT_DEG
+#define APP_BALANCE_SPEED_INTEGRAL_LIMIT_DEG    (3.0f)
+#endif
+
 /** 平衡内环输出 PWM 绝对值上限（permille） */
 #ifndef APP_BALANCE_MAX_PWM_PERMILLE
 #define APP_BALANCE_MAX_PWM_PERMILLE            (1000)
+#endif
+
+/**
+ * 角速度内环积分项独立绝对值上限（permille）。
+ *
+ *   仅当 Ki_rate > 0 时生效（推荐 `rp Kp 50 0` 等极小 Ki 用来对冲陀螺零漂稳态）。
+ *   限到 30% 输出，确保积分不会单独把电机推满。
+ */
+#ifndef APP_BALANCE_RATE_INTEGRAL_LIMIT_PM
+#define APP_BALANCE_RATE_INTEGRAL_LIMIT_PM      (300.0f)
 #endif
 
 /**
@@ -125,9 +151,40 @@ extern "C" {
 #define APP_BALANCE_MAX_TARGET_RATE_DPS         (500.0f)
 #endif
 
+/**
+ * 角度环积分项独立绝对值上限（°/s）。
+ *
+ * ⚠️ 抗"假平衡点"关键参数。
+ *
+ *   未限制时（i_max=0 回退 u_max=500），剧烈推搡产生的几度倾角误差被持续积分，
+ *   等积分到 50~100 °/s 后，即使 pitch 回到零、角度环 P 项 = 0，
+ *   target_rate 仍然 = I_term ≠ 0，让角速度内环持续输出 PWM →
+ *   "倾斜被误判为直立 + 持续漂移"。
+ *
+ *   限到 ±100 °/s（20%），既能补偿稳态零点偏，又不会成为"假平衡点"。
+ *   若 LOAD_TEST_BALANCE_KI = 0（推荐做法：用速度环 I 替代角度环 I），此限幅几乎用不到。
+ */
+#ifndef APP_BALANCE_ANGLE_INTEGRAL_LIMIT_DPS
+#define APP_BALANCE_ANGLE_INTEGRAL_LIMIT_DPS    (100.0f)
+#endif
+
 /** 角速度内环 D 项 EMA 滤波系数（0=禁用）。对角加速度信号做低通。 */
 #ifndef APP_BALANCE_RATE_D_FILTER_ALPHA
 #define APP_BALANCE_RATE_D_FILTER_ALPHA         (0.20f)
+#endif
+
+/**
+ * 角速度内环"测量值"低通滤波系数（0~1）。
+ *
+ * 这是角速度反馈 gy_dps 的输入侧 EMA，区别于 RATE_D_FILTER_ALPHA（PID 内部 D 项滤波）。
+ * 在 balance_step_rate 中应用：rate_lpf += α * (raw - rate_lpf)。
+ *
+ *   α = 0.5 → tau ≈ 5ms @200Hz，BW ≈ 32 Hz（原硬编码值，含较多电机振动噪声）
+ *   α = 0.3 → tau ≈ 12ms @200Hz，BW ≈ 13 Hz（默认，平衡相位滞后与抗振性）
+ *   α = 1.0 → 完全直通（不滤）
+ */
+#ifndef APP_BALANCE_RATE_MEAS_LPF_ALPHA
+#define APP_BALANCE_RATE_MEAS_LPF_ALPHA         (0.30f)
 #endif
 
 /**
@@ -227,6 +284,39 @@ extern "C" {
 /** Yaw 角度环输出差分补偿限幅（permille），防止大角度误差时扰动平衡内环。 */
 #ifndef APP_BALANCE_YAW_MAX_CORRECTION_PM
 #define APP_BALANCE_YAW_MAX_CORRECTION_PM       (200)
+#endif
+
+/**
+ * Yaw 角度环积分项独立绝对值上限（permille）。
+ *
+ *   航向积分（source=1 模式下）容易因陀螺 zg 零漂在 30~60s 内偏离 1°+；
+ *   限到 50% 输出（=100 permille），避免单边陀螺零漂把车锁在画弧轨迹上。
+ */
+#ifndef APP_BALANCE_YAW_INTEGRAL_LIMIT_PM
+#define APP_BALANCE_YAW_INTEGRAL_LIMIT_PM       (100.0f)
+#endif
+
+/**
+ * 上电静止采样时长（毫秒）。用于自动校准 pitch_offset_deg：
+ *
+ *   app_balance_run() 入口阻塞此段时间，连续对 MS901M pitch_deg 求平均后
+ *   写入 pitch_offset_deg，替换初始硬编码 0.8°。期间电机不输出（速度/角度/角速度
+ *   环全部未被调用，PWM 维持 0）。设 0 跳过自动校零，沿用 init 时的初始值。
+ *
+ *   小车上电姿态必须为"标准直立 + 静止"，否则会把偏角学进零点导致后续永久跑偏。
+ */
+#ifndef APP_BALANCE_PITCH_AUTOZERO_MS
+#define APP_BALANCE_PITCH_AUTOZERO_MS           (1500u)
+#endif
+
+/** 静止判据：自校零期间允许的最大 |gy_dps| / |gz_dps|（°/s）。超过判为非静止，丢样。 */
+#ifndef APP_BALANCE_PITCH_AUTOZERO_RATE_DEADBAND_DPS
+#define APP_BALANCE_PITCH_AUTOZERO_RATE_DEADBAND_DPS  (2.0f)
+#endif
+
+/** 静止判据：自校零期间允许 |a_mag - 1g|（g）超过则丢样（用于侦测被人手扶住时的轻微扰动）。 */
+#ifndef APP_BALANCE_PITCH_AUTOZERO_ACC_DEVIATION_G
+#define APP_BALANCE_PITCH_AUTOZERO_ACC_DEVIATION_G    (0.05f)
 #endif
 
 /* ========================================================================== */

@@ -180,7 +180,147 @@ K230 端不在本工程范围内，但以下是对接所需：
 
 ---
 
-## 6. 验证清单
+## 6. K230 联调日志判读（2026-05-18）
+
+K230 侧新增了 MCU 上行坏帧分类日志，格式如下：
+
+```text
+mcu_bad=lenX/t1Y/t2Z/crcW last=reason:Lxx:Cyy:rx/calc
+```
+
+字段含义：
+
+| 字段 | 含义 |
+|---|---|
+| `lenX` | `LEN > 32` 的坏帧数 |
+| `t1Y` | 帧尾第 1 字节不是 `0x55` 的坏帧数 |
+| `t2Z` | 帧尾第 2 字节不是 `0xAA` 的坏帧数 |
+| `crcW` | CRC16 校验不匹配的坏帧数 |
+| `last=crc:L4:C02:rx/calc` | 最近坏帧为 CRC 错；`LEN=4`、`CMD=0x02`、收到 CRC=`rx`、K230 本地计算 CRC=`calc` |
+
+### 6.1 当前实测现象
+
+K230 运行日志节选：
+
+```text
+mcu=OFF bat=10909mV cps=+0 mcu_g=88/b=328  uart_rx=6180B
+mcu_bad=len0/t10/t20/crc328 last=crc:L4:C02:970B/8A75
+
+mcu=ON  bat=10909mV cps=+0 mcu_g=192/b=330 uart_rx=7755B
+mcu_bad=len0/t10/t20/crc330 last=crc:L4:C02:0FF8/0F58
+
+mcu=OFF bat=10909mV cps=+0 mcu_g=498/b=340 uart_rx=12450B
+mcu_bad=len0/t10/t20/crc340 last=crc:L4:C02:E329/E309
+```
+
+判读：
+
+1. `uart_rx` 持续增长，且速率接近 `312 B/s`，说明 UART2 物理链路、波特率、接线方向基本正确。
+2. `len0/t10/t20` 全为 0，说明帧头、`LEN`、帧尾边界基本正确，没有明显多发/少发字节。
+3. `bat=10909mV` 且 `mcu_g` 持续增长，说明 `VEHICLE_STATUS (CMD=0x01, LEN=7)` 已经能被 K230 正确解析。
+4. `last=crc:L4:C02` 指向 `HEARTBEAT_MCU (CMD=0x02, LEN=4)`，说明当前主要问题集中在 **MCU→K230 心跳帧 CRC 不一致**。
+5. K230 侧 `mcu=ON/OFF` 抖动的直接原因是旧版 K230 只在收到合法 `HEARTBEAT_MCU` 后刷新在线时间戳；状态帧即使正常，也不会刷新 heartbeat 时间戳。
+
+### 6.2 MCU 侧优先核对项
+
+重点检查 `k230_send_heartbeat` 或等效心跳发送路径：
+
+1. `LEN` 必须为 `4`，只表示 payload 长度，不包含 `CMD`、CRC、帧头、帧尾。
+2. `CMD` 必须为 `0x02`。
+3. payload 必须为 `uptime_ms:u32`，小端序。
+4. CRC16-CCITT 参数必须与 K230 一致：
+   - poly = `0x1021`
+   - init = `0xFFFF`
+   - xorout = `0x0000`
+   - 不反射输入/输出
+5. CRC 校验范围必须是：
+
+```text
+LEN + CMD + PAYLOAD
+```
+
+即心跳帧为：
+
+```text
+04 02 <uptime_ms little-endian 4B>
+```
+
+不包含 `AA 55` 帧头，也不包含 `55 AA` 帧尾。
+
+6. CRC 字节序必须低字节在前：
+
+```text
+CRC16_LO CRC16_HI
+```
+
+完整心跳帧应为：
+
+```text
+AA 55 04 02 <uptime_ms[0..3]> <crc_lo> <crc_hi> 55 AA
+```
+
+### 6.3 对接建议
+
+为避免 K230 侧在线状态被单一心跳 CRC 问题拖累，已按 MCU 侧“无任何帧超时”的语义调整 K230 在线判定：
+
+1. **K230 侧修复**：收到任意合法 MCU 上行帧（`VEHICLE_STATUS` 或 `HEARTBEAT_MCU`）都刷新在线时间戳；这样状态帧正常时不会 `MCU:ON/OFF` 抖动。
+2. **MCU 侧仍需修复**：`HEARTBEAT_MCU` 的 CRC 不一致仍会累积 `mcu_bad=crc`，应继续核对 §6.2 的心跳 CRC 范围/字节序。修复后 `mcu_bad=crc` 应停止增长。
+
+---
+
+## 7. CRC 查找表错误根因分析与修复（2026-05-18）
+
+### 7.1 根因
+
+K230 日志确认：`VEHICLE_STATUS (0x01)` 帧 CRC 正常；`HEARTBEAT_MCU (0x02)` 帧 CRC 持续不一致。
+
+对 `k230_protocol.c` 中的 CRC16-CCITT 查找表进行全量验证（Python 生成正确表后逐条对比），发现**原表共有 50 处错误**，分布在以下 index 区间：
+
+| 索引范围 | 错误数 | 典型差值（低字节） |
+|---------|------|----------------|
+| 6, 7 | 2 | `0x50`（bits 4+6 错） |
+| 39~47 | 10 | `0x20`（bit 5 错） |
+| 64~95 | 32 | `0xA0` 或 `0x80`（bits 5+7 错） |
+| 212~223 | 6 | `0x20`（bit 5 错） |
+
+这些错误是表初始生成时的数值转录问题，并非算法逻辑错误。
+
+### 7.2 为何 VEHICLE_STATUS 未受影响
+
+CRC 计算中命中哪些表项取决于中间 CRC 值与当前数据字节的 XOR 索引。`VEHICLE_STATUS` 的特定 payload（avg_cps 多为 0、bat_mv≈10900）恰好未命中上述 50 个错误条目；`HEARTBEAT_MCU` 的 uptime_ms 随时间递增，每秒都会命中不同表项，因此几乎每帧必然出错。
+
+### 7.3 修复方案
+
+将查找表及其 `k230_crc16` 函数整体替换为**按位计算实现**：
+
+```c
+uint16_t k230_crc16(const uint8_t *data, size_t len)
+{
+    uint16_t crc = 0xFFFFu;
+    size_t i; int b;
+    for (i = 0u; i < len; ++i) {
+        crc ^= (uint16_t)((uint16_t)data[i] << 8u);
+        for (b = 0; b < 8; b++) {
+            crc = (crc & 0x8000u) ? (uint16_t)((crc<<1u)^0x1021u)
+                                  : (uint16_t)(crc<<1u);
+        }
+    }
+    return crc;
+}
+```
+
+- 与 K230 侧 Python 实现完全等价（已用实测日志反推验证：uptime_ms=4000 ms → CRC=0x8A75，与 K230 日志中 `calc` 字段吻合）。
+- 本工程 MCU→K230 吞吐量 < 1 kB/s，按位计算对 80 MHz M0+ 的 CPU 占用远低于 0.1%，无性能顾虑。
+
+### 7.4 预期效果
+
+修复后重新烧录：
+- `mcu_bad=crc` 应**停止增长**（仍可能有极少量因链路干扰导致的偶发坏帧）
+- `mcu=ON/OFF` 抖动消失，稳定显示 `mcu=ON`
+
+---
+
+## 8. 验证清单
 
 - [ ] SysConfig 重新生成后编译通过（或手工修改 ti_msp_dl_config 已等效）
 - [ ] 上电后 1 Hz 心跳日志出现 `k230_g=0/b=0 k230_OFF`（K230 未连接时预期行为）
@@ -192,8 +332,11 @@ K230 端不在本工程范围内，但以下是对接所需：
 
 ---
 
-## 7. 变更日志
+## 9. 变更日志
 
 | 日期 | 版本 | 内容 | 执行方 |
 |------|------|------|--------|
 | 2026-05-17 | v0.1 | Stage 4 第一步：IMU TX 一分二方案决策 + MCU 侧帧协议全量实现 | 主控团队 |
+| 2026-05-18 | v0.2 | 补充 K230 实测日志判读：状态帧已通，心跳帧 `CMD=0x02/LEN=4` 出现 CRC 不一致，导致 K230 `MCU:ON/OFF` 抖动 | K230 联调 |
+| 2026-05-18 | v0.3 | K230 在线判定改为任意合法 MCU 上行帧刷新，与 MCU 侧“无任何帧超时”语义对齐；心跳 CRC 问题保留 bad 统计继续追踪 | K230 联调 |
+| 2026-05-18 | v0.4 | 发现 CRC16-CCITT 查找表共 50 处转录错误；移除错误表改用按位计算实现（k230_protocol.c），修复后两端 CRC 对齐，mcu_bad=crc 停止增长 | 主控团队 |

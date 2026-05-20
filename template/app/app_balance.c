@@ -250,26 +250,36 @@ void app_balance_init(void)
     pid_init(&s_bal.rate_pid);
     pid_init(&s_bal.yaw_pid);
 
-    /* 速度外环 20 Hz：输出"目标 tilt deg"，限幅 ±MAX_TILT_DEG */
+    /* 速度外环 20 Hz：输出"目标 tilt deg"，限幅 ±MAX_TILT_DEG
+     *
+     * ⚠️ pid_set_integral_limit 是必做项：默认 i_max=0 会回退到 u_max=MAX_TILT_DEG，
+     * 让 I 项可以单独把目标俯仰角推到 ±10° → 等效"假平衡点"，是漂移核心根因。 */
     pid_set_output_limit(&s_bal.speed_pid,
         -(float)APP_BALANCE_MAX_TILT_DEG, (float)APP_BALANCE_MAX_TILT_DEG);
+    pid_set_integral_limit(&s_bal.speed_pid, APP_BALANCE_SPEED_INTEGRAL_LIMIT_DEG);
     pid_set_d_filter(&s_bal.speed_pid, APP_BALANCE_SPEED_D_FILTER_ALPHA);
 
-    /* 角度环 100 Hz：输出"目标角速率 °/s"，限幅 ±MAX_TARGET_RATE_DPS */
+    /* 角度环 100 Hz：输出"目标角速率 °/s"，限幅 ±MAX_TARGET_RATE_DPS。
+     * 同样必须独立设积分上限，防止剧烈推搡瞬态被 I 累积为持续 target_rate 偏置。 */
     pid_set_output_limit(&s_bal.angle_pid,
         -(float)APP_BALANCE_MAX_TARGET_RATE_DPS,
          (float)APP_BALANCE_MAX_TARGET_RATE_DPS);
+    pid_set_integral_limit(&s_bal.angle_pid, APP_BALANCE_ANGLE_INTEGRAL_LIMIT_DPS);
 
-    /* 角速度内环 200 Hz：输出 PWM permille，限幅 ±MAX_PWM */
+    /* 角速度内环 200 Hz：输出 PWM permille，限幅 ±MAX_PWM。
+     * 当业务侧用 `rp Kp 50 0` 给 rate 加微小 Ki 抵消陀螺零漂时，此独立上限避免饱和。 */
     pid_set_output_limit(&s_bal.rate_pid,
         -(float)APP_BALANCE_MAX_PWM_PERMILLE,
          (float)APP_BALANCE_MAX_PWM_PERMILLE);
+    pid_set_integral_limit(&s_bal.rate_pid, APP_BALANCE_RATE_INTEGRAL_LIMIT_PM);
     pid_set_d_filter(&s_bal.rate_pid, APP_BALANCE_RATE_D_FILTER_ALPHA);
 
-    /* 航向环 50 Hz：输出差分 PWM permille，限幅 ±YAW_MAX_CORRECTION */
+    /* 航向环 50 Hz：输出差分 PWM permille，限幅 ±YAW_MAX_CORRECTION。
+     * 限 I 项避免陀螺 zg 零漂在长直行下把车锁在画弧轨迹上。 */
     pid_set_output_limit(&s_bal.yaw_pid,
         -(float)APP_BALANCE_YAW_MAX_CORRECTION_PM,
          (float)APP_BALANCE_YAW_MAX_CORRECTION_PM);
+    pid_set_integral_limit(&s_bal.yaw_pid, APP_BALANCE_YAW_INTEGRAL_LIMIT_PM);
     pid_set_d_filter(&s_bal.yaw_pid, APP_BALANCE_YAW_D_FILTER_ALPHA);
 
     s_bal.target_rate_dps    = 0.0f;
@@ -471,9 +481,11 @@ static void balance_step_rate(const app_balance_attitude_t *att,
         return;
     }
 
-    /* 角速度测量低通滤波：alpha=0.5 EMA，抑制振动耦合噪声（tau≈10ms@200Hz） */
+    /* 角速度测量低通滤波：APP_BALANCE_RATE_MEAS_LPF_ALPHA EMA，抑制振动耦合噪声。
+     * 注意区别于 APP_BALANCE_RATE_D_FILTER_ALPHA（后者作用于 PID 内部 D 项）。 */
     float raw_rate = att->pitch_rate_dps * (float)s_bal.pitch_sign;
-    s_bal.rate_lpf_dps += 0.5f * (raw_rate - s_bal.rate_lpf_dps);
+    s_bal.rate_lpf_dps += APP_BALANCE_RATE_MEAS_LPF_ALPHA *
+                          (raw_rate - s_bal.rate_lpf_dps);
     float measured_rate = s_bal.rate_lpf_dps;
 
     /* 角速度 PD：输入 = 目标角速率 - 实测角速率，输出 = PWM permille */
@@ -662,9 +674,13 @@ static void print_pid_help(void)
                  "yi0/yi1, si0/si1, pid?, pid0, lt, lt0, t/test\r\n");
     (void)printf("[pid] rp=rate(200Hz) bp=angle(100Hz) sp=speed(20Hz) yp=yaw(50Hz)\r\n");
     (void)printf("[pid] yi0/yi1=yaw_invert  si0/si1=speed_invert(si?=query+v_meas)\r\n");
-    (void)printf("[pid] example: rp 1800 0 0 ; bp 35000 2000 0 ; sp 5 0 0 ; yp 8000 0 0\r\n");
+    (void)printf("[pid] example: rp 1800 50 0 ; bp 35000 0 0 ; sp 5 1 0 ; yp 8000 0 0\r\n");
     (void)printf("[pid] sp note: speed fb is normalized by /10 (SCALE=10); "
                  "sp 5 at 0.1rev/s drift -> ~2.5deg tilt cmd\r\n");
+    (void)printf("[pid] anti-drift recipe (must!): "
+                 "use speed-I (sp ki=1~3) NOT angle-I; "
+                 "rate-I=50 cancels gyro zero-bias; "
+                 "all 4 PIDs now have independent i_max so wind-up bounded.\r\n");
 }
 
 static void send_lt_header(void)
@@ -1044,6 +1060,124 @@ static void k230_send_heartbeat(uint32_t now_ms)
     }
 }
 
+/* ========================================================================== */
+/* 上电自校零（pitch_offset_deg）                                              */
+/* ========================================================================== */
+
+/**
+ * 上电静止采样自校零：阻塞 APP_BALANCE_PITCH_AUTOZERO_MS 毫秒，连续取
+ * MS901M pitch_deg 平均，写入 pitch_offset_deg。
+ *
+ * 调用前提：
+ *   - app_balance_init() 已设置默认 pitch_offset = 0.8°（兜底）
+ *   - main 已调用 wait_for_ms901m_attitude（即第一帧 0x01 已就绪）
+ *   - 电机 set_invert + dz 配置完成，但 200Hz PID 调度尚未开始（PWM=0）
+ *
+ * 静止判据（任一不满足则丢样）：
+ *   - |gy_dps| / |gz_dps| ≤ AUTOZERO_RATE_DEADBAND_DPS（陀螺接近 0）
+ *   - |a_mag² - 1g²| 在 ±2·DEV_G 范围内（加速度模长接近 1g）
+ *
+ * 容错：若有效样本 < 20（约 200 ms 静止数据），不写入 offset，沿用 init 默认值。
+ *
+ * ⚠️ 用户须知：上电期间必须把小车维持在"标准直立 + 完全静止"姿态 1.5 秒。
+ *    校零失败时日志会打印 [autozero] FAILED，应断电重试。
+ */
+static void auto_zero_pitch_offset(void)
+{
+#if APP_BALANCE_PITCH_AUTOZERO_MS == 0
+    (void)printf("[autozero] disabled by APP_BALANCE_PITCH_AUTOZERO_MS=0; "
+                 "using init default %c%ld.%02lu deg\r\n",
+                 BAL_F2_S(s_bal.pitch_offset_deg),
+                 (long)BAL_F2_I(s_bal.pitch_offset_deg),
+                 (unsigned long)BAL_F2_F(s_bal.pitch_offset_deg));
+    return;
+#else
+    const uint32_t end_ms = bsp_systick_get_ms() + APP_BALANCE_PITCH_AUTOZERO_MS;
+    float    sum_pitch     = 0.0f;
+    uint32_t n_samples     = 0u;
+    uint32_t n_rejected    = 0u;
+    uint32_t last_sample_ms = bsp_systick_get_ms();
+
+    (void)printf("[autozero] sampling pitch for %lums "
+                 "(keep car upright and STILL)\r\n",
+                 (unsigned long)APP_BALANCE_PITCH_AUTOZERO_MS);
+
+    while ((int32_t)(end_ms - bsp_systick_get_ms()) > 0) {
+        /* 1) drain IMU UART → 喂解析器（与主循环同款节奏） */
+        uint8_t imu_buf[APP_BAL_IMU_DRAIN_CHUNK];
+        size_t  got = bsp_imu_uart_rx_pop_bulk(imu_buf, sizeof(imu_buf));
+        if (got > 0u) {
+            ms901m_feed_bytes(imu_buf, got);
+        }
+
+        /* 2) 每 10ms 取一次 snapshot 评估静止 + 累加 */
+        uint32_t now_ms = bsp_systick_get_ms();
+        if ((now_ms - last_sample_ms) >= 10u) {
+            last_sample_ms = now_ms;
+
+            ms901m_snapshot_t s;
+            ms901m_get_snapshot(&s);
+            if (!s.has_attitude || !s.has_gyro_acc) {
+                continue;
+            }
+
+            float gy_abs = (s.gy_dps < 0.0f) ? -s.gy_dps : s.gy_dps;
+            float gz_abs = (s.gz_dps < 0.0f) ? -s.gz_dps : s.gz_dps;
+            if ((gy_abs > APP_BALANCE_PITCH_AUTOZERO_RATE_DEADBAND_DPS) ||
+                (gz_abs > APP_BALANCE_PITCH_AUTOZERO_RATE_DEADBAND_DPS)) {
+                n_rejected++;
+                continue;
+            }
+
+            /* |a|² ≈ 1±2·dev_g 一阶近似，免开方 */
+            float a2 = (s.ax_g * s.ax_g) +
+                       (s.ay_g * s.ay_g) +
+                       (s.az_g * s.az_g);
+            float a2_dev = a2 - 1.0f;
+            if (a2_dev < 0.0f) a2_dev = -a2_dev;
+            if (a2_dev > (2.0f * APP_BALANCE_PITCH_AUTOZERO_ACC_DEVIATION_G)) {
+                n_rejected++;
+                continue;
+            }
+
+            sum_pitch += s.pitch_deg;
+            n_samples++;
+        }
+
+        bsp_systick_delay_ms(1u);
+    }
+
+    if (n_samples >= 20u) {
+        float new_offset = sum_pitch / (float)n_samples;
+        app_balance_set_pitch_offset(new_offset);
+        (void)printf("[autozero] OK pitch_offset=%c%ld.%02lu deg "
+                     "(n=%lu, rejected=%lu)\r\n",
+                     BAL_F2_S(new_offset),
+                     (long)BAL_F2_I(new_offset),
+                     (unsigned long)BAL_F2_F(new_offset),
+                     (unsigned long)n_samples,
+                     (unsigned long)n_rejected);
+    } else {
+        (void)printf("[autozero] FAILED n=%lu rejected=%lu; "
+                     "keep car still & power-cycle. Using init default %c%ld.%02lu\r\n",
+                     (unsigned long)n_samples,
+                     (unsigned long)n_rejected,
+                     BAL_F2_S(s_bal.pitch_offset_deg),
+                     (long)BAL_F2_I(s_bal.pitch_offset_deg),
+                     (unsigned long)BAL_F2_F(s_bal.pitch_offset_deg));
+    }
+#endif
+}
+
+/** 清空 K230 RX 环缓中校零期间累积的字节，避免主循环一启动就批量解析触发误动作。 */
+static void k230_flush_rx_buffer(void)
+{
+    uint8_t flush[64];
+    while (bsp_k230_uart_rx_pop_bulk(flush, sizeof(flush)) > 0u) {
+        /* 直接丢弃；校零期间收到的所有 K230 字节都视为陈旧。 */
+    }
+}
+
 bool app_balance_run(void)
 {
     uint32_t tick_count    = 0u;
@@ -1074,10 +1208,18 @@ bool app_balance_run(void)
     /* 主循环上电默认无运动指令（K230 通讯接入后由 MOTION_CMD 帧覆盖） */
     app_balance_motion_cmd_t cmd = { .target_speed_cps = 0, .target_yaw_pm = 0 };
 
-    k230_comm_init();
-
     print_pid_help();
     print_pid_status();
+
+    /* 上电自校零 pitch_offset：阻塞采样 1.5s 静止姿态。
+     * 必须在 200Hz PID 调度（for(;;) 中 bsp_motor_set_output）启动之前完成，
+     * 否则 PWM 会基于错误的零点输出。校零期间电机已 enable 但 PWM=0。 */
+    auto_zero_pitch_offset();
+
+    /* 校零完成 → 清掉这段时间累积的 K230 字节，再做 k230_comm_init()
+     * 把 last_rx_ms 时间戳刷到"现在"，避免主循环第一拍就触发心跳超时报警。 */
+    k230_flush_rx_buffer();
+    k230_comm_init();
 
     for (;;) {
         if (!bsp_systick_consume_tick()) {
