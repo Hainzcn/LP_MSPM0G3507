@@ -1,9 +1,9 @@
 /**
  * @file    app_balance.c
- * @brief   平衡车四级级联控制实现，详见 app_balance.h。
+ * @brief   平衡车两级级联控制实现，详见 app_balance.h。
  *
- *   速度环 (20 Hz) → 角度环 (100 Hz) → 角速度环 (200 Hz) → 电机输出
- *   航向环 (50 Hz) ──────────────────→ 差分叠加 ──┘
+ *   速度环 (20 Hz) → 角度环 (100 Hz) → 电机输出
+ *   转向环 (20 Hz) ────────────────────→ 差分叠加 ┘
  *
  *   所有 PID 增益默认 0，业务层未 set_gains 之前电机不会动。
  */
@@ -32,56 +32,32 @@
 /* -------------------------------------------------------------------------- */
 
 typedef struct {
-    pid_t   speed_pid;       /* 速度外环 20 Hz：输入 cps 误差，输出目标 tilt deg */
-    pid_t   angle_pid;       /* 角度环 100 Hz：输入 tilt 误差 deg，输出目标角速率 °/s */
-    pid_t   rate_pid;        /* 角速度内环 200 Hz：输入角速率误差 °/s，输出 PWM permille */
-    pid_t   yaw_pid;         /* 航向环 50 Hz：输入 yaw 误差 °，输出差分 PWM permille */
-    float   target_rate_dps;    /* 角度环输出：角速度内环设定值 */
-    float   target_tilt_deg;    /* 速度外环输出：角度环设定值 */
-    int16_t cached_yaw_corr_pm; /* 航向环缓存的差分补偿，供 200 Hz 角速度环使用 */
-    float   rate_lpf_dps;       /* 角速度测量 EMA 低通（抑制振动耦合噪声） */
-    float   pitch_offset_deg;
-    float   pitch_lpf_deg;
-    float   speed_lpf_cps;   /* 速度反馈 EMA 低通：抑制编码器量化噪声 */
-    int8_t  pitch_sign;      /* +1 正常，-1 传感器前后反装时软件翻转 */
-    int8_t  yaw_sign;        /* +1 正常，-1 gz_dps/yaw_deg 符号翻转 */
-    int8_t  speed_sign;      /* +1 正常，-1 编码器方向与平衡环正向相反时翻转 */
-    bool    pitch_lpf_valid;
-    /* 陀螺 DC 零漂在线估计（原始 IMU body frame，不含 pitch_sign / yaw_sign）。
-     * 必须 raw_gy/gz - bias，再做 sign 翻转，再喂给控制环。 */
-    float    gy_bias_dps;     /* pitch 轴陀螺零漂（°/s） */
-    float    gz_bias_dps;     /* yaw   轴陀螺零漂（°/s） */
-    uint32_t bias_still_ticks; /* 连续满足 quiet 判据的节拍计数（200Hz 内环） */
-    bool     gyro_bias_valid;  /* true = 已经过启动自校准，运行时学习才被启用 */
-    float   yaw_kp;          /* 转向开环系数 */
-    float   yaw_target_deg;     /* [源 0] EKF 模式：锁定目标航向（°） */
-    bool    yaw_target_valid;   /* [源 0] EKF 模式：首次有效 yaw 才初始化 */
-    float   yaw_gz_integrated;  /* [源 1] 陀螺积分模式：累积偏航量（°） */
+    pid2_t  angle_pid;          /* 角度环 100 Hz：输入 tilt 误差 deg，输出 PWM permille */
+    pid2_t  speed_pid;          /* 速度外环 20 Hz：输入 cps 误差，输出目标 tilt deg */
+    pid2_t  turn_pid;           /* 转向环 20 Hz：输入差速误差，输出差分 PWM permille */
+    float   target_tilt_deg;    /* 速度环输出：角度环目标角 */
+    float   turn_corr_pm;       /* 转向环输出：差分 PWM 补偿 */
+    float   speed_lpf_cps;      /* 速度反馈 EMA 低通 */
+    float   pitch_offset_deg;   /* 直立零点 */
+    int8_t  speed_sign;         /* +1 正常，-1 编码器方向反向 */
     bool    lt_stream_enabled;
     app_balance_diag_t diag;
 } balance_state_t;
 
 static balance_state_t s_bal;
 
-static const float s_dt_rate_sec  = (float)APP_BALANCE_RATE_PERIOD_MS  / 1000.0f;
-static const float s_dt_angle_sec = (float)APP_BALANCE_ANGLE_PERIOD_MS / 1000.0f;
-static const float s_dt_yaw_sec   = (float)APP_BALANCE_YAW_PERIOD_MS   / 1000.0f;
-static const float s_dt_speed_sec = (float)APP_BALANCE_SPEED_PERIOD_MS / 1000.0f;
-
-#define APP_BAL_CMD_BUF_LEN  48u
+#define APP_BAL_CMD_BUF_LEN  64u
 #define APP_BAL_PID_SCALE    1000L
-
-/* 前向声明：陀螺零漂在线学习器（定义靠近 auto_calibrate_imu，紧接 K230 通讯段）。
- * balance_step_rate（位于本文件中段）需在拍尾调用此函数，定义远在其后，
- * 必须前向声明以避免严格编译器（AC6/GCC -Werror=implicit-function-declaration）报错。 */
-static void update_gyro_bias_estimator(float gy_raw_imu, float gz_raw_imu,
-                                       float target_rate, float meas_rate,
-                                       int32_t target_speed_cps,
-                                       int16_t target_yaw_pm);
 
 /* -------------------------------------------------------------------------- */
 /* 内部辅助                                                                    */
 /* -------------------------------------------------------------------------- */
+
+/* 浮点字段格式化辅助（避开 AC6 printf("%f") 浮点路径；在全文件范围内使用） */
+#define BAL_F2_X100(v)  ((int32_t)((v) * 100.0f + ((v) >= 0.0f ? 0.5f : -0.5f)))
+#define BAL_F2_S(v)     (BAL_F2_X100(v) < 0 ? '-' : ' ')
+#define BAL_F2_I(v)     ((int32_t)((BAL_F2_X100(v) < 0 ? -BAL_F2_X100(v) : BAL_F2_X100(v)) / 100))
+#define BAL_F2_F(v)     ((uint32_t)((BAL_F2_X100(v) < 0 ? -BAL_F2_X100(v) : BAL_F2_X100(v)) % 100))
 
 static int16_t clamp_pwm_pm(float v)
 {
@@ -90,172 +66,11 @@ static int16_t clamp_pwm_pm(float v)
     return (int16_t)v;
 }
 
-static float apply_pitch_orientation(float raw_pitch_deg)
+static int16_t clamp_turn_pm(float v)
 {
-    float centered = raw_pitch_deg - s_bal.pitch_offset_deg;
-    return (s_bal.pitch_sign < 0) ? -centered : centered;
-}
-
-static void reset_pitch_filter(void)
-{
-    s_bal.pitch_lpf_deg = 0.0f;
-    s_bal.pitch_lpf_valid = false;
-}
-
-static float filter_pitch(float pitch_deg)
-{
-    float alpha = APP_BALANCE_PITCH_LPF_ALPHA;
-    if (alpha <= 0.0f) {
-        s_bal.pitch_lpf_deg = pitch_deg;
-        s_bal.pitch_lpf_valid = true;
-        return pitch_deg;
-    }
-    if (alpha > 1.0f) {
-        alpha = 1.0f;
-    }
-
-    if (!s_bal.pitch_lpf_valid) {
-        s_bal.pitch_lpf_deg = pitch_deg;
-        s_bal.pitch_lpf_valid = true;
-        return pitch_deg;
-    }
-
-    s_bal.pitch_lpf_deg += alpha * (pitch_deg - s_bal.pitch_lpf_deg);
-    return s_bal.pitch_lpf_deg;
-}
-
-/** 把角度差折叠到 [-180, 180] 区间，处理 yaw 环绕。 */
-static float wrap_180(float deg)
-{
-    while (deg >  180.0f) { deg -= 360.0f; }
-    while (deg < -180.0f) { deg += 360.0f; }
-    return deg;
-}
-
-static int16_t clamp_yaw_correction(float v)
-{
-    if (v >  (float)APP_BALANCE_YAW_MAX_CORRECTION_PM) {
-        v =  (float)APP_BALANCE_YAW_MAX_CORRECTION_PM;
-    }
-    if (v < -(float)APP_BALANCE_YAW_MAX_CORRECTION_PM) {
-        v = -(float)APP_BALANCE_YAW_MAX_CORRECTION_PM;
-    }
+    if (v >  (float)APP_BALANCE_YAW_MAX_CORRECTION_PM) v =  (float)APP_BALANCE_YAW_MAX_CORRECTION_PM;
+    if (v < -(float)APP_BALANCE_YAW_MAX_CORRECTION_PM) v = -(float)APP_BALANCE_YAW_MAX_CORRECTION_PM;
     return (int16_t)v;
-}
-
-static void reset_yaw_state(void)
-{
-    pid_reset(&s_bal.yaw_pid);
-    s_bal.yaw_target_valid   = false;
-    s_bal.yaw_gz_integrated  = 0.0f;
-    s_bal.diag.yaw_error_deg     = 0.0f;
-    s_bal.diag.yaw_correction_pm = 0;
-}
-
-/**
- * Yaw 角度环一拍计算。
- *
- * 由编译期 APP_BALANCE_YAW_SOURCE 选择数据源：
- *
- *   0 = EKF 绝对角（yaw_deg）
- *       ─ 锁定首次目标角，后续用 wrap_180 + virtual_measured 跟踪；
- *       ─ 转向时持续更新目标角为当前角，结束后无缝接管。
- *
- *   1 = 陀螺仪积分（gz_dps × dt）
- *       ─ 直行时持续积分，PID 以"归零积分量"为目标；
- *       ─ D 项等效于 gz_dps 角速率阻尼，天然平滑；
- *       ─ 转向时清零积分，转向结束后重新从 0 追踪；
- *       ─ 彻底无 ±180° 跳变，不受磁场干扰。
- *
- * 输出：差分补偿 permille，正值 → left 加 / right 减（即左轮加速 → 修正左偏）。
- */
-static int16_t yaw_angle_step(const app_balance_attitude_t *att,
-                               const app_balance_motion_cmd_t *cmd)
-{
-#if !APP_BALANCE_YAW_ENABLED
-    (void)att;
-    (void)cmd;
-    reset_yaw_state();
-    return 0;
-
-/* ---- 源 0：EKF 绝对偏航角 ------------------------------------------------ */
-#elif APP_BALANCE_YAW_SOURCE == 0
-    if ((att == NULL) || (cmd == NULL)) {
-        reset_yaw_state();
-        return 0;
-    }
-
-    float yaw_deg = att->yaw_deg * (float)s_bal.yaw_sign;
-
-    /* 转向期间：暂停闭环，持续刷新目标角，转向结束后无缝接管 */
-    if (cmd->target_yaw_pm != 0) {
-        pid_reset(&s_bal.yaw_pid);
-        s_bal.yaw_target_deg   = yaw_deg;
-        s_bal.yaw_target_valid = true;
-        s_bal.diag.yaw_error_deg     = 0.0f;
-        s_bal.diag.yaw_correction_pm = 0;
-        return 0;
-    }
-
-    /* 直行：首拍初始化目标角 */
-    if (!s_bal.yaw_target_valid) {
-        s_bal.yaw_target_deg   = yaw_deg;
-        s_bal.yaw_target_valid = true;
-        pid_reset(&s_bal.yaw_pid);
-        s_bal.diag.yaw_error_deg     = 0.0f;
-        s_bal.diag.yaw_correction_pm = 0;
-        return 0;
-    }
-
-    /* wrap_180 误差，"virtual measured" 技巧避免 D 项在 ±180 跳变 */
-    float err          = wrap_180(s_bal.yaw_target_deg - yaw_deg);
-    float virtual_meas = s_bal.yaw_target_deg - err;
-    float raw_corr     = pid_step(&s_bal.yaw_pid,
-                                   s_bal.yaw_target_deg,
-                                   virtual_meas,
-                                   s_dt_yaw_sec);
-    int16_t corr_pm    = clamp_yaw_correction(raw_corr);
-
-    s_bal.diag.yaw_error_deg     = err;
-    s_bal.diag.yaw_correction_pm = corr_pm;
-    return corr_pm;
-
-/* ---- 源 1：陀螺仪积分（gz_dps × dt） -------------------------------------- */
-#else
-    if ((att == NULL) || (cmd == NULL)) {
-        reset_yaw_state();
-        return 0;
-    }
-
-    /* 转向期间：暂停 PID，清零积分，转向结束后从 0 重新追踪 */
-    if (cmd->target_yaw_pm != 0) {
-        pid_reset(&s_bal.yaw_pid);
-        s_bal.yaw_gz_integrated      = 0.0f;
-        s_bal.diag.yaw_error_deg     = 0.0f;
-        s_bal.diag.yaw_correction_pm = 0;
-        return 0;
-    }
-
-    /* 直行：积分 (gz_dps - gz_bias)（经 yaw_sign 修正极性），PID 以"归零积分量"为目标。
-     * D 项 = -Kd * d(yaw_gz_integrated)/dt ≈ -Kd * gz_dps * yaw_sign，
-     * 天然提供角速率阻尼，无需单独引入速率反馈。
-     *
-     * ⚠️ 扣 gz_bias 至关重要：若不扣，30~60s 直行后 yaw_gz_integrated 会因
-     *    陀螺 z 轴 DC 零漂积累 1°+ 假航向偏差，让 yaw PID 修正一个根本不存在
-     *    的偏航，结果就是车持续画弧。 */
-    s_bal.yaw_gz_integrated += (att->gz_dps - s_bal.gz_bias_dps) *
-                                (float)s_bal.yaw_sign * s_dt_yaw_sec;
-
-    float raw_corr  = pid_step(&s_bal.yaw_pid,
-                                0.0f,
-                                s_bal.yaw_gz_integrated,
-                                s_dt_yaw_sec);
-    int16_t corr_pm = clamp_yaw_correction(raw_corr);
-
-    s_bal.diag.yaw_error_deg     = -s_bal.yaw_gz_integrated; /* error = target - measured */
-    s_bal.diag.yaw_correction_pm = corr_pm;
-    return corr_pm;
-#endif
 }
 
 /* -------------------------------------------------------------------------- */
@@ -264,102 +79,61 @@ static int16_t yaw_angle_step(const app_balance_attitude_t *att,
 
 void app_balance_init(void)
 {
-    pid_init(&s_bal.speed_pid);
-    pid_init(&s_bal.angle_pid);
-    pid_init(&s_bal.rate_pid);
-    pid_init(&s_bal.yaw_pid);
+    pid2_init(&s_bal.angle_pid);
+    pid2_init(&s_bal.speed_pid);
+    pid2_init(&s_bal.turn_pid);
 
-    /* 速度外环 20 Hz：输出"目标 tilt deg"，限幅 ±MAX_TILT_DEG
-     *
-     * ⚠️ pid_set_integral_limit 是必做项：默认 i_max=0 会回退到 u_max=MAX_TILT_DEG，
-     * 让 I 项可以单独把目标俯仰角推到 ±10° → 等效"假平衡点"，是漂移核心根因。 */
-    pid_set_output_limit(&s_bal.speed_pid,
-        -(float)APP_BALANCE_MAX_TILT_DEG, (float)APP_BALANCE_MAX_TILT_DEG);
-    pid_set_integral_limit(&s_bal.speed_pid, APP_BALANCE_SPEED_INTEGRAL_LIMIT_DEG);
-    pid_set_d_filter(&s_bal.speed_pid, APP_BALANCE_SPEED_D_FILTER_ALPHA);
+    /* 角度环 100 Hz：输出 PWM permille */
+    s_bal.angle_pid.out_min    = -(float)APP_BALANCE_MAX_PWM_PERMILLE;
+    s_bal.angle_pid.out_max    =  (float)APP_BALANCE_MAX_PWM_PERMILLE;
+    s_bal.angle_pid.i_min      = -600.0f;
+    s_bal.angle_pid.i_max      =  600.0f;
+    s_bal.angle_pid.out_offset = APP_BALANCE_ANGLE_OUT_OFFSET;
 
-    /* 角度环 100 Hz：输出"目标角速率 °/s"，限幅 ±MAX_TARGET_RATE_DPS。
-     * 同样必须独立设积分上限，防止剧烈推搡瞬态被 I 累积为持续 target_rate 偏置。 */
-    pid_set_output_limit(&s_bal.angle_pid,
-        -(float)APP_BALANCE_MAX_TARGET_RATE_DPS,
-         (float)APP_BALANCE_MAX_TARGET_RATE_DPS);
-    pid_set_integral_limit(&s_bal.angle_pid, APP_BALANCE_ANGLE_INTEGRAL_LIMIT_DPS);
+    /* 速度外环 20 Hz：输出目标俯仰角（°） */
+    s_bal.speed_pid.out_min    = -(float)APP_BALANCE_MAX_TILT_DEG;
+    s_bal.speed_pid.out_max    =  (float)APP_BALANCE_MAX_TILT_DEG;
+    s_bal.speed_pid.i_min      = -150.0f;
+    s_bal.speed_pid.i_max      =  150.0f;
+    s_bal.speed_pid.out_offset = APP_BALANCE_SPEED_OUT_OFFSET;
 
-    /* 角速度内环 200 Hz：输出 PWM permille，限幅 ±MAX_PWM。
-     * 当业务侧用 `rp Kp 50 0` 给 rate 加微小 Ki 抵消陀螺零漂时，此独立上限避免饱和。 */
-    pid_set_output_limit(&s_bal.rate_pid,
-        -(float)APP_BALANCE_MAX_PWM_PERMILLE,
-         (float)APP_BALANCE_MAX_PWM_PERMILLE);
-    pid_set_integral_limit(&s_bal.rate_pid, APP_BALANCE_RATE_INTEGRAL_LIMIT_PM);
-    pid_set_d_filter(&s_bal.rate_pid, APP_BALANCE_RATE_D_FILTER_ALPHA);
+    /* 转向环 20 Hz：输出差分 PWM permille */
+    s_bal.turn_pid.out_min    = -(float)APP_BALANCE_YAW_MAX_CORRECTION_PM;
+    s_bal.turn_pid.out_max    =  (float)APP_BALANCE_YAW_MAX_CORRECTION_PM;
+    s_bal.turn_pid.i_min      = -20.0f;
+    s_bal.turn_pid.i_max      =  20.0f;
+    s_bal.turn_pid.out_offset = APP_BALANCE_TURN_OUT_OFFSET;
 
-    /* 航向环 50 Hz：输出差分 PWM permille，限幅 ±YAW_MAX_CORRECTION。
-     * 限 I 项避免陀螺 zg 零漂在长直行下把车锁在画弧轨迹上。 */
-    pid_set_output_limit(&s_bal.yaw_pid,
-        -(float)APP_BALANCE_YAW_MAX_CORRECTION_PM,
-         (float)APP_BALANCE_YAW_MAX_CORRECTION_PM);
-    pid_set_integral_limit(&s_bal.yaw_pid, APP_BALANCE_YAW_INTEGRAL_LIMIT_PM);
-    pid_set_d_filter(&s_bal.yaw_pid, APP_BALANCE_YAW_D_FILTER_ALPHA);
-
-    s_bal.target_rate_dps    = 0.0f;
-    s_bal.target_tilt_deg    = 0.0f;
-    s_bal.cached_yaw_corr_pm = 0;
-    s_bal.rate_lpf_dps       = 0.0f;
-    s_bal.pitch_offset_deg   = 0.8f;
-    s_bal.speed_lpf_cps      = 0.0f;
-    s_bal.gy_bias_dps        = 0.0f;
-    s_bal.gz_bias_dps        = 0.0f;
-    s_bal.bias_still_ticks   = 0u;
-    s_bal.gyro_bias_valid    = false;
-    reset_pitch_filter();
-    s_bal.pitch_sign =
-#if APP_BALANCE_PITCH_INVERT
-        -1;
-#else
-        1;
-#endif
-    s_bal.yaw_sign =
-#if APP_BALANCE_YAW_INVERT
-        -1;
-#else
-        1;
-#endif
+    s_bal.target_tilt_deg  = 0.0f;
+    s_bal.turn_corr_pm     = 0.0f;
+    s_bal.speed_lpf_cps    = 0.0f;
+    s_bal.pitch_offset_deg = 0.8f;
     s_bal.speed_sign =
 #if APP_BALANCE_SPEED_INVERT
         -1;
 #else
         1;
 #endif
-    s_bal.yaw_kp = 1.0f;
     s_bal.lt_stream_enabled = false;
-    reset_yaw_state();
 
-    s_bal.diag.target_tilt_deg = 0.0f;
-    s_bal.diag.pitch_meas_deg  = 0.0f;
-    s_bal.diag.balance_out_pwm = 0.0f;
-    s_bal.diag.left_cmd_pm     = 0;
-    s_bal.diag.right_cmd_pm    = 0;
-    s_bal.diag.speed_meas_cps  = 0;
-    s_bal.diag.driving         = false;
+    s_bal.diag.target_tilt_deg    = 0.0f;
+    s_bal.diag.pitch_meas_deg     = 0.0f;
+    s_bal.diag.balance_out_pwm    = 0.0f;
+    s_bal.diag.yaw_correction_pm  = 0;
+    s_bal.diag.left_cmd_pm        = 0;
+    s_bal.diag.right_cmd_pm       = 0;
+    s_bal.diag.speed_meas_cps     = 0;
+    s_bal.diag.driving            = false;
 }
 
 void app_balance_reset(void)
 {
-    pid_reset(&s_bal.speed_pid);
-    pid_reset(&s_bal.angle_pid);
-    pid_reset(&s_bal.rate_pid);
-    s_bal.target_rate_dps    = 0.0f;
-    s_bal.target_tilt_deg    = 0.0f;
-    s_bal.cached_yaw_corr_pm = 0;
-    s_bal.rate_lpf_dps       = 0.0f;
-    s_bal.speed_lpf_cps      = 0.0f;
-    /* 注意：gy_bias_dps / gz_bias_dps / gyro_bias_valid 不在此清零。
-     * 陀螺零漂是物理传感器特性（温漂 + 安装应力），与 PID 内部状态无关，
-     * FALLEN → ARMED 再起时若清掉 bias 会丢失启动校准结果，立刻引入持续漂移。
-     * 只清 quiet 计数以让在线学习从干净状态重新启动。 */
-    s_bal.bias_still_ticks   = 0u;
-    reset_pitch_filter();
-    reset_yaw_state();
+    pid2_reset(&s_bal.angle_pid);
+    pid2_reset(&s_bal.speed_pid);
+    pid2_reset(&s_bal.turn_pid);
+    s_bal.target_tilt_deg = 0.0f;
+    s_bal.turn_corr_pm    = 0.0f;
+    s_bal.speed_lpf_cps   = 0.0f;
 }
 
 void app_balance_set_pitch_offset(float deg)
@@ -367,32 +141,10 @@ void app_balance_set_pitch_offset(float deg)
     s_bal.pitch_offset_deg = deg;
 }
 
-void app_balance_set_pitch_inverted(bool inverted)
-{
-    s_bal.pitch_sign = inverted ? (int8_t)-1 : (int8_t)1;
-    app_balance_reset();
-}
-
-bool app_balance_get_pitch_inverted(void)
-{
-    return (s_bal.pitch_sign < 0);
-}
-
-void app_balance_set_yaw_inverted(bool inverted)
-{
-    s_bal.yaw_sign = inverted ? (int8_t)-1 : (int8_t)1;
-    reset_yaw_state();
-}
-
-bool app_balance_get_yaw_inverted(void)
-{
-    return (s_bal.yaw_sign < 0);
-}
-
 void app_balance_set_speed_inverted(bool inverted)
 {
     s_bal.speed_sign = inverted ? (int8_t)-1 : (int8_t)1;
-    pid_reset(&s_bal.speed_pid);
+    pid2_reset(&s_bal.speed_pid);
     s_bal.speed_lpf_cps   = 0.0f;
     s_bal.target_tilt_deg = 0.0f;
 }
@@ -402,159 +154,28 @@ bool app_balance_get_speed_inverted(void)
     return (s_bal.speed_sign < 0);
 }
 
-void app_balance_set_balance_gains(float kp, float ki, float kd)
+void app_balance_set_balance_gains(float kp, float ki, float kd, float out_offset)
 {
-    pid_set_gains(&s_bal.angle_pid, kp, ki, kd);
+    s_bal.angle_pid.kp         = kp;
+    s_bal.angle_pid.ki         = ki;
+    s_bal.angle_pid.kd         = kd;
+    s_bal.angle_pid.out_offset = out_offset;
 }
 
-void app_balance_set_rate_gains(float kp, float ki, float kd)
+void app_balance_set_speed_gains(float kp, float ki, float kd, float out_offset)
 {
-    pid_set_gains(&s_bal.rate_pid, kp, ki, kd);
+    s_bal.speed_pid.kp         = kp;
+    s_bal.speed_pid.ki         = ki;
+    s_bal.speed_pid.kd         = kd;
+    s_bal.speed_pid.out_offset = out_offset;
 }
 
-void app_balance_set_speed_gains(float kp, float ki, float kd)
+void app_balance_set_yaw_gains(float kp, float ki, float kd, float out_offset)
 {
-    pid_set_gains(&s_bal.speed_pid, kp, ki, kd);
-}
-
-void app_balance_set_yaw_kp(float kp_yaw)
-{
-    s_bal.yaw_kp = kp_yaw;
-}
-
-void app_balance_set_yaw_gains(float kp, float ki, float kd)
-{
-    pid_set_gains(&s_bal.yaw_pid, kp, ki, kd);
-}
-
-/* -------------------------------------------------------------------------- */
-/* 多速率级联子函数                                                             */
-/* -------------------------------------------------------------------------- */
-
-/** 速度外环（20 Hz）：输入 cps 误差，输出目标 tilt deg → s_bal.target_tilt_deg */
-static void balance_step_speed(const app_balance_motion_cmd_t *cmd)
-{
-    bsp_motor_feedback_t fb;
-    bsp_motor_get_feedback(&fb);
-    /* speed_sign：+1 = 编码器正向与平衡环正向一致；-1 = 方向相反（需翻转）。
-     * 可用串口 si0/si1 在线切换，或修改 APP_BALANCE_SPEED_INVERT 宏重编译。
-     * 诊断方法：不开速度环，看心跳 v= 字段；小车漂移时 v 应与漂移方向同号。
-     *
-     * 量纲归一化：除以 APP_BALANCE_SPEED_CPS_SCALE（默认 10）。
-     * 原始 avg_cps 在典型漂移速度（0.1 rev/s）下约为 5100，若直接用于 PID，
-     * sp 1（Kp=0.001）即产生 5.1° 倾角指令，立即触发饱和极限环。
-     * 归一化后 → 510，sp 1 对应 0.51°，从安全值开始调试。
-     * target_speed_cps 同步归一化，保持误差量纲一致。 */
-    int32_t avg_cps_raw = ((fb.left_speed_cps + fb.right_speed_cps) / 2)
-                          * (int32_t)s_bal.speed_sign;
-    float norm_cps = (float)avg_cps_raw / (float)APP_BALANCE_SPEED_CPS_SCALE;
-
-    float spd_alpha = APP_BALANCE_SPEED_LPF_ALPHA;
-    s_bal.speed_lpf_cps += spd_alpha * (norm_cps - s_bal.speed_lpf_cps);
-
-    float target_norm = (float)cmd->target_speed_cps / (float)APP_BALANCE_SPEED_CPS_SCALE;
-    s_bal.target_tilt_deg = pid_step(&s_bal.speed_pid,
-        target_norm,
-        s_bal.speed_lpf_cps,
-        s_dt_speed_sec);
-
-    s_bal.diag.target_tilt_deg = s_bal.target_tilt_deg;
-    s_bal.diag.speed_meas_cps  = (int32_t)s_bal.speed_lpf_cps;
-}
-
-/** 角度环（100 Hz）：输入 tilt 误差 deg，输出目标角速率 °/s → s_bal.target_rate_dps */
-static void balance_step_angle(const app_balance_attitude_t *att)
-{
-    float pitch_meas = filter_pitch(apply_pitch_orientation(att->pitch_deg));
-
-    s_bal.target_rate_dps = pid_step(&s_bal.angle_pid,
-        s_bal.target_tilt_deg,
-        pitch_meas,
-        s_dt_angle_sec);
-
-    s_bal.diag.pitch_meas_deg = pitch_meas;
-}
-
-/** 航向环（50 Hz）：输出差分补偿 → s_bal.cached_yaw_corr_pm */
-static void balance_step_yaw(const app_balance_attitude_t *att,
-                              const app_balance_motion_cmd_t *cmd)
-{
-    s_bal.cached_yaw_corr_pm = yaw_angle_step(att, cmd);
-}
-
-/**
- * 角速度内环（200 Hz）：输入角速率误差 °/s，输出 PWM → bsp_motor_set_output。
- *
- * 同时执行 safety tick + 电机输出。safety 使用最近一次 100 Hz 角度环的 pitch_meas。
- */
-static void balance_step_rate(const app_balance_attitude_t *att,
-                               const app_balance_motion_cmd_t *cmd)
-{
-    /* safety tick：使用角度环最新的 pitch_meas */
-    app_safety_attitude_t sa = {
-        .pitch_deg      = s_bal.diag.pitch_meas_deg,
-        .attitude_valid = att->attitude_valid,
-    };
-    (void)app_safety_tick(&sa);
-
-    if (app_safety_is_startup_grace_active() ||
-        !app_safety_can_drive() || !att->attitude_valid) {
-        app_balance_reset();
-        s_bal.diag.balance_out_pwm   = 0.0f;
-        s_bal.diag.yaw_correction_pm = 0;
-        s_bal.diag.yaw_error_deg     = 0.0f;
-        s_bal.diag.left_cmd_pm       = 0;
-        s_bal.diag.right_cmd_pm      = 0;
-        s_bal.diag.driving           = false;
-        return;
-    }
-
-    /* 角速度测量值处理（顺序：扣 IMU 零漂 → pitch_sign 翻转 → EMA 低通）：
-     *
-     *   ① 先扣 gy_bias_dps：bias 存储在原始 IMU body frame，不含 pitch_sign。
-     *      若未做启动校准 bias=0，等效旧行为；校准后 bias≈+0.3°/s 被精确抵消。
-     *   ② 然后做 pitch_sign 翻转：业务层期望"车头上扬为正"的角速率。
-     *   ③ 最后 LPF：抑制振动耦合噪声。
-     *
-     *   注意：此处 LPF 不同于 PID 内部 D 项滤波（APP_BALANCE_RATE_D_FILTER_ALPHA）。 */
-    float gy_corrected_imu = att->pitch_rate_dps - s_bal.gy_bias_dps;
-    float raw_rate         = gy_corrected_imu * (float)s_bal.pitch_sign;
-    s_bal.rate_lpf_dps    += APP_BALANCE_RATE_MEAS_LPF_ALPHA *
-                              (raw_rate - s_bal.rate_lpf_dps);
-    float measured_rate    = s_bal.rate_lpf_dps;
-
-    /* 角速度 PD：输入 = 目标角速率 - 实测角速率，输出 = PWM permille */
-    float pwm_out = pid_step(&s_bal.rate_pid,
-        s_bal.target_rate_dps,
-        measured_rate,
-        s_dt_rate_sec);
-
-    /* 运行时陀螺零漂在线学习（200Hz 调用）：放在 pid_step 之后、电机输出之前。
-     *   用原始 IMU body frame gy/gz（未经 sign 翻转、未减 bias）以匹配 bias 定义；
-     *   quiet 判据用经 sign 翻转的 measured / target rate（与 PID 同框架）。 */
-    update_gyro_bias_estimator(att->pitch_rate_dps, att->gz_dps,
-                                s_bal.target_rate_dps, measured_rate,
-                                cmd->target_speed_cps, cmd->target_yaw_pm);
-
-    /* 转向叠加 + 航向环差分补偿 */
-    float yaw_pm     = (float)cmd->target_yaw_pm * s_bal.yaw_kp;
-    int16_t yaw_corr = s_bal.cached_yaw_corr_pm;
-    int16_t left_pm  = clamp_pwm_pm(pwm_out - yaw_pm + (float)yaw_corr);
-    int16_t right_pm = clamp_pwm_pm(pwm_out + yaw_pm - (float)yaw_corr);
-
-#if APP_BALANCE_ZERO_BAND_PM > 0
-    if (left_pm  > -APP_BALANCE_ZERO_BAND_PM && left_pm  < APP_BALANCE_ZERO_BAND_PM)
-        left_pm  = 0;
-    if (right_pm > -APP_BALANCE_ZERO_BAND_PM && right_pm < APP_BALANCE_ZERO_BAND_PM)
-        right_pm = 0;
-#endif
-
-    bsp_motor_set_output(left_pm, right_pm);
-
-    s_bal.diag.balance_out_pwm = pwm_out;
-    s_bal.diag.left_cmd_pm     = left_pm;
-    s_bal.diag.right_cmd_pm    = right_pm;
-    s_bal.diag.driving         = true;
+    s_bal.turn_pid.kp         = kp;
+    s_bal.turn_pid.ki         = ki;
+    s_bal.turn_pid.kd         = kd;
+    s_bal.turn_pid.out_offset = out_offset;
 }
 
 void app_balance_get_diag(app_balance_diag_t *out)
@@ -563,61 +184,244 @@ void app_balance_get_diag(app_balance_diag_t *out)
     *out = s_bal.diag;
 }
 
+/* -------------------------------------------------------------------------- */
+/* 多速率级联子函数                                                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 速度/转向外环（20 Hz）：
+ *   - SpeedPID：输入 cps 误差，输出 target_tilt_deg（角度环 setpoint）
+ *   - TurnPID ：输入差速误差，输出 turn_corr_pm（差分 PWM 补偿）
+ *
+ * EKF 加速度耦合门控：若 |a_mag - 1g| > 0.15g（剧烈加速/减速），
+ * 本拍跳过 SpeedPID 更新，防 EKF pitch 瞬时耦合污染速度环积分。
+ */
+static void balance_step_speed(const app_balance_attitude_t *att,
+                                const app_balance_motion_cmd_t *cmd)
+{
+    bsp_motor_feedback_t fb;
+    bsp_motor_get_feedback(&fb);
+
+    /* 量纲归一化：除以 SCALE（默认 10），避免大 cps 直通后 PID 发散 */
+    int32_t avg_cps_raw = ((fb.left_speed_cps + fb.right_speed_cps) / 2)
+                          * (int32_t)s_bal.speed_sign;
+    float norm_cps = (float)avg_cps_raw / (float)APP_BALANCE_SPEED_CPS_SCALE;
+
+    s_bal.speed_lpf_cps += APP_BALANCE_SPEED_LPF_ALPHA *
+                           (norm_cps - s_bal.speed_lpf_cps);
+
+    /* EKF 加速度耦合门控：剧烈机动时跳过 SpeedPID（保护积分不受污染） */
+    float a2 = (att->ax_g * att->ax_g) +
+               (att->ay_g * att->ay_g) +
+               (att->az_g * att->az_g);
+    float a_err = a2 - 1.0f;
+    if (a_err < 0.0f) a_err = -a_err;
+    bool accel_ok = (a_err < (2.0f * 0.15f));   /* |a_mag - 1g| < 0.15g */
+
+    if (accel_ok) {
+        float target_norm = (float)cmd->target_speed_cps / (float)APP_BALANCE_SPEED_CPS_SCALE;
+        s_bal.speed_pid.target = target_norm;
+        s_bal.speed_pid.actual = s_bal.speed_lpf_cps;
+        pid2_update(&s_bal.speed_pid);
+        s_bal.target_tilt_deg = s_bal.speed_pid.out;
+    }
+
+    /* 转向环：以目标差速（来自 K230 转向命令）为 setpoint，实测差速为 actual。
+     * 正 target_yaw_pm → 顺时针（俯视）→ left 快 right 慢。
+     * DifSpeed = (left - right) / 2 / SCALE，与 target_yaw_pm 同量纲。 */
+    float dif_cps_raw = (float)(fb.left_speed_cps - fb.right_speed_cps) / 2.0f
+                        * (float)s_bal.speed_sign;
+    float dif_norm = dif_cps_raw / (float)APP_BALANCE_SPEED_CPS_SCALE;
+
+    s_bal.turn_pid.target = (float)cmd->target_yaw_pm;
+    s_bal.turn_pid.actual = dif_norm;
+    pid2_update(&s_bal.turn_pid);
+    s_bal.turn_corr_pm = s_bal.turn_pid.out;
+
+    s_bal.diag.target_tilt_deg   = s_bal.target_tilt_deg;
+    s_bal.diag.yaw_correction_pm = clamp_turn_pm(s_bal.turn_corr_pm);
+    s_bal.diag.speed_meas_cps    = (int32_t)s_bal.speed_lpf_cps;
+}
+
+/**
+ * 角度环（100 Hz）：
+ *   1. safety tick（跌倒检测 + 电池检查）
+ *   2. 用 pid2_update(AnglePID) 输出 PWM
+ *   3. 混合转向差分，分发左右轮命令
+ */
+static void balance_step_angle(const app_balance_attitude_t *att,
+                                const app_balance_motion_cmd_t *cmd)
+{
+    /* safety tick（以 pitch 误差 deg 为输入，已减零点并按安装方向修正符号） */
+    float pitch_meas = att->pitch_deg - s_bal.pitch_offset_deg;
+#if APP_BALANCE_PITCH_INVERT
+    pitch_meas = -pitch_meas;
+#endif
+    app_safety_attitude_t sa = {
+        .pitch_deg      = pitch_meas,
+        .attitude_valid = att->attitude_valid,
+    };
+    (void)app_safety_tick(&sa);
+
+    s_bal.diag.pitch_meas_deg = pitch_meas;
+
+    /* 跌倒 / 安全态不允许驱动时清空状态机并停输出 */
+    if (app_safety_is_startup_grace_active() ||
+        !app_safety_can_drive() || !att->attitude_valid) {
+        app_balance_reset();
+        s_bal.diag.balance_out_pwm   = 0.0f;
+        s_bal.diag.left_cmd_pm       = 0;
+        s_bal.diag.right_cmd_pm      = 0;
+        s_bal.diag.driving           = false;
+        (void)cmd;
+        return;
+    }
+
+    /* 追加 APP_BALANCE_FALL_PITCH_DEG 早期跌倒保护（50°，比 safety 模块的 60° 严格） */
+    float pitch_abs = (pitch_meas < 0.0f) ? -pitch_meas : pitch_meas;
+    if (pitch_abs > APP_BALANCE_FALL_PITCH_DEG) {
+        app_safety_disarm();
+        app_balance_reset();
+        s_bal.diag.balance_out_pwm = 0.0f;
+        s_bal.diag.left_cmd_pm     = 0;
+        s_bal.diag.right_cmd_pm    = 0;
+        s_bal.diag.driving         = false;
+        return;
+    }
+
+    /* 角度环：target = speed 外环输出，actual = 实测俯仰偏差 */
+    s_bal.angle_pid.target = s_bal.target_tilt_deg;
+    s_bal.angle_pid.actual = pitch_meas;
+    pid2_update(&s_bal.angle_pid);
+    float ave_pwm = s_bal.angle_pid.out;
+
+    /* 混合转向差分：left = ave + dif/2, right = ave - dif/2 */
+    float dif_half = s_bal.turn_corr_pm * 0.5f;
+    int16_t left_pm  = clamp_pwm_pm(ave_pwm + dif_half);
+    int16_t right_pm = clamp_pwm_pm(ave_pwm - dif_half);
+
+    bsp_motor_set_output(left_pm, right_pm);
+
+    s_bal.diag.balance_out_pwm = ave_pwm;
+    s_bal.diag.left_cmd_pm     = left_pm;
+    s_bal.diag.right_cmd_pm    = right_pm;
+    s_bal.diag.driving         = true;
+}
+
 /* ========================================================================== */
-/* Stage 2.2 上车基线主循环（吸收 Stage 1.6 telemetry 的 IMU drain + 心跳日志）  */
+/* 上电自校零：pitch_offset_deg                                                 */
 /* ========================================================================== */
 
-/* 单拍 drain UART3 RX 环缓上限，与原 telemetry 一致：
- * MS901M 默认 5 帧 × 200 Hz × ~15 B ≈ 15 kB/s = 15 B/ms，64 B 单拍裕度 4×。 */
-#define APP_BAL_IMU_DRAIN_CHUNK     64u
+/**
+ * 上电静止采样自校零：阻塞 APP_BALANCE_PITCH_AUTOZERO_MS 毫秒，
+ * 仅校准 pitch_offset_deg（新 2 级架构无角速度内环，无需 gyro bias 补偿）。
+ *
+ * 静止判据：|gy_dps| ≤ DEADBAND_DPS 且 |a_mag² - 1| ≤ 2×ACC_DEVIATION_G
+ * 容错：有效样本 < 20 则沿用 init 默认值，日志打印 FAILED。
+ */
+static void auto_zero_pitch_offset(void)
+{
+#if APP_BALANCE_PITCH_AUTOZERO_MS == 0
+    (void)printf("[autocal] disabled; pitch_offset=%c%ld.%02lu deg\r\n",
+                 BAL_F2_S(s_bal.pitch_offset_deg),
+                 (long)BAL_F2_I(s_bal.pitch_offset_deg),
+                 (unsigned long)BAL_F2_F(s_bal.pitch_offset_deg));
+    return;
+#else
+    const uint32_t end_ms       = bsp_systick_get_ms() + APP_BALANCE_PITCH_AUTOZERO_MS;
+    float    sum_pitch           = 0.0f;
+    uint32_t n_samples           = 0u;
+    uint32_t n_rejected          = 0u;
+    uint32_t last_sample_ms      = bsp_systick_get_ms();
 
-/* 调度相位（1 ms tick 倍数） */
-#define APP_BAL_PHASE_RATE_TICKS    APP_BALANCE_RATE_PERIOD_MS     /* 200 Hz */
+    (void)printf("[autocal] sampling pitch for %lums (keep car upright and STILL)\r\n",
+                 (unsigned long)APP_BALANCE_PITCH_AUTOZERO_MS);
+
+    while ((int32_t)(end_ms - bsp_systick_get_ms()) > 0) {
+        uint8_t imu_buf[64u];
+        size_t  got = bsp_imu_uart_rx_pop_bulk(imu_buf, sizeof(imu_buf));
+        if (got > 0u) {
+            ms901m_feed_bytes(imu_buf, got);
+        }
+
+        uint32_t now_ms = bsp_systick_get_ms();
+        if ((now_ms - last_sample_ms) >= 10u) {
+            last_sample_ms = now_ms;
+
+            ms901m_snapshot_t s;
+            ms901m_get_snapshot(&s);
+            if (!s.has_attitude || !s.has_gyro_acc) {
+                continue;
+            }
+
+            float gy_abs = (s.gy_dps < 0.0f) ? -s.gy_dps : s.gy_dps;
+            float gz_abs = (s.gz_dps < 0.0f) ? -s.gz_dps : s.gz_dps;
+            if ((gy_abs > APP_BALANCE_PITCH_AUTOZERO_RATE_DEADBAND_DPS) ||
+                (gz_abs > APP_BALANCE_PITCH_AUTOZERO_RATE_DEADBAND_DPS)) {
+                n_rejected++;
+                continue;
+            }
+
+            float a2     = (s.ax_g * s.ax_g) + (s.ay_g * s.ay_g) + (s.az_g * s.az_g);
+            float a2_dev = a2 - 1.0f;
+            if (a2_dev < 0.0f) a2_dev = -a2_dev;
+            if (a2_dev > (2.0f * APP_BALANCE_PITCH_AUTOZERO_ACC_DEVIATION_G)) {
+                n_rejected++;
+                continue;
+            }
+
+            sum_pitch += s.pitch_deg;
+            n_samples++;
+        }
+
+        bsp_systick_delay_ms(1u);
+    }
+
+    if (n_samples >= 20u) {
+        float new_offset = sum_pitch / (float)n_samples;
+        app_balance_set_pitch_offset(new_offset);
+        (void)printf("[autocal] OK pitch_offset=%c%ld.%02lu deg (n=%lu, rejected=%lu)\r\n",
+                     BAL_F2_S(new_offset),
+                     (long)BAL_F2_I(new_offset),
+                     (unsigned long)BAL_F2_F(new_offset),
+                     (unsigned long)n_samples,
+                     (unsigned long)n_rejected);
+    } else {
+        (void)printf("[autocal] FAILED n=%lu rejected=%lu; keep car still & power-cycle. "
+                     "Using default pitch_offset=%c%ld.%02lu deg\r\n",
+                     (unsigned long)n_samples,
+                     (unsigned long)n_rejected,
+                     BAL_F2_S(s_bal.pitch_offset_deg),
+                     (long)BAL_F2_I(s_bal.pitch_offset_deg),
+                     (unsigned long)BAL_F2_F(s_bal.pitch_offset_deg));
+    }
+#endif
+}
+
+/* ========================================================================== */
+/* Stage 2.2 上车基线主循环                                                     */
+/* ========================================================================== */
+
+#define APP_BAL_IMU_DRAIN_CHUNK  64u
 #define APP_BAL_PHASE_ANGLE_TICKS   APP_BALANCE_ANGLE_PERIOD_MS    /* 100 Hz */
-#define APP_BAL_PHASE_YAW_TICKS     APP_BALANCE_YAW_PERIOD_MS      /*  50 Hz */
 #define APP_BAL_PHASE_SPEED_TICKS   APP_BALANCE_SPEED_PERIOD_MS    /*  20 Hz */
 #define APP_BAL_PHASE_LED_TICKS     200u                            /*   5 Hz */
 #define APP_BAL_PHASE_LOG_TICKS     1000u                           /*   1 Hz */
 
-/* 浮点字段格式化辅助（与 app_telemetry.c 同款，避开 AC6 printf("%f") 浮点路径） */
-#define BAL_F2_X100(v)  ((int32_t)((v) * 100.0f + ((v) >= 0.0f ? 0.5f : -0.5f)))
-#define BAL_F2_S(v)     (BAL_F2_X100(v) < 0 ? '-' : ' ')
-#define BAL_F2_I(v)     ((int32_t)((BAL_F2_X100(v) < 0 ? -BAL_F2_X100(v) : BAL_F2_X100(v)) / 100))
-#define BAL_F2_F(v)     ((uint32_t)((BAL_F2_X100(v) < 0 ? -BAL_F2_X100(v) : BAL_F2_X100(v)) % 100))
-
 static int32_t cps_to_rpm_x100(int32_t cps, int32_t counts_per_rev)
 {
-    if (counts_per_rev <= 0) {
-        return 0;
-    }
+    if (counts_per_rev <= 0) return 0;
     return (int32_t)((cps * 6000L) / counts_per_rev);
 }
 
-static char scaled2_sign(int32_t x100)
-{
-    return (x100 < 0) ? '-' : '+';
-}
-
-static int32_t scaled2_int_abs(int32_t x100)
-{
-    int32_t abs_v = (x100 < 0) ? -x100 : x100;
-    return abs_v / 100;
-}
-
-static uint32_t scaled2_frac_abs(int32_t x100)
-{
-    int32_t abs_v = (x100 < 0) ? -x100 : x100;
-    return (uint32_t)(abs_v % 100);
-}
+static char scaled2_sign(int32_t x100) { return (x100 < 0) ? '-' : '+'; }
+static int32_t  scaled2_int_abs(int32_t x100)  { return ((x100 < 0) ? -x100 : x100) / 100; }
+static uint32_t scaled2_frac_abs(int32_t x100) { return (uint32_t)(((x100 < 0) ? -x100 : x100) % 100); }
 
 static bool is_test_command(const char *buf, uint8_t len)
 {
-    if ((len == 1u) && (buf[0] == 't')) {
-        return true;
-    }
-    return (len == 4u) &&
-           (buf[0] == 't') && (buf[1] == 'e') &&
-           (buf[2] == 's') && (buf[3] == 't');
+    if ((len == 1u) && (buf[0] == 't')) return true;
+    return (len == 4u) && (buf[0]=='t') && (buf[1]=='e') && (buf[2]=='s') && (buf[3]=='t');
 }
 
 static bool is_line_delimiter(uint8_t ch)
@@ -627,102 +431,70 @@ static bool is_line_delimiter(uint8_t ch)
 
 static bool is_field_separator(char ch)
 {
-    return (ch == ' ') || (ch == '\t') || (ch == ',') ||
-           (ch == ';') || (ch == ':');
+    return (ch == ' ') || (ch == '\t') || (ch == ',') || (ch == ';') || (ch == ':');
 }
 
 static void skip_separators(const char **p)
 {
-    while ((*p != NULL) && is_field_separator(**p)) {
-        (*p)++;
-    }
+    while ((*p != NULL) && is_field_separator(**p)) (*p)++;
 }
 
 static bool parse_i32_token(const char **p, int32_t *out)
 {
-    if ((p == NULL) || (*p == NULL) || (out == NULL)) {
-        return false;
-    }
-
+    if ((p == NULL) || (*p == NULL) || (out == NULL)) return false;
     skip_separators(p);
-
     int32_t sign = 1;
-    if (**p == '-') {
-        sign = -1;
-        (*p)++;
-    } else if (**p == '+') {
-        (*p)++;
-    }
-
-    if ((**p < '0') || (**p > '9')) {
-        return false;
-    }
-
+    if (**p == '-') { sign = -1; (*p)++; }
+    else if (**p == '+') { (*p)++; }
+    if ((**p < '0') || (**p > '9')) return false;
     int32_t v = 0;
-    while ((**p >= '0') && (**p <= '9')) {
-        v = (v * 10) + (int32_t)(**p - '0');
-        (*p)++;
-    }
+    while ((**p >= '0') && (**p <= '9')) { v = v * 10 + (int32_t)(**p - '0'); (*p)++; }
     *out = v * sign;
     return true;
 }
 
-static float scaled_to_float(int32_t x1000)
-{
-    return (float)x1000 / (float)APP_BAL_PID_SCALE;
-}
-
+static float scaled_to_float(int32_t x1000) { return (float)x1000 / (float)APP_BAL_PID_SCALE; }
 static int32_t float_to_scaled(float v)
 {
-    float scaled = v * (float)APP_BAL_PID_SCALE;
-    return (int32_t)(scaled + ((scaled >= 0.0f) ? 0.5f : -0.5f));
+    float s = v * (float)APP_BAL_PID_SCALE;
+    return (int32_t)(s + (s >= 0.0f ? 0.5f : -0.5f));
 }
 
-static void print_scaled3(const char *tag, float kp, float ki, float kd)
+static void print_pid2_status(const char *tag, const pid2_t *p)
 {
-    int32_t kp_i = float_to_scaled(kp);
-    int32_t ki_i = float_to_scaled(ki);
-    int32_t kd_i = float_to_scaled(kd);
+    int32_t kp_i = float_to_scaled(p->kp);
+    int32_t ki_i = float_to_scaled(p->ki);
+    int32_t kd_i = float_to_scaled(p->kd);
+    int32_t of_i = (int32_t)(p->out_offset + 0.5f);
     int32_t kp_abs = (kp_i < 0) ? -kp_i : kp_i;
     int32_t ki_abs = (ki_i < 0) ? -ki_i : ki_i;
     int32_t kd_abs = (kd_i < 0) ? -kd_i : kd_i;
-    (void)printf("[pid] %s kp=%c%ld.%03lu ki=%c%ld.%03lu kd=%c%ld.%03lu "
+    (void)printf("[pid] %s kp=%c%ld.%03lu ki=%c%ld.%03lu kd=%c%ld.%03lu offset=%ldpm "
                  "(x1000=%ld,%ld,%ld)\r\n",
         tag,
-        (kp_i < 0) ? '-' : '+',
-        (long)(kp_abs / APP_BAL_PID_SCALE),
-        (unsigned long)(kp_abs % APP_BAL_PID_SCALE),
-        (ki_i < 0) ? '-' : '+',
-        (long)(ki_abs / APP_BAL_PID_SCALE),
-        (unsigned long)(ki_abs % APP_BAL_PID_SCALE),
-        (kd_i < 0) ? '-' : '+',
-        (long)(kd_abs / APP_BAL_PID_SCALE),
-        (unsigned long)(kd_abs % APP_BAL_PID_SCALE),
+        (kp_i < 0) ? '-' : '+', (long)(kp_abs / APP_BAL_PID_SCALE), (unsigned long)(kp_abs % APP_BAL_PID_SCALE),
+        (ki_i < 0) ? '-' : '+', (long)(ki_abs / APP_BAL_PID_SCALE), (unsigned long)(ki_abs % APP_BAL_PID_SCALE),
+        (kd_i < 0) ? '-' : '+', (long)(kd_abs / APP_BAL_PID_SCALE), (unsigned long)(kd_abs % APP_BAL_PID_SCALE),
+        (long)of_i,
         (long)kp_i, (long)ki_i, (long)kd_i);
 }
 
 static void print_pid_status(void)
 {
-    print_scaled3("rate",    s_bal.rate_pid.kp,    s_bal.rate_pid.ki,    s_bal.rate_pid.kd);
-    print_scaled3("angle",   s_bal.angle_pid.kp,   s_bal.angle_pid.ki,   s_bal.angle_pid.kd);
-    print_scaled3("speed",   s_bal.speed_pid.kp,   s_bal.speed_pid.ki,   s_bal.speed_pid.kd);
-    print_scaled3("yaw",     s_bal.yaw_pid.kp,     s_bal.yaw_pid.ki,     s_bal.yaw_pid.kd);
-    (void)printf("[pid] loops: rate 200Hz, angle 100Hz, yaw 50Hz, speed 20Hz\r\n");
+    print_pid2_status("angle", &s_bal.angle_pid);
+    print_pid2_status("speed", &s_bal.speed_pid);
+    print_pid2_status("turn",  &s_bal.turn_pid);
+    (void)printf("[pid] loops: angle 100Hz, speed/turn 20Hz\r\n");
 }
 
 static void print_pid_help(void)
 {
-    (void)printf("[pid] UART commands: rp/bp/sp/yp <kp_x1000> <ki_x1000> <kd_x1000>, "
-                 "yi0/yi1, si0/si1, pid?, pid0, lt, lt0, t/test\r\n");
-    (void)printf("[pid] rp=rate(200Hz) bp=angle(100Hz) sp=speed(20Hz) yp=yaw(50Hz)\r\n");
-    (void)printf("[pid] yi0/yi1=yaw_invert  si0/si1=speed_invert(si?=query+v_meas)\r\n");
-    (void)printf("[pid] example: rp 1800 50 0 ; bp 35000 0 0 ; sp 5 1 0 ; yp 8000 0 0\r\n");
-    (void)printf("[pid] sp note: speed fb is normalized by /10 (SCALE=10); "
-                 "sp 5 at 0.1rev/s drift -> ~2.5deg tilt cmd\r\n");
-    (void)printf("[pid] anti-drift recipe (must!): "
-                 "use speed-I (sp ki=1~3) NOT angle-I; "
-                 "rate-I=50 cancels gyro zero-bias; "
-                 "all 4 PIDs now have independent i_max so wind-up bounded.\r\n");
+    (void)printf("[pid] commands: bp/sp/yp <kp_x1000> <ki_x1000> <kd_x1000> <offset_pm>, "
+                 "bo <offset_pm>, si0/si1, pid?, pid0, lt, lt0, t/test\r\n");
+    (void)printf("[pid] bp=angle(100Hz) sp=speed(20Hz) yp=turn(20Hz) bo=angle_offset_only\r\n");
+    (void)printf("[pid] offset_pm: direct permille, NOT x1000 (e.g. bo 80 = 80pm dead-zone comp)\r\n");
+    (void)printf("[pid] example: bo 80 ; bp 5000 0 5000 80 ; sp 2000 50 0 0 ; yp 4000 3000 0 0\r\n");
+    (void)printf("[pid] si? / si0 / si1 = speed_invert query/off/on\r\n");
 }
 
 static void send_lt_header(void)
@@ -737,35 +509,30 @@ static void set_lt_stream_enabled(bool enabled)
 {
     s_bal.lt_stream_enabled = enabled;
     (void)printf("[lt] high-rate CSV %s\r\n", enabled ? "on" : "off");
-    if (enabled) {
-        send_lt_header();
-    }
+    if (enabled) send_lt_header();
 }
 
 static void send_lt_sample(uint32_t now_ms,
                            const app_balance_motion_cmd_t *cmd,
                            const bsp_motor_feedback_t *fb)
 {
-    if (!s_bal.lt_stream_enabled || (cmd == NULL) || (fb == NULL)) {
-        return;
-    }
+    if (!s_bal.lt_stream_enabled || (cmd == NULL) || (fb == NULL)) return;
 
-    int32_t left_target_rpm_x100 = cps_to_rpm_x100(
-        cmd->target_speed_cps, BSP_MOTOR_LEFT_COUNTS_PER_OUTPUT_REV);
-    int32_t right_target_rpm_x100 = cps_to_rpm_x100(
-        cmd->target_speed_cps, BSP_MOTOR_RIGHT_COUNTS_PER_OUTPUT_REV);
-    int32_t left_actual_rpm_x100 = BAL_F2_X100(fb->left_speed_rpm);
-    int32_t right_actual_rpm_x100 = BAL_F2_X100(fb->right_speed_rpm);
+    int32_t lt_rpm = cps_to_rpm_x100(cmd->target_speed_cps, BSP_MOTOR_LEFT_COUNTS_PER_OUTPUT_REV);
+    int32_t rt_rpm = cps_to_rpm_x100(cmd->target_speed_cps, BSP_MOTOR_RIGHT_COUNTS_PER_OUTPUT_REV);
+    int32_t la_rpm = BAL_F2_X100(fb->left_speed_rpm);
+    int32_t ra_rpm = BAL_F2_X100(fb->right_speed_rpm);
 
     char line[128];
     int n = snprintf(line, sizeof(line),
         "lt,%lu,%c%ld.%02lu,%c%ld.%02lu,%c%ld.%02lu,%c%ld.%02lu,%c%ld.%02lu,%d,%d\r\n",
         (unsigned long)now_ms,
-        BAL_F2_S(s_bal.diag.pitch_meas_deg), (long)BAL_F2_I(s_bal.diag.pitch_meas_deg), (unsigned long)BAL_F2_F(s_bal.diag.pitch_meas_deg),
-        scaled2_sign(left_target_rpm_x100), (long)scaled2_int_abs(left_target_rpm_x100), (unsigned long)scaled2_frac_abs(left_target_rpm_x100),
-        scaled2_sign(right_target_rpm_x100), (long)scaled2_int_abs(right_target_rpm_x100), (unsigned long)scaled2_frac_abs(right_target_rpm_x100),
-        scaled2_sign(left_actual_rpm_x100), (long)scaled2_int_abs(left_actual_rpm_x100), (unsigned long)scaled2_frac_abs(left_actual_rpm_x100),
-        scaled2_sign(right_actual_rpm_x100), (long)scaled2_int_abs(right_actual_rpm_x100), (unsigned long)scaled2_frac_abs(right_actual_rpm_x100),
+        BAL_F2_S(s_bal.diag.pitch_meas_deg),
+        (long)BAL_F2_I(s_bal.diag.pitch_meas_deg), (unsigned long)BAL_F2_F(s_bal.diag.pitch_meas_deg),
+        scaled2_sign(lt_rpm), (long)scaled2_int_abs(lt_rpm), (unsigned long)scaled2_frac_abs(lt_rpm),
+        scaled2_sign(rt_rpm), (long)scaled2_int_abs(rt_rpm), (unsigned long)scaled2_frac_abs(rt_rpm),
+        scaled2_sign(la_rpm), (long)scaled2_int_abs(la_rpm), (unsigned long)scaled2_frac_abs(la_rpm),
+        scaled2_sign(ra_rpm), (long)scaled2_int_abs(ra_rpm), (unsigned long)scaled2_frac_abs(ra_rpm),
         (int)bsp_motor_get_left_actual_pwm(),
         (int)bsp_motor_get_right_actual_pwm());
 
@@ -774,147 +541,122 @@ static void send_lt_sample(uint32_t now_ms,
     }
 }
 
-static bool parse_pid_triplet(const char *args, float *kp, float *ki, float *kd)
+/**
+ * 解析 4 参数 PID 指令：kp_x1000 ki_x1000 kd_x1000 offset_direct
+ * offset 是直接 permille 值（不乘以 1000）。
+ */
+static bool parse_pid_quad(const char *args, float *kp, float *ki, float *kd, float *offset)
 {
-    int32_t kp_i;
-    int32_t ki_i;
-    int32_t kd_i;
+    int32_t kp_i, ki_i, kd_i, off_i;
     const char *p = args;
-
     if (!parse_i32_token(&p, &kp_i) ||
         !parse_i32_token(&p, &ki_i) ||
         !parse_i32_token(&p, &kd_i)) {
         return false;
     }
-
-    *kp = scaled_to_float(kp_i);
-    *ki = scaled_to_float(ki_i);
-    *kd = scaled_to_float(kd_i);
+    /* offset 是可选的，默认 0 */
+    if (!parse_i32_token(&p, &off_i)) off_i = 0;
+    *kp     = scaled_to_float(kp_i);
+    *ki     = scaled_to_float(ki_i);
+    *kd     = scaled_to_float(kd_i);
+    *offset = (float)off_i;
     return true;
 }
 
 static bool handle_pid_command(const char *cmd)
 {
-    if (cmd == NULL) {
-        return false;
+    if (cmd == NULL) return false;
+
+    /* pid? / pid0 */
+    if ((cmd[0]=='p') && (cmd[1]=='i') && (cmd[2]=='d')) {
+        if ((cmd[3]=='?' || cmd[3]=='\0')) { print_pid_status(); return true; }
+        if (cmd[3]=='0' && cmd[4]=='\0') {
+            app_balance_set_balance_gains(0.0f, 0.0f, 0.0f, 0.0f);
+            app_balance_set_speed_gains(0.0f, 0.0f, 0.0f, 0.0f);
+            app_balance_set_yaw_gains(0.0f, 0.0f, 0.0f, 0.0f);
+            app_balance_reset();
+            (void)printf("[pid] all gains cleared\r\n");
+            return true;
+        }
     }
 
-    if ((cmd[0] == 'p') && (cmd[1] == 'i') && (cmd[2] == 'd') &&
-        ((cmd[3] == '?') || (cmd[3] == '\0'))) {
-        print_pid_status();
+    /* lt / lt0 / lt1 */
+    if ((cmd[0]=='l') && (cmd[1]=='t')) {
+        if (cmd[2]=='\0') { set_lt_stream_enabled(true);  return true; }
+        if ((cmd[2]=='0') && (cmd[3]=='\0')) { set_lt_stream_enabled(false); return true; }
+        if ((cmd[2]=='1') && (cmd[3]=='\0')) { set_lt_stream_enabled(true);  return true; }
+    }
+
+    /* bo <offset>：单独调角度环 OutOffset */
+    if ((cmd[0]=='b') && (cmd[1]=='o') && is_field_separator(cmd[2])) {
+        int32_t off_i;
+        const char *p = &cmd[2];
+        if (!parse_i32_token(&p, &off_i)) {
+            (void)printf("[pid] bad bo command, use: bo 80\r\n");
+            return true;
+        }
+        s_bal.angle_pid.out_offset = (float)off_i;
+        (void)printf("[pid] angle out_offset=%ldpm\r\n", (long)off_i);
         return true;
     }
 
-    if ((cmd[0] == 'p') && (cmd[1] == 'i') && (cmd[2] == 'd') &&
-        (cmd[3] == '0') && (cmd[4] == '\0')) {
-        app_balance_set_rate_gains(0.0f, 0.0f, 0.0f);
-        app_balance_set_balance_gains(0.0f, 0.0f, 0.0f);
-        app_balance_set_speed_gains(0.0f, 0.0f, 0.0f);
-        app_balance_set_yaw_gains(0.0f, 0.0f, 0.0f);
+    /* bp <kp_x1000> <ki_x1000> <kd_x1000> <offset_pm>：角度环 */
+    if ((cmd[0]=='b') && (cmd[1]=='p') && is_field_separator(cmd[2])) {
+        float kp, ki, kd, offset;
+        if (!parse_pid_quad(&cmd[2], &kp, &ki, &kd, &offset)) {
+            (void)printf("[pid] bad bp command, use: bp 5000 0 5000 80\r\n");
+            return true;
+        }
+        app_balance_set_balance_gains(kp, ki, kd, offset);
         app_balance_reset();
-        (void)printf("[pid] all gains cleared\r\n");
+        print_pid2_status("angle", &s_bal.angle_pid);
         return true;
     }
 
-    if ((cmd[0] == 'l') && (cmd[1] == 't')) {
-        if (cmd[2] == '\0') {
-            set_lt_stream_enabled(true);
+    /* sp <kp_x1000> <ki_x1000> <kd_x1000> <offset_pm>：速度环 */
+    if ((cmd[0]=='s') && (cmd[1]=='p') && is_field_separator(cmd[2])) {
+        float kp, ki, kd, offset;
+        if (!parse_pid_quad(&cmd[2], &kp, &ki, &kd, &offset)) {
+            (void)printf("[pid] bad sp command, use: sp 2000 50 0 0\r\n");
             return true;
         }
-        if ((cmd[2] == '0') && (cmd[3] == '\0')) {
-            set_lt_stream_enabled(false);
-            return true;
-        }
-        if ((cmd[2] == '1') && (cmd[3] == '\0')) {
-            set_lt_stream_enabled(true);
-            return true;
-        }
-    }
-
-    if ((cmd[0] == 'r') && (cmd[1] == 'p') && is_field_separator(cmd[2])) {
-        float kp, ki, kd;
-        if (!parse_pid_triplet(&cmd[2], &kp, &ki, &kd)) {
-            (void)printf("[pid] bad rp command, use: rp 1000 0 0\r\n");
-            return true;
-        }
-        app_balance_set_rate_gains(kp, ki, kd);
+        app_balance_set_speed_gains(kp, ki, kd, offset);
         app_balance_reset();
-        print_scaled3("rate", kp, ki, kd);
+        print_pid2_status("speed", &s_bal.speed_pid);
         return true;
     }
 
-    if ((cmd[0] == 'b') && (cmd[1] == 'p') && is_field_separator(cmd[2])) {
-        float kp, ki, kd;
-        if (!parse_pid_triplet(&cmd[2], &kp, &ki, &kd)) {
-            (void)printf("[pid] bad bp command, use: bp 5000 0 0\r\n");
+    /* yp <kp_x1000> <ki_x1000> <kd_x1000> <offset_pm>：转向环 */
+    if ((cmd[0]=='y') && (cmd[1]=='p') && is_field_separator(cmd[2])) {
+        float kp, ki, kd, offset;
+        if (!parse_pid_quad(&cmd[2], &kp, &ki, &kd, &offset)) {
+            (void)printf("[pid] bad yp command, use: yp 4000 3000 0 0\r\n");
             return true;
         }
-        app_balance_set_balance_gains(kp, ki, kd);
-        app_balance_reset();
-        print_scaled3("angle", kp, ki, kd);
+        app_balance_set_yaw_gains(kp, ki, kd, offset);
+        pid2_reset(&s_bal.turn_pid);
+        print_pid2_status("turn", &s_bal.turn_pid);
         return true;
     }
 
-    if ((cmd[0] == 's') && (cmd[1] == 'p') && is_field_separator(cmd[2])) {
-        float kp, ki, kd;
-        if (!parse_pid_triplet(&cmd[2], &kp, &ki, &kd)) {
-            (void)printf("[pid] bad sp command, use: sp 2 0 0\r\n");
+    /* si? / si0 / si1：速度反馈极性翻转 */
+    if ((cmd[0]=='s') && (cmd[1]=='i')) {
+        if (cmd[2]=='\0' || cmd[2]=='?') {
+            (void)printf("[speed] invert=%u (v_meas=%ldcps)\r\n",
+                         app_balance_get_speed_inverted() ? 1u : 0u,
+                         (long)s_bal.diag.speed_meas_cps);
             return true;
         }
-        app_balance_set_speed_gains(kp, ki, kd);
-        app_balance_reset();
-        print_scaled3("speed", kp, ki, kd);
-        return true;
-    }
-
-    if ((cmd[0] == 'y') && (cmd[1] == 'p') && is_field_separator(cmd[2])) {
-        float kp, ki, kd;
-        if (!parse_pid_triplet(&cmd[2], &kp, &ki, &kd)) {
-            (void)printf("[pid] bad yp command, use: yp 500 0 100\r\n");
+        if ((cmd[2]=='0' || cmd[2]=='1') && cmd[3]=='\0') {
+            app_balance_set_speed_inverted(cmd[2] == '1');
+            (void)printf("[speed] invert=%u\r\n",
+                         app_balance_get_speed_inverted() ? 1u : 0u);
             return true;
         }
-        app_balance_set_yaw_gains(kp, ki, kd);
-        reset_yaw_state();
-        print_scaled3("yaw", kp, ki, kd);
-        return true;
     }
 
-    if ((cmd[0] == 'y') && (cmd[1] == 'i') &&
-        ((cmd[2] == '\0') || (cmd[2] == '?'))) {
-        (void)printf("[yaw] invert=%u\r\n",
-                     app_balance_get_yaw_inverted() ? 1u : 0u);
-        return true;
-    }
-    if ((cmd[0] == 'y') && (cmd[1] == 'i') &&
-        ((cmd[2] == '0') || (cmd[2] == '1')) && (cmd[3] == '\0')) {
-        app_balance_set_yaw_inverted(cmd[2] == '1');
-        (void)printf("[yaw] invert=%u\r\n",
-                     app_balance_get_yaw_inverted() ? 1u : 0u);
-        return true;
-    }
-
-    /* si? / si0 / si1：速度反馈极性翻转查询 / 复位 / 启用。
-     * 诊断：先发 pid0 把速度环增益清零，使小车漂移后看心跳 v= 值符号：
-     *   v= 正值时向前漂移 → 方向正确 (si0)；v= 负值 → 需要翻转 (si1)。 */
-    if ((cmd[0] == 's') && (cmd[1] == 'i') &&
-        ((cmd[2] == '\0') || (cmd[2] == '?'))) {
-        (void)printf("[speed] invert=%u (v_meas=%ldcps)\r\n",
-                     app_balance_get_speed_inverted() ? 1u : 0u,
-                     (long)s_bal.diag.speed_meas_cps);
-        return true;
-    }
-    if ((cmd[0] == 's') && (cmd[1] == 'i') &&
-        ((cmd[2] == '0') || (cmd[2] == '1')) && (cmd[3] == '\0')) {
-        app_balance_set_speed_inverted(cmd[2] == '1');
-        (void)printf("[speed] invert=%u\r\n",
-                     app_balance_get_speed_inverted() ? 1u : 0u);
-        return true;
-    }
-
-    if ((cmd[0] == 'h') && (cmd[1] == '\0')) {
-        print_pid_help();
-        return true;
-    }
+    /* h：帮助 */
+    if (cmd[0]=='h' && cmd[1]=='\0') { print_pid_help(); return true; }
 
     return false;
 }
@@ -923,9 +665,7 @@ static void drain_log_uart_command_tail(void)
 {
     uint8_t ch;
     while (bsp_log_uart_read_byte(&ch)) {
-        if (is_line_delimiter(ch)) {
-            break;
-        }
+        if (is_line_delimiter(ch)) break;
     }
 }
 
@@ -941,7 +681,7 @@ static bool request_motor_test_mode(void)
 
 static bool process_log_uart_commands(void)
 {
-    static char cmd_buf[APP_BAL_CMD_BUF_LEN];
+    static char    cmd_buf[APP_BAL_CMD_BUF_LEN];
     static uint8_t cmd_len = 0u;
     uint8_t ch;
 
@@ -949,18 +689,14 @@ static bool process_log_uart_commands(void)
         if ((ch >= (uint8_t)'A') && (ch <= (uint8_t)'Z')) {
             ch = (uint8_t)(ch - (uint8_t)'A' + (uint8_t)'a');
         }
-
         if (is_line_delimiter(ch)) {
             cmd_buf[cmd_len] = '\0';
-            bool request_test = is_test_command(cmd_buf, cmd_len);
+            bool req_test = is_test_command(cmd_buf, cmd_len);
             cmd_len = 0u;
-            if (request_test) {
-                return request_motor_test_mode();
-            }
+            if (req_test) return request_motor_test_mode();
             (void)handle_pid_command(cmd_buf);
             continue;
         }
-
         if ((ch >= (uint8_t)' ') && (ch <= (uint8_t)'~')) {
             if (cmd_len < (sizeof(cmd_buf) - 1u)) {
                 cmd_buf[cmd_len++] = (char)ch;
@@ -975,7 +711,6 @@ static bool process_log_uart_commands(void)
             cmd_len = 0u;
         }
     }
-
     return false;
 }
 
@@ -1009,16 +744,12 @@ static void k230_comm_init(void)
     s_k230_online     = false;
 }
 
-/** 从 K230 UART RX 环缓取字节 → 喂帧解析器 → 分发已完成帧。 */
-static void k230_drain_and_dispatch(app_balance_motion_cmd_t *cmd,
-                                    uint32_t now_ms)
+static void k230_drain_and_dispatch(app_balance_motion_cmd_t *cmd, uint32_t now_ms)
 {
     uint8_t buf[K230_RX_DRAIN_CHUNK];
     size_t got = bsp_k230_uart_rx_pop_bulk(buf, sizeof(buf));
     for (size_t i = 0u; i < got; ++i) {
-        if (!k230_parser_feed(&s_k230_parser, buf[i])) {
-            continue;
-        }
+        if (!k230_parser_feed(&s_k230_parser, buf[i])) continue;
         s_k230_last_rx_ms = now_ms;
         s_k230_online     = true;
 
@@ -1037,10 +768,9 @@ static void k230_drain_and_dispatch(app_balance_motion_cmd_t *cmd,
                 k230_pid_inject_t pi;
                 memcpy(&pi, s_k230_parser.payload, sizeof(pi));
                 switch (pi.pid_id) {
-                case 0u: app_balance_set_balance_gains(pi.kp, pi.ki, pi.kd); break;
-                case 1u: app_balance_set_rate_gains(pi.kp, pi.ki, pi.kd);    break;
-                case 2u: app_balance_set_speed_gains(pi.kp, pi.ki, pi.kd);   break;
-                case 3u: app_balance_set_yaw_gains(pi.kp, pi.ki, pi.kd);     break;
+                case 0u: app_balance_set_balance_gains(pi.kp, pi.ki, pi.kd, s_bal.angle_pid.out_offset); break;
+                case 2u: app_balance_set_speed_gains(pi.kp, pi.ki, pi.kd, s_bal.speed_pid.out_offset);   break;
+                case 3u: app_balance_set_yaw_gains(pi.kp, pi.ki, pi.kd, s_bal.turn_pid.out_offset);      break;
                 default: break;
                 }
             }
@@ -1055,9 +785,7 @@ static void k230_drain_and_dispatch(app_balance_motion_cmd_t *cmd,
     }
 }
 
-/** 心跳超时检查：K230 离线 → 运动指令归零，报警。 */
-static void k230_check_timeout(app_balance_motion_cmd_t *cmd,
-                                uint32_t now_ms)
+static void k230_check_timeout(app_balance_motion_cmd_t *cmd, uint32_t now_ms)
 {
     if ((now_ms - s_k230_last_rx_ms) > K230_HEARTBEAT_TIMEOUT_MS) {
         if (s_k230_online) {
@@ -1069,7 +797,6 @@ static void k230_check_timeout(app_balance_motion_cmd_t *cmd,
     }
 }
 
-/** 20 Hz：发送 VEHICLE_STATUS 帧给 K230。 */
 static void k230_send_vehicle_status(void)
 {
     bsp_motor_feedback_t fb;
@@ -1083,12 +810,9 @@ static void k230_send_vehicle_status(void)
     uint8_t frame[K230_PROTO_MAX_FRAME];
     size_t len = k230_encode_frame(K230_CMD_VEHICLE_STATUS,
         &vs, (uint8_t)sizeof(vs), frame, sizeof(frame));
-    if (len > 0u) {
-        bsp_k230_uart_write_blocking(frame, len);
-    }
+    if (len > 0u) bsp_k230_uart_write_blocking(frame, len);
 }
 
-/** 1 Hz：发送 HEARTBEAT_MCU 帧给 K230。 */
 static void k230_send_heartbeat(uint32_t now_ms)
 {
     k230_heartbeat_t hb;
@@ -1097,229 +821,18 @@ static void k230_send_heartbeat(uint32_t now_ms)
     uint8_t frame[K230_PROTO_MAX_FRAME];
     size_t len = k230_encode_frame(K230_CMD_HEARTBEAT_MCU,
         &hb, (uint8_t)sizeof(hb), frame, sizeof(frame));
-    if (len > 0u) {
-        bsp_k230_uart_write_blocking(frame, len);
-    }
+    if (len > 0u) bsp_k230_uart_write_blocking(frame, len);
 }
 
-/* ========================================================================== */
-/* 上电自校准：pitch_offset_deg + gy_bias_dps + gz_bias_dps                    */
-/* ========================================================================== */
-
-/**
- * 上电静止采样自校准：阻塞 APP_BALANCE_PITCH_AUTOZERO_MS 毫秒，对通过静止
- * 判据的样本同步累加 pitch_deg、gy_dps、gz_dps，最终各取平均：
- *   - 平均 pitch_deg → app_balance_set_pitch_offset()
- *   - 平均 gy_dps    → s_bal.gy_bias_dps（内环 raw_rate 减此值）
- *   - 平均 gz_dps    → s_bal.gz_bias_dps（yaw 积分模式减此值）
- *
- * ⚠️ 必须扣 bias 的根因：
- *   MS901M raw 陀螺 ±0.3~1°/s DC 偏置 + EKF pitch_deg 无零漂，二者放在级联控
- *   制器里时，内环看到 measured_rate = gy_dps 含 +0.3°/s，会输出持续 ~0.5 PWM
- *   permille 让车真歪 → 角度环看到 pitch 变化反向补 → 二者抢权 → "抖动后越来
- *   越歪"。这里把 bias 在启动期就量出来扣掉。
- *
- * 调用前提：
- *   - main 已调用 wait_for_ms901m_attitude（第一帧 0x01 已就绪）
- *   - 电机 set_invert + dz 配置完成，但 200Hz PID 调度尚未开始（PWM=0）
- *
- * 静止判据（任一不满足则丢样）：
- *   - |gy_dps| / |gz_dps| ≤ AUTOZERO_RATE_DEADBAND_DPS（陀螺接近 0）
- *   - |a_mag² - 1g²| 在 ±2·DEV_G 范围内（加速度模长接近 1g）
- *
- * 容错：
- *   - 有效样本 < 20：sum/n 失真，不写入任何 bias / offset，沿用 init 默认值；
- *   - bias 平均后限幅到 ±APP_BALANCE_GYRO_BIAS_LIMIT_DPS，防极端值拖坏控制器。
- *
- * ⚠️ 用户须知：上电期间必须把小车维持在"标准直立 + 完全静止"姿态 1.5 秒。
- *    校准失败时日志会打印 [autocal] FAILED，应断电重试。
- */
-static void auto_calibrate_imu(void)
-{
-#if APP_BALANCE_PITCH_AUTOZERO_MS == 0
-    (void)printf("[autocal] disabled by APP_BALANCE_PITCH_AUTOZERO_MS=0; "
-                 "pitch_offset=%c%ld.%02lu deg, gyro bias not initialized "
-                 "(rate loop will see raw gyro DC offset)\r\n",
-                 BAL_F2_S(s_bal.pitch_offset_deg),
-                 (long)BAL_F2_I(s_bal.pitch_offset_deg),
-                 (unsigned long)BAL_F2_F(s_bal.pitch_offset_deg));
-    return;
-#else
-    const uint32_t end_ms = bsp_systick_get_ms() + APP_BALANCE_PITCH_AUTOZERO_MS;
-    float    sum_pitch     = 0.0f;
-    float    sum_gy        = 0.0f;
-    float    sum_gz        = 0.0f;
-    uint32_t n_samples     = 0u;
-    uint32_t n_rejected    = 0u;
-    uint32_t last_sample_ms = bsp_systick_get_ms();
-
-    (void)printf("[autocal] sampling pitch+gyro for %lums "
-                 "(keep car upright and STILL)\r\n",
-                 (unsigned long)APP_BALANCE_PITCH_AUTOZERO_MS);
-
-    while ((int32_t)(end_ms - bsp_systick_get_ms()) > 0) {
-        /* 1) drain IMU UART → 喂解析器（与主循环同款节奏） */
-        uint8_t imu_buf[APP_BAL_IMU_DRAIN_CHUNK];
-        size_t  got = bsp_imu_uart_rx_pop_bulk(imu_buf, sizeof(imu_buf));
-        if (got > 0u) {
-            ms901m_feed_bytes(imu_buf, got);
-        }
-
-        /* 2) 每 10ms 取一次 snapshot 评估静止 + 累加 */
-        uint32_t now_ms = bsp_systick_get_ms();
-        if ((now_ms - last_sample_ms) >= 10u) {
-            last_sample_ms = now_ms;
-
-            ms901m_snapshot_t s;
-            ms901m_get_snapshot(&s);
-            if (!s.has_attitude || !s.has_gyro_acc) {
-                continue;
-            }
-
-            float gy_abs = (s.gy_dps < 0.0f) ? -s.gy_dps : s.gy_dps;
-            float gz_abs = (s.gz_dps < 0.0f) ? -s.gz_dps : s.gz_dps;
-            if ((gy_abs > APP_BALANCE_PITCH_AUTOZERO_RATE_DEADBAND_DPS) ||
-                (gz_abs > APP_BALANCE_PITCH_AUTOZERO_RATE_DEADBAND_DPS)) {
-                n_rejected++;
-                continue;
-            }
-
-            /* |a|² ≈ 1±2·dev_g 一阶近似，免开方 */
-            float a2 = (s.ax_g * s.ax_g) +
-                       (s.ay_g * s.ay_g) +
-                       (s.az_g * s.az_g);
-            float a2_dev = a2 - 1.0f;
-            if (a2_dev < 0.0f) a2_dev = -a2_dev;
-            if (a2_dev > (2.0f * APP_BALANCE_PITCH_AUTOZERO_ACC_DEVIATION_G)) {
-                n_rejected++;
-                continue;
-            }
-
-            sum_pitch += s.pitch_deg;
-            sum_gy    += s.gy_dps;
-            sum_gz    += s.gz_dps;
-            n_samples++;
-        }
-
-        bsp_systick_delay_ms(1u);
-    }
-
-    if (n_samples >= 20u) {
-        float new_offset  = sum_pitch / (float)n_samples;
-        float new_gy_bias = sum_gy    / (float)n_samples;
-        float new_gz_bias = sum_gz    / (float)n_samples;
-
-        /* bias 限幅：异常大说明小车未真静止或 IMU 故障，宁可拒绝 */
-        const float bias_lim = (float)APP_BALANCE_GYRO_BIAS_LIMIT_DPS;
-        if (new_gy_bias >  bias_lim) new_gy_bias =  bias_lim;
-        if (new_gy_bias < -bias_lim) new_gy_bias = -bias_lim;
-        if (new_gz_bias >  bias_lim) new_gz_bias =  bias_lim;
-        if (new_gz_bias < -bias_lim) new_gz_bias = -bias_lim;
-
-        app_balance_set_pitch_offset(new_offset);
-        s_bal.gy_bias_dps     = new_gy_bias;
-        s_bal.gz_bias_dps     = new_gz_bias;
-        s_bal.gyro_bias_valid = true;
-        s_bal.bias_still_ticks = 0u;   /* 确保运行时学习从干净状态启动 */
-
-        (void)printf("[autocal] OK pitch_offset=%c%ld.%02lu deg "
-                     "gy_bias=%c%ld.%02lu gz_bias=%c%ld.%02lu dps "
-                     "(n=%lu, rejected=%lu)\r\n",
-                     BAL_F2_S(new_offset),
-                     (long)BAL_F2_I(new_offset),
-                     (unsigned long)BAL_F2_F(new_offset),
-                     BAL_F2_S(new_gy_bias),
-                     (long)BAL_F2_I(new_gy_bias),
-                     (unsigned long)BAL_F2_F(new_gy_bias),
-                     BAL_F2_S(new_gz_bias),
-                     (long)BAL_F2_I(new_gz_bias),
-                     (unsigned long)BAL_F2_F(new_gz_bias),
-                     (unsigned long)n_samples,
-                     (unsigned long)n_rejected);
-    } else {
-        (void)printf("[autocal] FAILED n=%lu rejected=%lu; keep car still & "
-                     "power-cycle. Using init default pitch=%c%ld.%02lu and "
-                     "gy_bias=0 (rate loop will see raw gyro DC offset!)\r\n",
-                     (unsigned long)n_samples,
-                     (unsigned long)n_rejected,
-                     BAL_F2_S(s_bal.pitch_offset_deg),
-                     (long)BAL_F2_I(s_bal.pitch_offset_deg),
-                     (unsigned long)BAL_F2_F(s_bal.pitch_offset_deg));
-    }
-#endif
-}
-
-/**
- * 运行时陀螺零漂在线学习（200Hz 内环每拍调用）。
- *
- *   仅在 "quiet 窗口" 内学习：
- *     - 上层未要求行进：|target_speed_cps| < SPEED_LIMIT_CPS
- *     - 角度环未在大力调整：|target_rate| < RATE_LIMIT_DPS
- *     - 车体角速度小：|measured_rate| < RATE_LIMIT_DPS
- *     - 未在转向：target_yaw_pm == 0
- *     - 连续满足 DEBOUNCE_TICKS 拍后才开学（防一帧扰动误学）
- *
- *   学习规则：bias += α * (gy_raw - bias)，等价 LPF(gy_raw)；
- *   物理意义：quiet 时 gy_raw 的长期均值 = 真实零漂。
- *
- *   ⚠️ gy_bias / gz_bias 均存储于"原始 IMU body frame"，
- *      不含 pitch_sign / yaw_sign（与 ms901m_snapshot 直接对应）。
- */
-static void update_gyro_bias_estimator(float gy_raw_imu, float gz_raw_imu,
-                                       float target_rate, float meas_rate,
-                                       int32_t target_speed_cps,
-                                       int16_t target_yaw_pm)
-{
-#if !APP_BALANCE_GYRO_BIAS_LEARN_ENABLED
-    (void)gy_raw_imu; (void)gz_raw_imu; (void)target_rate; (void)meas_rate;
-    (void)target_speed_cps; (void)target_yaw_pm;
-    return;
-#else
-    if (!s_bal.gyro_bias_valid) {
-        /* 启动校准未完成（autocal FAILED），不在线学习，避免学到运动数据。 */
-        return;
-    }
-
-    int32_t spd_abs = (target_speed_cps < 0) ? -target_speed_cps : target_speed_cps;
-    float   meas_abs = (meas_rate    < 0.0f) ? -meas_rate    : meas_rate;
-    float   tgt_abs  = (target_rate  < 0.0f) ? -target_rate  : target_rate;
-
-    bool quiet = (spd_abs  < APP_BALANCE_GYRO_BIAS_LEARN_SPEED_LIMIT_CPS) &&
-                 (meas_abs < APP_BALANCE_GYRO_BIAS_LEARN_RATE_LIMIT_DPS)  &&
-                 (tgt_abs  < APP_BALANCE_GYRO_BIAS_LEARN_RATE_LIMIT_DPS)  &&
-                 (target_yaw_pm == 0);
-
-    if (!quiet) {
-        s_bal.bias_still_ticks = 0u;
-        return;
-    }
-
-    if (s_bal.bias_still_ticks < APP_BALANCE_GYRO_BIAS_LEARN_DEBOUNCE_TICKS) {
-        s_bal.bias_still_ticks++;
-        return;
-    }
-
-    const float a = APP_BALANCE_GYRO_BIAS_LEARN_ALPHA;
-    s_bal.gy_bias_dps += a * (gy_raw_imu - s_bal.gy_bias_dps);
-    s_bal.gz_bias_dps += a * (gz_raw_imu - s_bal.gz_bias_dps);
-
-    /* 二次限幅：防 EMA 在长期单边噪声下逐步爬出范围 */
-    const float bias_lim = (float)APP_BALANCE_GYRO_BIAS_LIMIT_DPS;
-    if (s_bal.gy_bias_dps >  bias_lim) s_bal.gy_bias_dps =  bias_lim;
-    if (s_bal.gy_bias_dps < -bias_lim) s_bal.gy_bias_dps = -bias_lim;
-    if (s_bal.gz_bias_dps >  bias_lim) s_bal.gz_bias_dps =  bias_lim;
-    if (s_bal.gz_bias_dps < -bias_lim) s_bal.gz_bias_dps = -bias_lim;
-#endif
-}
-
-/** 清空 K230 RX 环缓中校零期间累积的字节，避免主循环一启动就批量解析触发误动作。 */
 static void k230_flush_rx_buffer(void)
 {
     uint8_t flush[64];
-    while (bsp_k230_uart_rx_pop_bulk(flush, sizeof(flush)) > 0u) {
-        /* 直接丢弃；校零期间收到的所有 K230 字节都视为陈旧。 */
-    }
+    while (bsp_k230_uart_rx_pop_bulk(flush, sizeof(flush)) > 0u) { /* discard */ }
 }
+
+/* ========================================================================== */
+/* 主循环                                                                      */
+/* ========================================================================== */
 
 bool app_balance_run(void)
 {
@@ -1328,39 +841,26 @@ bool app_balance_run(void)
     uint32_t last_enc_irq  = bsp_motor_get_enc_irq_count();
     ms901m_snapshot_t snap = { 0 };
 
-    /* 电机极性修正：TB6612 驱动信号与电机安装方向反相（正 PWM → 物理后退）。
-     * 软件 invert 等效于修正接线，使正 PWM = 物理前进 = 编码器增大，
-     * 保证三者（PWM / 物理方向 / 编码器）符号一致，速度环可正常工作。
-     * 对应地：pitch_sign 改回 +1（见 APP_BALANCE_PITCH_INVERT=0），
-     * 数学等价于原 pitch_sign=-1+无 invert，平衡行为不变。 */
+    /* 电机极性修正：正 PWM → 物理前进 → 编码器增大（三者符号一致） */
     bsp_motor_set_invert(true, true);
 
-    /* 平衡车死区策略：完全禁用死区补偿重映射。
-     *
-     * running_dz 重映射在零点附近产生符号翻转跳变（±40 permille 瞬变），
-     * 在 200Hz 内环下表现为持续颤动。对倒立摆而言此补偿弊大于利：
-     *   - 小命令无效 → 倾角增大 → PID 输出增大 → 自然超越物理死区（积分效应）
-     *   - 角速度内环加小 Ki 可进一步消除稳态死区导致的残余误差
-     * 禁用后电机在极低命令时可能有短暂不响应，但平衡环自修复。 */
+    /* 平衡车死区策略：BSP 死区补偿全部关闭，改由 pid2 out_offset 补偿。
+     * BSP 重映射在零点产生符号翻转跳变，对倒立摆弊大于利。 */
     bsp_motor_set_deadzone_comp_enabled(false);
     bsp_motor_set_calibration_mode(false);
     bsp_motor_set_static_dz_enabled(false);
     bsp_motor_set_running_dz_enabled(false);
     bsp_motor_set_dither_dz_enabled(false);
 
-    /* 主循环上电默认无运动指令（K230 通讯接入后由 MOTION_CMD 帧覆盖） */
     app_balance_motion_cmd_t cmd = { .target_speed_cps = 0, .target_yaw_pm = 0 };
 
     print_pid_help();
     print_pid_status();
 
-    /* 上电自校准 pitch_offset + gy/gz 零漂：阻塞采样 1.5s 静止姿态。
-     * 必须在 200Hz PID 调度（for(;;) 中 bsp_motor_set_output）启动之前完成，
-     * 否则 PWM 会基于错误的零点输出。校准期间电机已 enable 但 PWM=0。 */
-    auto_calibrate_imu();
+    /* 上电自校零 pitch_offset：阻塞采样 1.5s，电机 PWM=0 */
+    auto_zero_pitch_offset();
 
-    /* 校零完成 → 清掉这段时间累积的 K230 字节，再做 k230_comm_init()
-     * 把 last_rx_ms 时间戳刷到"现在"，避免主循环第一拍就触发心跳超时报警。 */
+    /* 校零后清掉累积 K230 字节，刷新心跳时间戳防误报超时 */
     k230_flush_rx_buffer();
     k230_comm_init();
 
@@ -1371,24 +871,20 @@ bool app_balance_run(void)
         }
         tick_count++;
 
-        if (process_log_uart_commands()) {
-            return true;
-        }
+        if (process_log_uart_commands()) return true;
 
-        /* ---- 1 kHz：IMU drain + K230 drain + 电机 1 ms 节拍 ----------------- */
+        /* ---- 1 kHz：IMU drain + K230 drain + 电机 1 ms 节拍 --------------- */
         {
             uint8_t imu_buf[APP_BAL_IMU_DRAIN_CHUNK];
             size_t  got = bsp_imu_uart_rx_pop_bulk(imu_buf, sizeof(imu_buf));
-            if (got > 0u) {
-                ms901m_feed_bytes(imu_buf, got);
-            }
+            if (got > 0u) ms901m_feed_bytes(imu_buf, got);
         }
         k230_drain_and_dispatch(&cmd, tick_count);
         k230_check_timeout(&cmd, tick_count);
         bsp_motor_update();
 
-        /* ---- 200 Hz：四级级联控制 + 电机输出 ------------------------------ */
-        if ((tick_count % APP_BAL_PHASE_RATE_TICKS) == 0u) {
+        /* ---- 100 Hz：角度环 + safety ---------------------------------------- */
+        if ((tick_count % APP_BAL_PHASE_ANGLE_TICKS) == 0u) {
             ms901m_get_snapshot(&snap);
 
             app_balance_attitude_t att = {
@@ -1396,44 +892,36 @@ bool app_balance_run(void)
                 .pitch_rate_dps = snap.gy_dps,
                 .yaw_deg        = snap.yaw_deg,
                 .gz_dps         = snap.gz_dps,
+                .ax_g           = snap.ax_g,
+                .ay_g           = snap.ay_g,
+                .az_g           = snap.az_g,
                 .attitude_valid = snap.has_attitude,
             };
 
-            /* 20 Hz 速度外环（每 50 ticks）—— 最先跑，更新 target_tilt_deg */
+            bsp_battery_update();
+
+            /* 20 Hz 速度/转向外环（每 50 ticks）—— 先跑，更新 target_tilt_deg */
             if ((tick_count % APP_BAL_PHASE_SPEED_TICKS) == 0u) {
-                balance_step_speed(&cmd);
+                balance_step_speed(&att, &cmd);
                 k230_send_vehicle_status();
             }
 
-            /* 100 Hz 角度环（每 10 ticks）—— 更新 target_rate_dps */
-            if ((tick_count % APP_BAL_PHASE_ANGLE_TICKS) == 0u) {
-                bsp_battery_update();
-                balance_step_angle(&att);
-            }
+            /* 100 Hz 角度环 —— 消费 target_tilt_deg 和 turn_corr_pm 输出 PWM */
+            balance_step_angle(&att, &cmd);
 
-            /* 50 Hz 航向环（每 20 ticks）—— 更新 cached_yaw_corr_pm */
-            if ((tick_count % APP_BAL_PHASE_YAW_TICKS) == 0u) {
-                balance_step_yaw(&att, &cmd);
-            }
-
-            /* 200 Hz 角速度内环（每 5 ticks）—— 每拍都跑，输出 PWM */
-            balance_step_rate(&att, &cmd);
-
-            /* 100 Hz LT 采样 */
-            if ((tick_count % APP_BAL_PHASE_ANGLE_TICKS) == 0u) {
+            /* LT 采样 */
+            {
                 bsp_motor_feedback_t fb_lt;
                 bsp_motor_get_feedback(&fb_lt);
                 send_lt_sample(tick_count, &cmd, &fb_lt);
             }
         }
 
-        /* ---- 5 Hz：LED_G 绿心跳 + LED_R 跌倒 / 低压告警 ------------------- */
+        /* ---- 5 Hz：LED 心跳 ------------------------------------------------- */
         if ((tick_count % APP_BAL_PHASE_LED_TICKS) == 0u) {
             DL_GPIO_togglePins(BSP_LED_G_PORT, BSP_LED_G_PIN);
-
             app_safety_state_t st = app_safety_get_state();
-            if (st == APP_SAFETY_FALLEN ||
-                st == APP_SAFETY_LOW_BAT_STOP) {
+            if (st == APP_SAFETY_FALLEN || st == APP_SAFETY_LOW_BAT_STOP) {
                 DL_GPIO_setPins(BSP_LED_R_PORT, BSP_LED_R_PIN);
             } else if (st == APP_SAFETY_LOW_BAT_WARN) {
                 DL_GPIO_togglePins(BSP_LED_R_PORT, BSP_LED_R_PIN);
@@ -1442,46 +930,40 @@ bool app_balance_run(void)
             }
         }
 
-        /* ---- 1 Hz：XDS-UART 调试日志 + K230 心跳 TX ------------------------- */
+        /* ---- 1 Hz：调试日志 + K230 心跳 TX ---------------------------------- */
         if (!s_bal.lt_stream_enabled && ((tick_count % APP_BAL_PHASE_LOG_TICKS) == 0u)) {
             k230_send_heartbeat(tick_count);
 
-            uint32_t total_rx = bsp_k230_uart_total_rx();
-            uint32_t delta_rx = total_rx - last_total_rx;
+            uint32_t total_rx  = bsp_k230_uart_total_rx();
+            uint32_t delta_rx  = total_rx - last_total_rx;
             last_total_rx = total_rx;
 
-            uint32_t total_enc_irq = bsp_motor_get_enc_irq_count();
-            uint32_t delta_enc_irq = total_enc_irq - last_enc_irq;
-            last_enc_irq = total_enc_irq;
-            bool encQuenched = bsp_motor_enc_irq_is_quenched();
+            uint32_t total_enc = bsp_motor_get_enc_irq_count();
+            uint32_t delta_enc = total_enc - last_enc_irq;
+            last_enc_irq = total_enc;
+            bool encQ = bsp_motor_enc_irq_is_quenched();
 
-            int32_t  left_cnt  = bsp_motor_get_left_count();
-            int32_t  right_cnt = bsp_motor_get_right_count();
+            int32_t left_cnt  = bsp_motor_get_left_count();
+            int32_t right_cnt = bsp_motor_get_right_count();
 
-            app_balance_diag_t  diag;
+            app_balance_diag_t diag;
             app_balance_get_diag(&diag);
             uint32_t batt_mv  = bsp_battery_get_mv();
-            uint32_t log_ovr = bsp_log_uart_rx_overrun();
+            uint32_t log_ovr  = bsp_log_uart_rx_overrun();
 
-            (void)printf("[hb] t=%lus state=%s pitch=%c%ld.%02lu inv=%u tilt*=%c%ld.%02lu "
-                         "pwm=%c%ld.%02lu yawErr=%c%ld.%02lu yawCorr=%d L=%ld R=%ld v=%ldcps "
-                         "gyB=%c%ld.%02lu/%c%ld.%02lu%s "
+            (void)printf("[hb] t=%lus state=%s pitch=%c%ld.%02lu tilt*=%c%ld.%02lu "
+                         "pwm=%c%ld.%02lu yawCorr=%d L=%ld R=%ld v=%ldcps "
                          "batt=%lumV ms901m_g=%lu/b=%lu log_ovr=%lu k230_rx=%lub/s "
                          "k230_g=%lu/b=%lu k230_%s "
                          "encL=%ld encR=%ld encISR=%lu/s%s\n",
                 (unsigned long)(tick_count / 1000u),
                 safety_state_to_str(app_safety_get_state()),
                 BAL_F2_S(diag.pitch_meas_deg), (long)BAL_F2_I(diag.pitch_meas_deg), (unsigned long)BAL_F2_F(diag.pitch_meas_deg),
-                app_balance_get_pitch_inverted() ? 1u : 0u,
                 BAL_F2_S(diag.target_tilt_deg), (long)BAL_F2_I(diag.target_tilt_deg), (unsigned long)BAL_F2_F(diag.target_tilt_deg),
                 BAL_F2_S(diag.balance_out_pwm), (long)BAL_F2_I(diag.balance_out_pwm), (unsigned long)BAL_F2_F(diag.balance_out_pwm),
-                BAL_F2_S(diag.yaw_error_deg), (long)BAL_F2_I(diag.yaw_error_deg), (unsigned long)BAL_F2_F(diag.yaw_error_deg),
                 (int)diag.yaw_correction_pm,
                 (long)diag.left_cmd_pm, (long)diag.right_cmd_pm,
                 (long)diag.speed_meas_cps,
-                BAL_F2_S(s_bal.gy_bias_dps), (long)BAL_F2_I(s_bal.gy_bias_dps), (unsigned long)BAL_F2_F(s_bal.gy_bias_dps),
-                BAL_F2_S(s_bal.gz_bias_dps), (long)BAL_F2_I(s_bal.gz_bias_dps), (unsigned long)BAL_F2_F(s_bal.gz_bias_dps),
-                s_bal.gyro_bias_valid ? "" : "*",
                 (unsigned long)batt_mv,
                 (unsigned long)ms901m_good_frames(),
                 (unsigned long)ms901m_bad_frames(),
@@ -1491,8 +973,8 @@ bool app_balance_run(void)
                 (unsigned long)s_k230_parser.bad_frames,
                 s_k230_online ? "ON" : "OFF",
                 (long)left_cnt, (long)right_cnt,
-                (unsigned long)delta_enc_irq,
-                encQuenched ? " [ISR_QUENCH!]" : "");
+                (unsigned long)delta_enc,
+                encQ ? " [ISR_QUENCH!]" : "");
         }
     }
 }

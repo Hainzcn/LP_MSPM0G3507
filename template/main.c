@@ -235,10 +235,11 @@ int main(void)
 
         app_safety_init();
         app_balance_init();
+        /* 默认增益全 0，out_offset 由 UART `bo/bp/sp/yp` 在线注入 */
         app_balance_set_balance_gains(LOAD_TEST_BALANCE_KP,
-            LOAD_TEST_BALANCE_KI, LOAD_TEST_BALANCE_KD);
+            LOAD_TEST_BALANCE_KI, LOAD_TEST_BALANCE_KD, 0.0f);
         app_balance_set_speed_gains(LOAD_TEST_SPEED_KP,
-            LOAD_TEST_SPEED_KI, LOAD_TEST_SPEED_KD);
+            LOAD_TEST_SPEED_KI, LOAD_TEST_SPEED_KD, 0.0f);
         (void)app_safety_arm();
 
         if (app_balance_run()) {
