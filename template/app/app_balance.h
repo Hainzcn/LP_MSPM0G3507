@@ -12,7 +12,8 @@
  *   ① 串口 `bo 80`        → 粗调 OutOffset 突破 TB6612 死区
  *   ② 串口 `bp 5 0 5 80`  → (kp/ki/kd/offset) 角度环能站稳
  *   ③ 串口 `sp 2 0.05 0 0`→ 速度环消静态漂移
- *   ④ 串口 `yp 4 3 0 0`   → 转向环直行锁航向
+ *   ④ 串口 `yp 800 0 200 0` → 航向角环（锁 yaw，见 APP_BALANCE_YAW_SOURCE）
+ *   ⑤ 可选 `tp 4 3 0 0`   → 轮速差转向环（STM32 TurnPID，需 APP_BALANCE_TURN_ENABLED=1）
  *
  * ============================================================================
  * 调用模型
@@ -21,8 +22,9 @@
  *   app_balance_init();
  *   app_balance_set_balance_gains(kp, ki, kd, out_offset);
  *   app_balance_set_speed_gains  (kp, ki, kd, out_offset);
- *   app_balance_set_yaw_gains    (kp, ki, kd, out_offset);
- *   app_balance_run();   // 内部多速率调度：100/20 Hz
+ *   app_balance_set_yaw_gains    (kp, ki, kd, out_offset);  航向角环
+ *   app_balance_set_turn_gains   (kp, ki, kd, out_offset);  轮速差环（可选）
+ *   app_balance_run();   内部多速率调度 100/20 Hz
  */
 
 #ifndef APP_BALANCE_H
@@ -59,9 +61,47 @@ extern "C" {
 #define APP_BALANCE_MAX_PWM_PERMILLE            (1000)
 #endif
 
-/** 转向环差分 PWM 绝对值上限（permille）。 */
+/** 航向/转向环差分 PWM 绝对值上限（permille）。 */
 #ifndef APP_BALANCE_YAW_MAX_CORRECTION_PM
 #define APP_BALANCE_YAW_MAX_CORRECTION_PM       (200)
+#endif
+
+/** 航向角环开关：直行时闭环锁定偏航（抑制原地绕圈）。 */
+#ifndef APP_BALANCE_YAW_ENABLED
+#define APP_BALANCE_YAW_ENABLED                 (1)
+#endif
+
+/**
+ * 航向角环数据源（编译期）：
+ *   0 = MS901M EKF 绝对偏航角 yaw_deg（virtual measured 避免 ±180° 跳变）
+ *   1 = 陀螺积分 gz_dps×dt（无磁干扰，默认）
+ */
+#ifndef APP_BALANCE_YAW_SOURCE
+#define APP_BALANCE_YAW_SOURCE                  (1)
+#endif
+
+/** 轮速差转向环（STM32 TurnPID）开关；与航向角环可同时启用，输出叠加。 */
+#ifndef APP_BALANCE_TURN_ENABLED
+#define APP_BALANCE_TURN_ENABLED                (0)
+#endif
+
+/** 航向角环周期（毫秒），与速度外环同拍。 */
+#ifndef APP_BALANCE_YAW_PERIOD_MS
+#define APP_BALANCE_YAW_PERIOD_MS               APP_BALANCE_SPEED_PERIOD_MS
+#endif
+
+/**
+ * Yaw 轴极性翻转（yaw_deg / gz_dps 符号修正）。
+ * 判别：顺时针轻推车体，yawCorr 应先正后衰减 → 正确则 0，持续同向增大则 1。
+ * 串口 `yi0` / `yi1` 可运行时切换。
+ */
+#ifndef APP_BALANCE_YAW_INVERT
+#define APP_BALANCE_YAW_INVERT                  (1)
+#endif
+
+/** 航向角环积分项独立上限（permille）。 */
+#ifndef APP_BALANCE_YAW_INTEGRAL_LIMIT_PM
+#define APP_BALANCE_YAW_INTEGRAL_LIMIT_PM       (100.0f)
 #endif
 
 /**
@@ -69,7 +109,7 @@ extern "C" {
  * 与 STM32 demo 对齐（原 60° 偏大，容易在真正倒下时仍持续驱动电机）。
  */
 #ifndef APP_BALANCE_FALL_PITCH_DEG
-#define APP_BALANCE_FALL_PITCH_DEG              (50.0f)
+#define APP_BALANCE_FALL_PITCH_DEG              (60.0f)
 #endif
 
 /**
@@ -172,8 +212,8 @@ extern "C" {
 typedef struct {
     float pitch_deg;        /* 俯仰角；车头上扬为正（与 MS901M 对齐） */
     float pitch_rate_dps;   /* 俯仰角速度，°/s（MS901M gy_dps，仅自校零用） */
-    float yaw_deg;          /* 偏航角 [-180, 180]°（MS901M EKF 输出，保留备用） */
-    float gz_dps;           /* 偏航角速度，°/s（MS901M gz_dps，保留备用） */
+    float yaw_deg;          /* 偏航角 [-180, 180]°（MS901M EKF，航向环源 0 使用） */
+    float gz_dps;           /* 偏航角速度 °/s（航向环源 1 积分用） */
     float ax_g;             /* X 轴加速度（g），用于 EKF 耦合门控 */
     float ay_g;             /* Y 轴加速度（g），用于 EKF 耦合门控 */
     float az_g;             /* Z 轴加速度（g），用于 EKF 耦合门控 */
@@ -195,7 +235,8 @@ typedef struct {
     float   target_tilt_deg;    /* 速度外环输出 = 角度环目标角（°） */
     float   pitch_meas_deg;     /* 实际俯仰（已减零点，°） */
     float   balance_out_pwm;    /* 角度环输出 PWM（permille） */
-    int16_t yaw_correction_pm;  /* 转向环差分补偿（permille）；正值 = 左加右减 */
+    float   yaw_error_deg;      /* 航向角环误差（°）；源 1 时为 -gz 积分量 */
+    int16_t yaw_correction_pm;  /* 航向+转向差分合成（permille）；正值 = 左加右减 */
     int16_t left_cmd_pm;        /* 最终左轮命令（permille） */
     int16_t right_cmd_pm;       /* 最终右轮命令（permille） */
     int32_t speed_meas_cps;     /* 实际平均速度 = (L+R)/2（counts/s） */
@@ -248,14 +289,14 @@ void app_balance_set_balance_gains(float kp, float ki, float kd, float out_offse
  */
 void app_balance_set_speed_gains(float kp, float ki, float kd, float out_offset);
 
-/**
- * @brief 设置转向环增益与死区补偿。
- * @param kp         比例增益
- * @param ki         积分增益
- * @param kd         微分增益
- * @param out_offset 死区补偿（permille），转向环通常设 0
- */
+/** 设置航向角环增益（闭环锁 yaw）。 */
 void app_balance_set_yaw_gains(float kp, float ki, float kd, float out_offset);
+
+/** 设置轮速差转向环增益（STM32 TurnPID，可选）。 */
+void app_balance_set_turn_gains(float kp, float ki, float kd, float out_offset);
+
+void app_balance_set_yaw_inverted(bool inverted);
+bool app_balance_get_yaw_inverted(void);
 
 /** 拷贝一份本拍内部诊断（不影响内部状态）。 */
 void app_balance_get_diag(app_balance_diag_t *out);
