@@ -14,7 +14,9 @@
 >
 > **🔁 Stage 3.6 速度反馈极性翻转 + 文档瘦身（2026-05-17，`b8a5783`）**：新增速度反馈极性翻转支持（`si0/si1` 串口命令 / `APP_BALANCE_SPEED_INVERT` 宏），允许在线切换编码器方向与平衡环的符号关系；引入速度反馈低通 LPF（`APP_BALANCE_SPEED_LPF_ALPHA=0.15`）；引入速度量纲缩放（`APP_BALANCE_SPEED_CPS_SCALE=10`）；清理 `docs/chore/` 下过时参考文件、`tools/motor_calib/` 下旧 PNG 与 log。详见 §7。
 >
-> 文档定位：阶段 3 自 2026-05-11 起、至 2026-05-17 止，共 8 个提交、横跨电机 BSP 死区重构与四级级联平衡控制的全链路演进记录，兼收同期交付的调试工具链（`serial_plot.py` + `lt_stream`）。
+> **🏗️ Stage 3.7 两级级联重构 + 航向角环收敛（2026-05-21，`adc5344`，`pid2` 分支）**：对照 STM32 demo 将俯仰控制从四级级联（含独立角速度内环 `rp`）**收敛为两级串级**：速度外环（20 Hz）→ 角度环（100 Hz，**直接输出 PWM**）。控制器库切换为 **`pid2_t`**（积分按拍累加、微分先行、OutOffset 死区补偿）；平衡模式 **关闭 BSP 死区重映射**，改由角度环 `bo`/`bp` offset 突破静摩擦。横摆仅保留 **航向角环 `yp`**（EKF / 陀螺积分双源，20 Hz），**移除轮速差转向环 `tp`**。串口整定命令：`bo` / `bp` / `sp` / `yp`（无 `rp`）。详见 **§7A**；**下文 §2~§6 保留 Stage 3.1~3.6 历史记录**，以 Stage 3.7 为当前代码真源。
+>
+> 文档定位：阶段 3 自 2026-05-11 起演进；**当前装车控制架构以 Stage 3.7（`pid2`）为准**。Stage 3.1~3.6 记录仍保留供对照，其中 §5 四级级联、`rp` 角速度内环、50 Hz 航向调度等描述**已被 Stage 3.7 取代**。
 >
 > 关联文档：
 >
@@ -33,9 +35,9 @@
 
 | # | 阶段 3 任务 | 落地结果 |
 |---|-----------|---------|
-| 1 | 静止状态先调俯仰平衡环（PD 起步，后期可升级为 LQR） | **完成** —— PD 起步 → 四级级联（速度/角度/角速率/航向），每环独立 PID，串口实时调参 |
+| 1 | 静止状态先调俯仰平衡环（PD 起步，后期可升级为 LQR） | **完成** —— Stage 3.7 两级串级（速度/角度 + 航向角），`pid2_t` + 串口 `bo/bp/sp/yp` |
 | 2 | 叠加速度环（外环 PI 输出俯仰参考角 → 内环平衡环），消除贴地慢漂 | **完成** —— 速度外环 20 Hz，输出目标 tilt deg，含 LPF + 极性翻转 + 量纲归一化 |
-| 3 | 验收：原地直立 ≥ 3 s，前后偏移 ≤ 10 cm | **整定中** —— 四级级联架构已就绪，串口 `rp/bp/sp/yp` 实时注入增益，配合 `serial_plot.py` 可视化闭环整定 |
+| 3 | 验收：原地直立 ≥ 3 s，前后偏移 ≤ 10 cm | **整定中** —— 两级架构已就绪，串口 `bo/bp/sp/yp` 注入增益，配合 `serial_plot.py` 可视化闭环整定 |
 
 > **架构演进路线图**（各版本里程碑）：
 >
@@ -47,6 +49,7 @@
 > Stage 3.4 (0542060)           四级级联多速率架构                     20/50/100/200 Hz
 > Stage 3.5 (79b9348)           + 角速率 LPF + sigma-delta dither     抗振动 + 子死区平滑
 > Stage 3.6 (b8a5783)           + 速度极性翻转 + 量纲归一化             串口 si0/si1
+> Stage 3.7 (adc5344)           两级级联 + pid2 + 航向角环             移除 rp/tp，当前架构
 > ```
 
 ---
@@ -476,6 +479,68 @@ int32_t avg_cps_raw = ((fb.left_speed_cps + fb.right_speed_cps) / 2)
 
 ---
 
+## 7A. Stage 3.7 ｜ 两级级联重构（当前架构）
+
+> 提交：`adc5344`（2026-05-21，`pid2` 分支）。对照 `docs/chore/STM32_demo` 与 DengFOC 例程，将俯仰控制从 Stage 3.4 四级级联**收敛为两级串级**，横摆仅保留航向角环。
+
+### 7A.1 控制架构
+
+```
+速度外环 (20 Hz)  输入: v_meas 误差 (cps)     → 输出: target_tilt_deg
+角度环   (100 Hz) 输入: tilt 误差 deg         → 输出: ave_pwm (permille)
+航向角环 (20 Hz)  输入: yaw 误差 deg         → 输出: yaw_corr → left/right 差速叠加
+```
+
+- **移除**：独立角速度内环 `rate_pid` / 串口 `rp`；轮速差转向环 `turn_pid` / 串口 `tp`
+- **保留**：速度反馈 LPF、极性翻转（`si0/si1`）、量纲缩放（`APP_BALANCE_SPEED_CPS_SCALE`）、安全状态机、`lt_stream`
+- **D 项**：角度环 Kd 仍走陀螺 `pitch_rate_dps`（不经角速度 PID 环）
+
+### 7A.2 `pid2_t` 控制器
+
+新增 `template/middle/pid2_t`（`pid.h` / `pid.c`）：
+
+| 特性 | 说明 |
+|------|------|
+| 积分 | 每拍 `integral += error * dt`（非误差×Ki 再乘 dt 的旧式） |
+| 微分 | 微分先行：对测量值微分，减少 setpoint 跳变冲击 |
+| OutOffset | 输出叠加恒定偏置，用于突破 TB6612 静摩擦（串口 `bo` / `bp` 第 4 参） |
+| 抗饱和 | 输出限幅 + 积分 clamp |
+
+平衡模式调用 `bsp_motor_set_deadzone_bypass(true)`，**关闭 BSP 死区重映射**；静摩擦由角度环 OutOffset 承担。
+
+### 7A.3 航向角环
+
+- 编译开关：`APP_BALANCE_YAW_ENABLED=1`（默认开）
+- 数据源：`APP_BALANCE_YAW_SOURCE` — 0=EKF `yaw_deg`，1=陀螺 `gz` 积分（默认，抗磁干扰）
+- 调度：与速度外环同拍 20 Hz（`balance_step_yaw`）
+- `target_yaw_pm ≠ 0`（K230 运动指令主动转向）时**暂停航向闭环**，仅保留俯仰两级串级
+
+### 7A.4 串口整定命令（现行）
+
+| 命令 | 作用 |
+|------|------|
+| `bo <offset_pm>` | 全局角度环 OutOffset（先于 `bp` 粗调） |
+| `bp <kp> <ki> <kd> <offset>` | 角度环增益 ×1000 定点 + offset |
+| `sp <kp> <ki> <kd> <offset>` | 速度外环 |
+| `yp <kp> <ki> <kd> <offset>` | 航向角环 |
+| `yi0` / `yi1` | 航向积分清零 / 查询 |
+| `si0` / `si1` | 速度反馈极性翻转 / 查询 |
+| `pid?` | 回显三环增益与 offset |
+
+**已移除**：`rp`（角速度内环）、`tp`（轮速差转向环）。
+
+### 7A.5 K230 `PID_INJECT` 映射
+
+| `pid_id` | 环 | MCU API |
+|----------|-----|---------|
+| 0 | 角度 | `app_balance_set_balance_gains` |
+| 2 | 速度 | `app_balance_set_speed_gains` |
+| 3 | 航向 | `app_balance_set_yaw_gains` |
+
+`pid_id=1`（旧 rate 环）**不再支持**。
+
+---
+
 ## 8. 调试工具链
 
 ### 8.1 串口实时 CSV 数据流（lt_stream）
@@ -514,7 +579,7 @@ lt,<t_ms>,<pitch_deg>,<left_target_rpm>,<right_target_rpm>,<left_actual_rpm>,<ri
 
 ### 8.3 PID 调参指南
 
-[PIDTuningGuide.md](../notes/PIDTuningGuide.md) 随四级级联重构同步更新：整定顺序（角速率 → 角度 → 速度 → 航向）、串口命令格式（`rp/bp/sp/yp` ×1000 定点整数）、安全性约束（MAX_PWM 限幅 + 死区注意事项）。
+[PIDTuningGuide.md](../notes/PIDTuningGuide.md) 已随 Stage 3.7 更新：**整定顺序**（OutOffset → 角度 → 速度 → 航向）、串口命令（`bo` / `bp` / `sp` / `yp`，×1000 定点整数 + offset）、安全性约束（MAX_PWM 限幅）。**无 `rp` 角速度内环**。
 
 ---
 
@@ -524,8 +589,9 @@ lt,<t_ms>,<pitch_deg>,<left_target_rpm>,<right_target_rpm>,<left_actual_rpm>,<ri
 
 | 文件 | 主要变更 |
 |------|---------|
-| `template/app/app_balance.h` | 四级级联 API 重建 + 编译期可配宏（速率周期、输出限幅、LPF 系数、极性翻转、量纲缩放） |
-| `template/app/app_balance.c` | 状态机 + 四路 PID + 多速率调度 + 串口命令解析 + lt_stream + 诊断快照 |
+| `template/app/app_balance.h` | Stage 3.7：两级 API + `pid2_t` + 航向角环；编译期可配宏（周期、LPF、极性、量纲缩放） |
+| `template/app/app_balance.c` | 状态机 + 三路 `pid2` + 多速率调度 + 串口命令 + lt_stream + K230 帧分发 |
+| `template/middle/pid.{c,h}` | 保留 `pid_t`；新增 `pid2_t` / `pid2_update()` |
 | `template/app/app_safety.{c,h}` | 保持 Stage 2 不变；200 Hz 角速度环内集成为 `app_safety_tick()` |
 | `template/hardware/bsp_motor.h` | 双门槛死区（静/动摩擦 8 宏）+ sigma-delta dither + 右路正转补偿 + 运行时开关 API |
 | `template/hardware/bsp_motor.c` | 双门槛状态机 + dither 累加发射 + 编码器停转检测 + X2 解码默认 |
@@ -544,7 +610,7 @@ lt,<t_ms>,<pitch_deg>,<left_target_rpm>,<right_target_rpm>,<left_actual_rpm>,<ri
 
 | 文件 | 动作 |
 |------|------|
-| `docs/notes/PIDTuningGuide.md` | 四级级联重构更新 |
+| `docs/notes/PIDTuningGuide.md` | Stage 3.7 两级 + 航向角环更新 |
 | `docs/chore/Ms901mStreamParser.{cpp,h}` | 删除（过时） |
 | `docs/chore/temporary.md` | 删除（过时） |
 | `tools/motor_calib/*.png` / `log.txt` / `result/*.png` | 删除（旧电机数据） |
@@ -553,16 +619,16 @@ lt,<t_ms>,<pitch_deg>,<left_target_rpm>,<right_target_rpm>,<left_actual_rpm>,<ri
 
 ## 10. 验收清单
 
-> 在平衡参数整定过程中逐项打钩。
+> 在平衡参数整定过程中逐项打钩。**Stage 3.7 现行项**如下；§2~§6 历史中涉及 `rp`/角速度内环的条目已作废。
 
 | 项 | 通过条件 | 验证方式 | 状态 |
 |---|---------|---------|------|
 | 工程能编译 | EIDE 构建无 error | EIDE 构建按钮 | [ ] |
 | 上电 IMU 在线 | 3 s 内收到 0x01，心跳 `[hb]` 正常 | XDS-UART 日志 | [ ] |
 | 安全状态机工作 | 倾斜 > 60° → 电机 brake + STBY 关 | 手推翻车观察 | [ ] |
-| 串口 PID 注入有效 | `rp 1500 0 0` 后 `pid?` 回显一致 | XDS-UART | [ ] |
+| OutOffset 有效 | `bo 80` 后车轮能克服静摩擦微动 | XDS-UART | [ ] |
+| 串口 PID 注入有效 | `bp 5000 0 5000 80` 后 `pid?` 回显一致 | XDS-UART | [ ] |
 | 串口 lt_stream 正常 | `lt` → `serial_plot.py` 看到波形 | serial_plot.py | [ ] |
-| 角速率内环响应 | 手扶车体前倾 → 同侧轮正转（方向正确） | 抬车头观察 | [ ] |
 | 角度环闭合 | `bp` 注入后松手 → 车轮短暂修正回中 | 手扶微倾松手 | [ ] |
 | 速度环不振荡 | `sp` 注入后静止时 PWM 噪声 < 5‰ RMS | serial_plot.py | [ ] |
 | 航向环不漂移 | `yp` 注入后直行 10 s 内 yaw 偏差 < 2°（源 1 模式） | 日志 `yaw_err` | [ ] |
@@ -575,12 +641,12 @@ lt,<t_ms>,<pitch_deg>,<left_target_rpm>,<right_target_rpm>,<left_actual_rpm>,<ri
 
 | # | 问题 | 状态 | 计划 |
 |---|------|------|------|
-| 1 | 四级级联 PID 增益未完成系统整定，当前仍为手工试凑 | **整定中** | 按 PIDTuningGuide 逐环收敛 |
+| 1 | 两级串级 PID 增益未完成系统整定，当前仍为手工试凑 | **整定中** | 按 PIDTuningGuide：`bo` → `bp` → `sp` → `yp` |
 | 2 | 500 PPR × 34:1 新电机的 running_dz 暂用占位值 40‰ | **待标定** | 用 `app_motor_demo` 标定模式逐路测量后替换 |
-| 3 | sigma-delta dither 使子死区区域增益放大 10×，需相应缩小 `rp` Kp | **已适配** | `rp` 起参 1800（原 ~18000 的 1/10） |
+| 3 | sigma-delta dither 在平衡模式已 bypass BSP 死区；OutOffset 由角度环承担 | **已适配** | 先用 `bo`/`bp` offset 突破静摩擦 |
 | 4 | EKF 模式（源 0）的 ±180° 跳变在磁场干扰时可能触发短暂反向输出 | **已规避** | 默认使用源 1（陀螺积分），编译期可切 |
 | 5 | XDS-UART 在 CSV 流 + 1 Hz 日志双开时偶有冲突 | **不阻塞** | CSV 流仅调试期用，装车后关闭 |
-| 6 | K230 通讯帧协议（Overview 阶段 1 任务 2）仍未实现 | **延后** | 需先完成平衡整定，再接入 `MOTION_CMD` |
+| 6 | K230 `MOTION_CMD.target_omega` → `target_yaw_pm`；非 0 时航向环暂停，主动转向协调层待实现 | **部分完成** | 见 Stage 4 TaskLog |
 
 ---
 
@@ -594,3 +660,4 @@ lt,<t_ms>,<pitch_deg>,<left_target_rpm>,<right_target_rpm>,<left_actual_rpm>,<ri
 | v0.4 | 2026-05-14 | + Stage 3.4 四级级联重构（最大规模变更） |
 | v0.5 | 2026-05-16 | + Stage 3.5 角速率 LPF + sigma-delta dither |
 | v0.6 | 2026-05-17 | + Stage 3.6 速度极性翻转 + 量纲归一化 + 文档清理；首版完整 TaskLog |
+| v0.7 | 2026-05-21 | + Stage 3.7 两级级联（`pid2`）+ 航向角环收敛；移除 `rp`/`tp`；更新验收清单与 §8.3 |

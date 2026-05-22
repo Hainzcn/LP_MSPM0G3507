@@ -99,6 +99,8 @@ MCU UART1 RX (PB7) ←──DMA────  K230 命令 UART TX    [运动指�
 | 0x12 | HEARTBEAT_K230 | 1 Hz | `uptime_ms:u32` | 4 B |
 | 0x13 | PID_INJECT | 按需 | `pid_id:u8 + kp:f32 + ki:f32 + kd:f32` | 13 B |
 
+> **`pid_id`（Stage 3.7）**：0=角度，2=速度，3=航向；1（rate）/4（turn）已废弃。
+
 ### 2.4 带宽估算
 
 MCU→K230（20 Hz × 15 B + 1 Hz × 12 B = 312 B/s）：
@@ -161,8 +163,17 @@ K230→MCU（50 Hz × 13 B + 1 Hz × 12 B = 662 B/s）：
 | 1 Hz | `k230_send_heartbeat`：编码 + 阻塞写 HEARTBEAT_MCU |
 
 帧分发逻辑：
-- `MOTION_CMD` (0x11)：解包后直接覆盖 `cmd.target_speed_cps` / `cmd.target_yaw_pm`
-- `PID_INJECT` (0x13)：按 `pid_id` 调用对应 `set_*_gains` API
+- `MOTION_CMD` (0x11)：解包后直接覆盖 `cmd.target_speed_cps` / `cmd.target_yaw_pm`（`target_omega` → `target_yaw_pm`；非 0 时 MCU 侧暂停航向角闭环，见 Stage 3.7 §7A.3）
+- `PID_INJECT` (0x13)：按 `pid_id` 调用对应 `set_*_gains` API（**Stage 3.7 映射**）：
+
+| `pid_id` | 环 | MCU API | 备注 |
+|----------|-----|---------|------|
+| 0 | 角度 | `app_balance_set_balance_gains` | offset 保留现有值 |
+| 2 | 速度 | `app_balance_set_speed_gains` | |
+| 3 | 航向 | `app_balance_set_yaw_gains` | |
+
+> `pid_id=1`（旧角速度 rate 环）与 `pid_id=4`（旧轮速差 turn 环）**已移除**，注入后无效果。
+
 - `HEARTBEAT_K230` (0x12)：仅刷新最后收帧时间戳
 
 1 Hz 心跳日志新增字段：`k230_g=<good>/b=<bad> k230_<ON|OFF>`
@@ -341,3 +352,4 @@ uint16_t k230_crc16(const uint8_t *data, size_t len)
 | 2026-05-18 | v0.3 | K230 在线判定改为任意合法 MCU 上行帧刷新，与 MCU 侧“无任何帧超时”语义对齐；心跳 CRC 问题保留 bad 统计继续追踪 | K230 联调 |
 | 2026-05-18 | v0.4 | 发现 CRC16-CCITT 查找表共 50 处转录错误；移除错误表改用按位计算实现（k230_protocol.c），修复后两端 CRC 对齐，mcu_bad=crc 停止增长 | 主控团队 |
 | 2026-05-20 | v0.5 | MCU–K230 命令链路波特率由 921600 降为 115200（与 IMU UART 统一）；当前协议流量 < 1 kB/s，115200 余量充足（占用率 < 9%），可缓解 K230 高波特率发热问题 | 主控团队 |
+| 2026-05-21 | v0.6 | 对齐 Stage 3.7：`PID_INJECT pid_id` 0/2/3；移除 rate/turn；`MOTION_CMD.target_omega` 行为说明 | 主控团队 |

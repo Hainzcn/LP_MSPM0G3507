@@ -13,7 +13,6 @@
  *   ② 串口 `bp 5 0 5 80`  → (kp/ki/kd/offset) 角度环能站稳
  *   ③ 串口 `sp 2 0.05 0 0`→ 速度环消静态漂移
  *   ④ 串口 `yp 800 0 200 0` → 航向角环（锁 yaw，见 APP_BALANCE_YAW_SOURCE）
- *   ⑤ 可选 `tp 4 3 0 0`   → 轮速差转向环（STM32 TurnPID，需 APP_BALANCE_TURN_ENABLED=1）
  *
  * ============================================================================
  * 调用模型
@@ -23,7 +22,6 @@
  *   app_balance_set_balance_gains(kp, ki, kd, out_offset);
  *   app_balance_set_speed_gains  (kp, ki, kd, out_offset);
  *   app_balance_set_yaw_gains    (kp, ki, kd, out_offset);  航向角环
- *   app_balance_set_turn_gains   (kp, ki, kd, out_offset);  轮速差环（可选）
  *   app_balance_run();   内部多速率调度 100/20 Hz
  */
 
@@ -61,7 +59,7 @@ extern "C" {
 #define APP_BALANCE_MAX_PWM_PERMILLE            (1000)
 #endif
 
-/** 航向/转向环差分 PWM 绝对值上限（permille）。 */
+/** 航向环差分 PWM 绝对值上限（permille）。 */
 #ifndef APP_BALANCE_YAW_MAX_CORRECTION_PM
 #define APP_BALANCE_YAW_MAX_CORRECTION_PM       (200)
 #endif
@@ -78,11 +76,6 @@ extern "C" {
  */
 #ifndef APP_BALANCE_YAW_SOURCE
 #define APP_BALANCE_YAW_SOURCE                  (1)
-#endif
-
-/** 轮速差转向环（STM32 TurnPID）开关；与航向角环可同时启用，输出叠加。 */
-#ifndef APP_BALANCE_TURN_ENABLED
-#define APP_BALANCE_TURN_ENABLED                (0)
 #endif
 
 /** 航向角环周期（毫秒），与速度外环同拍。 */
@@ -126,11 +119,6 @@ extern "C" {
 /** 速度环 OutOffset（permille）。速度环输出为角度°，通常不需要死区补偿。 */
 #ifndef APP_BALANCE_SPEED_OUT_OFFSET
 #define APP_BALANCE_SPEED_OUT_OFFSET            (0.0f)
-#endif
-
-/** 转向环 OutOffset（permille）。通常不需要死区补偿。 */
-#ifndef APP_BALANCE_TURN_OUT_OFFSET
-#define APP_BALANCE_TURN_OUT_OFFSET             (0.0f)
 #endif
 
 /**
@@ -236,7 +224,7 @@ typedef struct {
     float   pitch_meas_deg;     /* 实际俯仰（已减零点，°） */
     float   balance_out_pwm;    /* 角度环输出 PWM（permille） */
     float   yaw_error_deg;      /* 航向角环误差（°）；源 1 时为 -gz 积分量 */
-    int16_t yaw_correction_pm;  /* 航向+转向差分合成（permille）；正值 = 左加右减 */
+    int16_t yaw_correction_pm;  /* 航向环差分补偿（permille）；正值 = 左加右减 */
     int16_t left_cmd_pm;        /* 最终左轮命令（permille） */
     int16_t right_cmd_pm;       /* 最终右轮命令（permille） */
     int32_t speed_meas_cps;     /* 实际平均速度 = (L+R)/2（counts/s） */
@@ -291,9 +279,6 @@ void app_balance_set_speed_gains(float kp, float ki, float kd, float out_offset)
 
 /** 设置航向角环增益（闭环锁 yaw）。 */
 void app_balance_set_yaw_gains(float kp, float ki, float kd, float out_offset);
-
-/** 设置轮速差转向环增益（STM32 TurnPID，可选）。 */
-void app_balance_set_turn_gains(float kp, float ki, float kd, float out_offset);
 
 void app_balance_set_yaw_inverted(bool inverted);
 bool app_balance_get_yaw_inverted(void);

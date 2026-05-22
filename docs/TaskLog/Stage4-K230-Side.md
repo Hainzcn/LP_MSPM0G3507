@@ -286,7 +286,7 @@ def make_motion_cmd(target_v: int, target_omega: int, mode: int = 1) -> bytes:
     """
     target_v     -- 纵向速度（counts/s 已除以 SCALE=10，正=前进）
                     例：target_v=500 ≡ 5000 raw cps ≡ ~0.15 rev/s
-    target_omega -- 转向差分量 permille（正=顺时针俯视）
+    target_omega -- 映射为 MCU `target_yaw_pm`（permille）；非 0 时航向角闭环暂停（Stage 3.7）
     mode         -- 0=停止, 1=正常行驶
     """
     payload = struct.pack('<hhB', target_v, target_omega, mode)
@@ -305,7 +305,8 @@ def make_heartbeat_k230(uptime_ms: int) -> bytes:
 ```python
 def make_pid_inject(pid_id: int, kp: float, ki: float, kd: float) -> bytes:
     """
-    pid_id: 0=angle环, 1=rate环, 2=speed环, 3=yaw环
+    pid_id: 0=angle环, 2=speed环, 3=yaw航向角环
+    （1=旧rate环、4=旧turn环 已移除，MCU 侧忽略）
     """
     payload = struct.pack('<Bfff', pid_id, kp, ki, kd)
     return encode_frame(0x13, payload)
@@ -468,3 +469,4 @@ print(frame.hex())
 | 日期 | 版本 | 内容 |
 |------|------|------|
 | 2026-05-17 | v0.1 | 初版，完整描述 K230 端 IMU 解析、命令帧协议、集成示例与调试方法 |
+| 2026-05-21 | v0.2 | 对齐 Stage 3.7：`pid_id` 0/2/3（角度/速度/航向）；`target_omega` → `target_yaw_pm` 语义说明 |

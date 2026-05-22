@@ -84,7 +84,7 @@ typedef struct __attribute__((packed)) {
 
 /** K230→MCU：远程 PID 注入帧 (CMD 0x13)，按需 */
 typedef struct __attribute__((packed)) {
-    uint8_t pid_id;             /* PID 环 ID：0=angle, 2=speed, 3=yaw, 4=turn(diff) */
+    uint8_t pid_id;             /* PID 环 ID：0=angle, 2=speed, 3=yaw */
     float   kp;
     float   ki;
     float   kd;

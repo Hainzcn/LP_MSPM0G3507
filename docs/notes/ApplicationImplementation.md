@@ -42,36 +42,35 @@ switch (next) {
 
 这里是单片机算力的集中消耗地，它需要精准的时间控制。
 
-### 2.1 串级 PID 的代码连接 (`app_balance_step`)
-我们之前说过“串级 PID”，在代码里它是怎么“串”起来的呢？
+### 2.1 串级 PID 的代码连接
+
+当前实现拆为 `balance_step_speed()`（20 Hz）与 `balance_step_angle()`（100 Hz），控制器为 `pid2_t`：
 
 ```c
-// 1. 拿数据：取左右轮的平均速度
-int32_t avg_cps = (fb.left_speed_cps + fb.right_speed_cps) / 2;
+// 20 Hz：速度外环 → target_tilt_deg
+s_bal.speed_pid.target = target_norm;
+s_bal.speed_pid.actual = speed_lpf_cps;   /* 归一化 + EMA 低通 */
+pid2_update(&s_bal.speed_pid);
+s_bal.target_tilt_deg = s_bal.speed_pid.out;
 
-// 2. 算外环（速度环）：目标速度 vs 真实速度，算出一个“目标倾角”
-float target_tilt_deg = pid_step(&s_bal.speed_pid, 
-                                 (float)cmd->target_speed_cps, 
-                                 (float)avg_cps, 
-                                 s_dt_sec);
+// 20 Hz：航向角环 → yaw_corr_pm（见 yaw_angle_step / pid2_update）
+(void)yaw_angle_step(att, cmd);
 
-// 3. 算内环（平衡环）：目标倾角 vs 真实倾角，算出一个“电机总输出(PWM)”
-float pitch_meas = att->pitch_deg - s_bal.pitch_offset_deg;
-float pwm_out = pid_step(&s_bal.balance_pid, 
-                         target_tilt_deg, // <--- 这里就是串接点！
-                         pitch_meas, 
-                         s_dt_sec);
+// 100 Hz：角度环 → ave_pwm
+s_bal.angle_pid.target = s_bal.target_tilt_deg;
+s_bal.angle_pid.actual = pitch_meas;
+pid2_update(&s_bal.angle_pid);
+float ave_pwm = s_bal.angle_pid.out;
 
-// 4. 差速转向：左轮减一点，右轮加一点
-int16_t left_pm  = clamp_pwm_pm(pwm_out - yaw_pm);
-int16_t right_pm = clamp_pwm_pm(pwm_out + yaw_pm);
-
-// 5. 下发物理指令给电机
+// 航向差分合成
+int16_t left_pm  = clamp_pwm_pm(ave_pwm + yaw_corr_pm * 0.5f);
+int16_t right_pm = clamp_pwm_pm(ave_pwm - yaw_corr_pm * 0.5f);
 bsp_motor_set_output(left_pm, right_pm);
 ```
-上面这短短的几行代码，清晰地展示了外环的**输出**（`target_tilt_deg`）直接变成了内环的**目标输入**。这就像接力赛一样，一棒传一棒。
 
-### 2.2 轻量化日志输出（字符串拼接技巧）
+外环输出 `target_tilt_deg` 直接成为角度环目标；角度环输出与航向差分叠加后驱动电机。详细调参见 [PIDTuningGuide.md](PIDTuningGuide.md)。
+
+### 2.3 `main.c` 里的“启动保险”
 在 `app_balance_run` 的 1Hz 日志打印里，有一段看起来很复杂的 `printf`：
 ```c
 BAL_F2_S(diag.pitch_meas_deg), 

@@ -4,7 +4,6 @@
  *
  *   速度环 (20 Hz) → 角度环 (100 Hz) → 电机输出
  *   航向角环 (20 Hz) ─────────────────→ 差分叠加 ┘
- *   轮速差环 (20 Hz，可选) ────────────┘
  *
  *   所有 PID 增益默认 0，业务层未 set_gains 之前电机不会动。
  */
@@ -36,13 +35,11 @@ typedef struct {
     pid2_t  angle_pid;          /* 角度环 100 Hz：输入 tilt 误差 deg，输出 PWM permille */
     pid2_t  speed_pid;          /* 速度外环 20 Hz：输入 cps 误差，输出目标 tilt deg */
     pid2_t  yaw_pid;            /* 航向角环 20 Hz：输入 yaw 误差，输出差分 PWM permille */
-    pid2_t  turn_pid;           /* 轮速差环 20 Hz（可选）：输入差速误差，输出差分 PWM */
     float   target_tilt_deg;    /* 速度环输出：角度环目标角 */
     float   yaw_corr_pm;        /* 航向角环输出 */
-    float   turn_corr_pm;       /* 轮速差环输出 */
     float   yaw_target_deg;     /* 源 0：锁定的目标航向（°） */
     float   yaw_gz_integrated;  /* 源 1：gz 积分累积偏航（°） */
-    float   speed_lpf_cps;      /* 速度反馈 EMA 低通 */
+    float   speed_lpf_cps;      /* 平均速度反馈 EMA 低通（归一化 cps） */
     float   pitch_offset_deg;   /* 直立零点 */
     int8_t  speed_sign;         /* +1 正常，-1 编码器方向反向 */
     int8_t  yaw_sign;           /* +1 正常，-1 yaw/gz 符号翻转 */
@@ -110,7 +107,6 @@ void app_balance_init(void)
     pid2_init(&s_bal.angle_pid);
     pid2_init(&s_bal.speed_pid);
     pid2_init(&s_bal.yaw_pid);
-    pid2_init(&s_bal.turn_pid);
 
     /* 角度环 100 Hz：输出 PWM permille */
     s_bal.angle_pid.out_min    = -(float)APP_BALANCE_MAX_PWM_PERMILLE;
@@ -133,18 +129,10 @@ void app_balance_init(void)
     s_bal.yaw_pid.i_max      =  APP_BALANCE_YAW_INTEGRAL_LIMIT_PM;
     s_bal.yaw_pid.out_offset = 0.0f;
 
-    /* 轮速差环 20 Hz（可选） */
-    s_bal.turn_pid.out_min    = -(float)APP_BALANCE_YAW_MAX_CORRECTION_PM;
-    s_bal.turn_pid.out_max    =  (float)APP_BALANCE_YAW_MAX_CORRECTION_PM;
-    s_bal.turn_pid.i_min      = -20.0f;
-    s_bal.turn_pid.i_max      =  20.0f;
-    s_bal.turn_pid.out_offset = APP_BALANCE_TURN_OUT_OFFSET;
-
     s_bal.target_tilt_deg  = 0.0f;
     s_bal.yaw_corr_pm      = 0.0f;
-    s_bal.turn_corr_pm     = 0.0f;
     s_bal.speed_lpf_cps    = 0.0f;
-    s_bal.pitch_offset_deg = 0.8f;
+    s_bal.pitch_offset_deg  = 0.8f;
     s_bal.speed_sign =
 #if APP_BALANCE_SPEED_INVERT
         -1;
@@ -177,9 +165,7 @@ void app_balance_reset(void)
     pid2_reset(&s_bal.angle_pid);
     pid2_reset(&s_bal.speed_pid);
     reset_yaw_state();
-    pid2_reset(&s_bal.turn_pid);
     s_bal.target_tilt_deg = 0.0f;
-    s_bal.turn_corr_pm    = 0.0f;
     s_bal.speed_lpf_cps   = 0.0f;
 }
 
@@ -223,14 +209,6 @@ void app_balance_set_yaw_gains(float kp, float ki, float kd, float out_offset)
     s_bal.yaw_pid.ki         = ki;
     s_bal.yaw_pid.kd         = kd;
     s_bal.yaw_pid.out_offset = out_offset;
-}
-
-void app_balance_set_turn_gains(float kp, float ki, float kd, float out_offset)
-{
-    s_bal.turn_pid.kp         = kp;
-    s_bal.turn_pid.ki         = ki;
-    s_bal.turn_pid.kd         = kd;
-    s_bal.turn_pid.out_offset = out_offset;
 }
 
 void app_balance_set_yaw_inverted(bool inverted)
@@ -337,7 +315,6 @@ static float yaw_angle_step(const app_balance_attitude_t *att,
  * 速度/外环（20 Hz）：
  *   - SpeedPID：输入 cps 误差，输出 target_tilt_deg（角度环 setpoint）
  *   - YawPID   ：航向角闭环（见 yaw_angle_step）
- *   - TurnPID  ：轮速差（可选，STM32 TurnPID）
  *
  * EKF 加速度耦合门控：若 |a_mag - 1g| > 0.15g（剧烈加速/减速），
  * 本拍跳过 SpeedPID 更新，防 EKF pitch 瞬时耦合污染速度环积分。
@@ -374,21 +351,8 @@ static void balance_step_speed(const app_balance_attitude_t *att,
 
     (void)yaw_angle_step(att, cmd);
 
-#if APP_BALANCE_TURN_ENABLED
-    float dif_cps_raw = (float)(fb.left_speed_cps - fb.right_speed_cps) / 2.0f
-                        * (float)s_bal.speed_sign;
-    float dif_norm = dif_cps_raw / (float)APP_BALANCE_SPEED_CPS_SCALE;
-
-    s_bal.turn_pid.target = (float)cmd->target_yaw_pm;
-    s_bal.turn_pid.actual = dif_norm;
-    pid2_update(&s_bal.turn_pid);
-    s_bal.turn_corr_pm = s_bal.turn_pid.out;
-#else
-    s_bal.turn_corr_pm = 0.0f;
-#endif
-
     s_bal.diag.target_tilt_deg   = s_bal.target_tilt_deg;
-    s_bal.diag.yaw_correction_pm = clamp_diff_pm(s_bal.yaw_corr_pm + s_bal.turn_corr_pm);
+    s_bal.diag.yaw_correction_pm = clamp_diff_pm(s_bal.yaw_corr_pm);
     s_bal.diag.speed_meas_cps    = (int32_t)s_bal.speed_lpf_cps;
 }
 
@@ -444,8 +408,8 @@ static void balance_step_angle(const app_balance_attitude_t *att,
     pid2_update(&s_bal.angle_pid);
     float ave_pwm = s_bal.angle_pid.out;
 
-    /* 混合航向 + 轮速差：left = ave + corr/2, right = ave - corr/2 */
-    float dif_half = (s_bal.yaw_corr_pm + s_bal.turn_corr_pm) * 0.5f;
+    /* 航向差分：left = ave + yaw/2, right = ave - yaw/2 */
+    float dif_half = s_bal.yaw_corr_pm * 0.5f;
     int16_t left_pm  = clamp_pwm_pm(ave_pwm + dif_half);
     int16_t right_pm = clamp_pwm_pm(ave_pwm - dif_half);
 
@@ -633,24 +597,16 @@ static void print_pid_status(void)
     print_pid2_status("angle", &s_bal.angle_pid);
     print_pid2_status("speed", &s_bal.speed_pid);
     print_pid2_status("yaw",   &s_bal.yaw_pid);
-#if APP_BALANCE_TURN_ENABLED
-    print_pid2_status("turn",  &s_bal.turn_pid);
-#endif
-    (void)printf("[pid] loops: angle 100Hz, speed/yaw 20Hz"
-#if APP_BALANCE_TURN_ENABLED
-                 " + turn(diff)"
-#endif
-                 " | yaw_src=%d invert=%u turn_en=%d\r\n",
+    (void)printf("[pid] loops: angle 100Hz, speed/yaw 20Hz | yaw_src=%d invert=%u\r\n",
                  (int)APP_BALANCE_YAW_SOURCE,
-                 app_balance_get_yaw_inverted() ? 1u : 0u,
-                 (int)APP_BALANCE_TURN_ENABLED);
+                 app_balance_get_yaw_inverted() ? 1u : 0u);
 }
 
 static void print_pid_help(void)
 {
-    (void)printf("[pid] commands: bp/sp/yp/tp <kp_x1000> <ki_x1000> <kd_x1000> <offset_pm>, "
+    (void)printf("[pid] commands: bp/sp/yp <kp_x1000> <ki_x1000> <kd_x1000> <offset_pm>, "
                  "bo, si0/si1, yi0/yi1, pid?, pid0, lt, lt0, t/test\r\n");
-    (void)printf("[pid] bp=angle(100Hz) sp=speed(20Hz) yp=yaw_angle(20Hz) tp=wheel_diff(optional)\r\n");
+    (void)printf("[pid] bp=angle(100Hz) sp=speed(20Hz) yp=yaw_angle(20Hz) bo=angle_offset_only\r\n");
     (void)printf("[pid] offset_pm: direct permille, NOT x1000 (e.g. bo 80 = 80pm dead-zone comp)\r\n");
     (void)printf("[pid] example: bo 80 ; bp 5000 0 5000 80 ; sp 2000 50 0 0 ; yp 800 0 200 0\r\n");
     (void)printf("[pid] si?/si0/si1=speed_invert  yi?/yi0/yi1=yaw_invert\r\n");
@@ -733,7 +689,6 @@ static bool handle_pid_command(const char *cmd)
             app_balance_set_balance_gains(0.0f, 0.0f, 0.0f, 0.0f);
             app_balance_set_speed_gains(0.0f, 0.0f, 0.0f, 0.0f);
             app_balance_set_yaw_gains(0.0f, 0.0f, 0.0f, 0.0f);
-            app_balance_set_turn_gains(0.0f, 0.0f, 0.0f, 0.0f);
             app_balance_reset();
             (void)printf("[pid] all gains cleared\r\n");
             return true;
@@ -796,19 +751,6 @@ static bool handle_pid_command(const char *cmd)
         app_balance_set_yaw_gains(kp, ki, kd, offset);
         reset_yaw_state();
         print_pid2_status("yaw", &s_bal.yaw_pid);
-        return true;
-    }
-
-    /* tp：轮速差转向环（需 APP_BALANCE_TURN_ENABLED=1） */
-    if ((cmd[0]=='t') && (cmd[1]=='p') && is_field_separator(cmd[2])) {
-        float kp, ki, kd, offset;
-        if (!parse_pid_quad(&cmd[2], &kp, &ki, &kd, &offset)) {
-            (void)printf("[pid] bad tp command, use: tp 4000 3000 0 0\r\n");
-            return true;
-        }
-        app_balance_set_turn_gains(kp, ki, kd, offset);
-        pid2_reset(&s_bal.turn_pid);
-        print_pid2_status("turn", &s_bal.turn_pid);
         return true;
     }
 
@@ -964,7 +906,6 @@ static void k230_drain_and_dispatch(app_balance_motion_cmd_t *cmd, uint32_t now_
                 case 3u: app_balance_set_yaw_gains(pi.kp, pi.ki, pi.kd, s_bal.yaw_pid.out_offset);
                          reset_yaw_state();
                          break;
-                case 4u: app_balance_set_turn_gains(pi.kp, pi.ki, pi.kd, s_bal.turn_pid.out_offset);     break;
                 default: break;
                 }
             }
@@ -1100,7 +1041,7 @@ bool app_balance_run(void)
                 k230_send_vehicle_status();
             }
 
-            /* 100 Hz 角度环 —— 消费 target_tilt_deg 和 turn_corr_pm 输出 PWM */
+            /* 100 Hz 角度环 —— 消费 target_tilt_deg 和 yaw_corr_pm 输出 PWM */
             balance_step_angle(&att, &cmd);
 
             /* LT 采样 */

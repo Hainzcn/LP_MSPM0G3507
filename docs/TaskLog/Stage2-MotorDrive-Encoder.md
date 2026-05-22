@@ -222,9 +222,11 @@ for (;;) {
 **低压急停**：`bsp_battery_get_state() == LOW_STOP` → `bsp_motor_brake_pulse_ms(120)` + `enable(false)`，且**不会自动恢复**：电池升回 LOW_WARN 后状态降到 LOW_BAT_WARN 但保持 STBY 关，必须由上层再次调用 `app_safety_arm()`。
 **重启策略**：DISARMED / FALLEN / LOW_BAT_WARN 仅由上层显式 `app_safety_arm()` 恢复；低压未恢复时 arm 会被拒绝。
 
-#### 3.5.4 `app_balance.{c,h}` —— 平衡车双环骨架
+#### 3.5.4 `app_balance.{c,h}` —— 平衡车控制（Stage 2.2 初版骨架）
 
-| API | 用途 |
+> **⚠️ API 已演进**：本节描述 Stage 2.2 双环骨架。**当前装车代码为 Stage 3.7 两级级联**（速度 20 Hz → 角度 100 Hz → PWM + 航向角环 20 Hz），使用 `pid2_t` 与 `set_*_gains(kp, ki, kd, out_offset)`。完整 API 与整定流程以 [`app_balance.h`](../../template/app/app_balance.h) 及 [Stage3-BalanceControl.md §7A](Stage3-BalanceControl.md) 为准。
+
+| API（Stage 2.2 历史） | 用途 |
 | --- | --- |
 | `app_balance_init()` | 初始化两路 PID（输出限幅 + D 滤波系数已写入；增益默认 0） |
 | `app_balance_reset()` | 清两路 PID 内部历史，不动增益 |
