@@ -40,13 +40,17 @@
 ;   <o> Stack Size (in Bytes) <0x0-0xFFFFFFFF:8>
 ; </h>
 
-; Stack_Size 由 0x100 (256 B) 提升到 0x400 (1 KB)：
-;   原 256 B 栈不够装 Keil AC6 标准库 printf("%f") 浮点格式化路径
-;   （vsnprintf + 浮点 → int 转换栈帧典型 200~300 B），1 Hz [hb] 心跳塞
-;   4 个 %.2f/%.1f 时栈瞬间溢出 → HardFault → 主循环死锁。
-;   即便业务层已把 %f 改成手动 %c%ld.%02lu 整数格式化，1 KB 栈仍是
-;   合理裕度，覆盖未来 snprintf / 浮点数学等可能的栈高峰。
-Stack_Size      EQU     0x00000400
+; Stack_Size 演进：0x100 (256B) → 0x400 (1KB) → 0x800 (2KB)。
+;   256B：原始值，printf("%f") 直接 HardFault → 主循环死锁。
+;   1KB：业务层全量去除 %f 后够用；但 .map 显示栈 [0x20200d78,0x20201178)
+;        与下方 .bss（s_state、s_total_rx 等）紧邻，一旦未来某次 commit
+;        重新引入 printf("%f") 或者 snprintf 大格式化，栈溢出 24B 就能
+;        精确写脏 0x20200d60 邻域 → 心跳 state=? + k230_rx 速率异常飙大。
+;   2KB：在原 1KB 基础上再加 1KB 安全裕度，把栈底压到 0x20200978，给
+;        .bss 末端到栈底之间留出 >1KB 空地。任何 _printf_fp_dec 调用
+;        典型栈帧 200~400B，叠 3~4 个 %f 也不会摸到 .bss 头部。
+;        注：仅 +1KB SRAM 占用，MSPM0G3507 32KB SRAM 完全可以承受。
+Stack_Size      EQU     0x00000800
 
                 AREA    STACK, NOINIT, READWRITE, ALIGN=3
 Stack_Mem       SPACE   Stack_Size

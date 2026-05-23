@@ -84,7 +84,11 @@ typedef enum {
     APP_SAFETY_ARMED        = 1,    /* 正常允许电机输出 */
     APP_SAFETY_LOW_BAT_WARN = 2,    /* 电池告警；电机已被限速但仍可走 */
     APP_SAFETY_FALLEN       = 3,    /* 跌倒；电机已急停 */
-    APP_SAFETY_LOW_BAT_STOP = 4     /* 电池保护；电机已急停 */
+    APP_SAFETY_LOW_BAT_STOP = 4,    /* 电池保护；电机已急停 */
+    /* —— 哨兵值：强制本枚举占用 4 字节、word 对齐，规避 AC6 --short-enums
+     *    把枚举压成单字节后被相邻结构体字节越界写入污染的风险。
+     *    本值仅作内部存储宽度提示，不应被业务代码使用。 */
+    APP_SAFETY_FORCE_INT32_ = 0x7FFFFFFF
 } app_safety_state_t;
 
 /** 业务侧每拍传入的"当前姿态"快照（解耦 ms901m.h，方便单元测试） */

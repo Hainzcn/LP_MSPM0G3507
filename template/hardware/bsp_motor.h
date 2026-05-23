@@ -263,9 +263,11 @@ extern "C" {
 /* 反馈结构体                                                                   */
 /*   `*_count`         编码器累计计数（int32，约 ±5×10^5 圈不溢出）              */
 /*   `*_angle_deg`     输出轴累计机械角（计数 / 每圈计数 × 360°）                */
-/*   `*_speed_cps`     输出轴瞬时角速度，单位 counts/s（差分窗口决定刷新率）     */
+/*   `*_speed_cps`     输出轴瞬时速度，单位 counts/s（差分窗口决定刷新率）       */
 /*   `*_speed_dps`     输出轴瞬时角速度，单位 °/s                               */
 /*   `*_speed_rpm`     输出轴瞬时转速，单位 rpm                                 */
+/*   `*_speed_mps`     驱动轮线速度，单位 m/s（由 robot_param.h 换算系数计算）   */
+/*                     注意：左右轮解码倍率不同（X4/X2），各用自身 cnt/rev 换算。*/
 /* ========================================================================== */
 typedef struct {
     int32_t left_count;
@@ -282,6 +284,9 @@ typedef struct {
 
     float   left_speed_rpm;
     float   right_speed_rpm;
+
+    float   left_speed_mps;     /* 左轮线速度（m/s），含正负方向；由 ROBOT_LEFT_CPS_TO_MPS  换算 */
+    float   right_speed_mps;    /* 右轮线速度（m/s），含正负方向；由 ROBOT_RIGHT_CPS_TO_MPS 换算 */
 } bsp_motor_feedback_t;
 
 /* ========================================================================== */

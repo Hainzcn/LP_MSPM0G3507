@@ -9,6 +9,7 @@
  */
 
 #include "app_balance.h"
+#include "app_circle_demo.h"
 
 #include "app_safety.h"
 #include "bsp_battery.h"
@@ -21,6 +22,7 @@
 #include "k230_protocol.h"
 #include "ms901m.h"
 #include "pid.h"
+#include "robot_param.h"
 #include "ti_msp_dl_config.h"
 
 #include <stdio.h>
@@ -187,6 +189,12 @@ bool app_balance_get_speed_inverted(void)
     return (s_bal.speed_sign < 0);
 }
 
+void app_balance_set_target_speed_mps(app_balance_motion_cmd_t *cmd, float v_mps)
+{
+    if (cmd == NULL) { return; }
+    cmd->target_speed_cps = ROBOT_MPS_TO_EQ_CPS(v_mps);
+}
+
 void app_balance_set_balance_gains(float kp, float ki, float kd, float out_offset)
 {
     s_bal.angle_pid.kp         = kp;
@@ -239,8 +247,11 @@ void app_balance_get_diag(app_balance_diag_t *out)
  *   0 = EKF yaw_deg，锁定首帧目标角 + virtual measured 避免 ±180° 跳变
  *   1 = gz_dps 积分，以归零积分量为目标；D 项等效 gz 阻尼
  *
- * target_yaw_pm != 0（K230 转向指令）时暂停航向闭环并刷新目标角（源 0）
- * 或清零积分（源 1），避免与开环转向对抗。
+ * target_yaw_pm != 0（K230 转向 / 圆圈演示开环转向指令）时：
+ *   ─ 暂停航向闭环 PID，避免与开环指令对抗；
+ *   ─ 将 target_yaw_pm 直接写入 yaw_corr_pm，使差速混合层立即执行开环差速；
+ *   ─ 刷新目标角（源 0）或清零 gz 积分（源 1），以便 target_yaw_pm 回 0 时
+ *     闭环从当前航向重新锁定，而不是从旧目标猛打。
  */
 static float yaw_angle_step(const app_balance_attitude_t *att,
                              const app_balance_motion_cmd_t *cmd)
@@ -260,12 +271,14 @@ static float yaw_angle_step(const app_balance_attitude_t *att,
     float yaw_deg = att->yaw_deg * (float)s_bal.yaw_sign;
 
     if (cmd->target_yaw_pm != 0) {
+        /* 开环差速转向：直接输出 target_yaw_pm，同时刷新目标角为当前值，
+         * 以便回到 0 时航向闭环从这里重新锁定，不产生回摆冲击。 */
         pid2_reset(&s_bal.yaw_pid);
-        s_bal.yaw_target_deg   = yaw_deg;
-        s_bal.yaw_target_valid = true;
+        s_bal.yaw_target_deg         = yaw_deg;
+        s_bal.yaw_target_valid       = true;
         s_bal.diag.yaw_error_deg     = 0.0f;
-        s_bal.yaw_corr_pm            = 0.0f;
-        return 0.0f;
+        s_bal.yaw_corr_pm            = (float)cmd->target_yaw_pm;
+        return s_bal.yaw_corr_pm;
     }
 
     if (!s_bal.yaw_target_valid) {
@@ -291,11 +304,13 @@ static float yaw_angle_step(const app_balance_attitude_t *att,
     }
 
     if (cmd->target_yaw_pm != 0) {
+        /* 开环差速转向：直接输出 target_yaw_pm，清零 gz 积分，
+         * 以便回到 0 时闭环从"当前方向"重新收敛，不产生回摆冲击。 */
         pid2_reset(&s_bal.yaw_pid);
         s_bal.yaw_gz_integrated      = 0.0f;
         s_bal.diag.yaw_error_deg     = 0.0f;
-        s_bal.yaw_corr_pm            = 0.0f;
-        return 0.0f;
+        s_bal.yaw_corr_pm            = (float)cmd->target_yaw_pm;
+        return s_bal.yaw_corr_pm;
     }
 
     float gz = att->gz_dps * (float)s_bal.yaw_sign;
@@ -325,8 +340,19 @@ static void balance_step_speed(const app_balance_attitude_t *att,
     bsp_motor_feedback_t fb;
     bsp_motor_get_feedback(&fb);
 
-    /* 量纲归一化：除以 SCALE（默认 10），避免大 cps 直通后 PID 发散 */
-    int32_t avg_cps_raw = ((fb.left_speed_cps + fb.right_speed_cps) / 2)
+    /*
+     * 物理平均速度归一化（右轮等效 CPS）：
+     *
+     * 左轮 X4（68000 cnt/rev）与右轮 X2（34000 cnt/rev）解码倍率不同，
+     * 相同物理转速下 left_cps = 2 × right_cps。直接平均 (L+R)/2 会产生
+     * 50% 的正偏差。修正方法：将左轮折算到右轮分辨率后再取平均：
+     *
+     *   avg_cps_corrected = (left_cps/2 + right_cps) / 2
+     *
+     * 此式在直行时恒等于 right_cps，与物理线速度严格成正比。
+     * 除以 SCALE（默认 10）后进 PID，使数值落在合理范围。
+     */
+    int32_t avg_cps_raw = ((fb.left_speed_cps / 2 + fb.right_speed_cps) / 2)
                           * (int32_t)s_bal.speed_sign;
     float norm_cps = (float)avg_cps_raw / (float)APP_BALANCE_SPEED_CPS_SCALE;
 
@@ -610,6 +636,14 @@ static void print_pid_help(void)
     (void)printf("[pid] offset_pm: direct permille, NOT x1000 (e.g. bo 80 = 80pm dead-zone comp)\r\n");
     (void)printf("[pid] example: bo 80 ; bp 5000 0 5000 80 ; sp 2000 50 0 0 ; yp 800 0 200 0\r\n");
     (void)printf("[pid] si?/si0/si1=speed_invert  yi?/yi0/yi1=yaw_invert\r\n");
+    (void)printf("[pid] ci=circle_start ci0=circle_stop ci?=circle_status\r\n");
+    /* 不要用 printf("%f")：Keil AC6 浮点格式化栈帧 200~300B/个，多参叠加可能
+     * 超过 1KB 栈 → 栈溢出会写脏 .bss 末尾的全局变量（典型症状：state=?,
+     * k230_rx 速率异常大）。这里用 mm/cm 整数表达，等价信息量。 */
+    (void)printf("[pid] circle: R=%dmm v=%dcm/s CW_SIGN=%+d (adjust CW_GZ_SIGN if acc goes neg)\r\n",
+                 (int)(APP_CIRCLE_RADIUS_M * 1000.0f),
+                 (int)(APP_CIRCLE_SPEED_MPS * 100.0f),
+                 (int)APP_CIRCLE_CW_SIGN);
 }
 
 static void send_lt_header(void)
@@ -788,6 +822,47 @@ static bool handle_pid_command(const char *cmd)
         }
     }
 
+    /* ci / ci0 / ci? / ci1：绕圆演示 */
+    if ((cmd[0] == 'c') && (cmd[1] == 'i')) {
+        if (cmd[2] == '\0') {
+            /* ci：停轮 → 10 s 倒计时 → 自动重校零 → 启动演示 */
+            app_safety_disarm();
+            bsp_motor_enable(false);
+            app_circle_demo_start_pending(10000u, bsp_systick_get_ms());
+            return true;
+        }
+        if ((cmd[2] == '1') && (cmd[3] == '\0')) {
+            /* ci1：等同 ci */
+            app_safety_disarm();
+            bsp_motor_enable(false);
+            app_circle_demo_start_pending(10000u, bsp_systick_get_ms());
+            return true;
+        }
+        if ((cmd[2] == '0') && (cmd[3] == '\0')) {
+            /* ci0：中止演示；运动命令在下一 20 Hz update 后自然清零 */
+            app_circle_demo_stop(NULL);
+            app_safety_disarm();
+            bsp_motor_stop();
+            return true;
+        }
+        if ((cmd[2] == '?') && (cmd[3] == '\0')) {
+            uint32_t rem = app_circle_demo_get_pending_remaining_ms(
+                               bsp_systick_get_ms());
+            /* 同样避开 printf("%f")：acc 用 BAL_F2 整数缩放，R/v 用 mm/cm */
+            float acc_deg = app_circle_demo_get_accumulated_deg();
+            (void)printf("[circle] state=%u acc=%c%ld.%02lu deg R=%dmm v=%dcm/s"
+                         " pending_rem=%lu ms\r\n",
+                         (unsigned)app_circle_demo_get_state(),
+                         BAL_F2_S(acc_deg),
+                         (long)BAL_F2_I(acc_deg),
+                         (unsigned long)BAL_F2_F(acc_deg),
+                         (int)(APP_CIRCLE_RADIUS_M * 1000.0f),
+                         (int)(APP_CIRCLE_SPEED_MPS * 100.0f),
+                         (unsigned long)rem);
+            return true;
+        }
+    }
+
     /* h：帮助 */
     if (cmd[0]=='h' && cmd[1]=='\0') { print_pid_help(); return true; }
 
@@ -938,7 +1013,8 @@ static void k230_send_vehicle_status(void)
     bsp_motor_get_feedback(&fb);
 
     k230_vehicle_status_t vs;
-    vs.avg_cps      = (fb.left_speed_cps + fb.right_speed_cps) / 2;
+    /* 使用物理正确的平均：折算到右轮等效 CPS（左轮 X4 → /2，右轮 X2 原样） */
+    vs.avg_cps      = (fb.left_speed_cps / 2 + fb.right_speed_cps) / 2;
     vs.safety_state = (uint8_t)app_safety_get_state();
     vs.bat_mv       = (uint16_t)bsp_battery_get_mv();
 
@@ -989,6 +1065,8 @@ bool app_balance_run(void)
 
     app_balance_motion_cmd_t cmd = { .target_speed_cps = 0, .target_yaw_pm = 0 };
 
+    app_circle_demo_init();
+
     print_pid_help();
     print_pid_status();
 
@@ -1018,6 +1096,29 @@ bool app_balance_run(void)
         k230_check_timeout(&cmd, tick_count);
         bsp_motor_update();
 
+        /* ---- 圆圈演示延迟启动：倒计时到期后执行重校零并 launch ------------ */
+        if (app_circle_demo_needs_launch()) {
+            /* 重新使能电机 + 安全重 ARM */
+            bsp_motor_enable(true);
+            app_safety_arm();
+
+            /* 阻塞重校零（≈1.5s），期间平衡环暂停、电机 PWM=0）
+             * 用户此时应已将小车置于开阔地带并保持直立静止。 */
+            auto_zero_pitch_offset();
+
+            /* 清理积压节拍，防止校零后连续多帧"追帧"冲击 */
+            while (bsp_systick_consume_tick()) { /* drain */ }
+            tick_count = 0u;
+
+            /* 刷新 K230 通信状态 */
+            k230_flush_rx_buffer();
+            k230_comm_init();
+
+            /* 正式启动绕圈 */
+            app_balance_reset();
+            app_circle_demo_launch();
+        }
+
         /* ---- 100 Hz：角度环 + safety ---------------------------------------- */
         if ((tick_count % APP_BAL_PHASE_ANGLE_TICKS) == 0u) {
             ms901m_get_snapshot(&snap);
@@ -1037,6 +1138,10 @@ bool app_balance_run(void)
 
             /* 20 Hz 速度/转向外环（每 50 ticks）—— 先跑，更新 target_tilt_deg */
             if ((tick_count % APP_BAL_PHASE_SPEED_TICKS) == 0u) {
+                /* 圆圈演示：活跃时覆写 cmd（须在 balance_step_speed 之前） */
+                app_circle_demo_update(&cmd, snap.gz_dps,
+                                       APP_BALANCE_SPEED_PERIOD_MS / 1000.0f,
+                                       tick_count);
                 balance_step_speed(&att, &cmd);
                 k230_send_vehicle_status();
             }
@@ -1067,6 +1172,14 @@ bool app_balance_run(void)
 
         /* ---- 1 Hz：调试日志 + K230 心跳 TX ---------------------------------- */
         if (!s_bal.lt_stream_enabled && ((tick_count % APP_BAL_PHASE_LOG_TICKS) == 0u)) {
+            /* PENDING 期间打印倒计时，替代普通心跳日志 */
+            if (app_circle_demo_get_state() == CIRCLE_DEMO_PENDING) {
+                uint32_t rem_ms = app_circle_demo_get_pending_remaining_ms(tick_count);
+                (void)printf("[circle] starting in %lu s... (motors off, move to open area)\r\n",
+                             (unsigned long)((rem_ms + 999u) / 1000u));
+                continue;   /* 跳过本 tick 的普通心跳，避免与倒计时刷屏混淆 */
+            }
+
             k230_send_heartbeat(tick_count);
 
             uint32_t total_rx  = bsp_k230_uart_total_rx();
@@ -1086,13 +1199,15 @@ bool app_balance_run(void)
             uint32_t batt_mv  = bsp_battery_get_mv();
             uint32_t log_ovr  = bsp_log_uart_rx_overrun();
 
+            app_safety_state_t st_now = app_safety_get_state();
+
             (void)printf("[hb] t=%lus state=%s pitch=%c%ld.%02lu tilt*=%c%ld.%02lu "
                          "pwm=%c%ld.%02lu yawErr=%c%ld.%02lu yawCorr=%d L=%ld R=%ld v=%ldcps "
                          "batt=%lumV ms901m_g=%lu/b=%lu log_ovr=%lu k230_rx=%lub/s "
                          "k230_g=%lu/b=%lu k230_%s "
                          "encL=%ld encR=%ld encISR=%lu/s%s\n",
                 (unsigned long)(tick_count / 1000u),
-                safety_state_to_str(app_safety_get_state()),
+                safety_state_to_str(st_now),
                 BAL_F2_S(diag.pitch_meas_deg), (long)BAL_F2_I(diag.pitch_meas_deg), (unsigned long)BAL_F2_F(diag.pitch_meas_deg),
                 BAL_F2_S(diag.target_tilt_deg), (long)BAL_F2_I(diag.target_tilt_deg), (unsigned long)BAL_F2_F(diag.target_tilt_deg),
                 BAL_F2_S(diag.balance_out_pwm), (long)BAL_F2_I(diag.balance_out_pwm), (unsigned long)BAL_F2_F(diag.balance_out_pwm),

@@ -13,6 +13,7 @@
  */
 
 #include "bsp_motor.h"
+#include "robot_param.h"
 
 #include "bsp_gpio.h"
 #include "bsp_systick.h"
@@ -994,6 +995,10 @@ void bsp_motor_get_feedback(bsp_motor_feedback_t *feedback)
     feedback->right_speed_dps   = (float)right_speed_cps  * RIGHT_DEG_PER_COUNT;
     feedback->left_speed_rpm    = feedback->left_speed_dps  / 6.0f;   /* dps/360 * 60 */
     feedback->right_speed_rpm   = feedback->right_speed_dps / 6.0f;
+
+    /* 物理线速度（m/s）：各轮使用自身 counts/rev，正确处理 X4/X2 不对称 */
+    feedback->left_speed_mps    = ROBOT_LEFT_CPS_TO_MPS(left_speed_cps);
+    feedback->right_speed_mps   = ROBOT_RIGHT_CPS_TO_MPS(right_speed_cps);
 }
 
 int32_t bsp_motor_get_left_count(void)

@@ -65,7 +65,12 @@ extern "C" {
 
 /** MCU→K230：车辆状态帧 (CMD 0x01)，20 Hz */
 typedef struct __attribute__((packed)) {
-    int32_t  avg_cps;           /* 左右轮平均速度 counts/s */
+    int32_t  avg_cps;           /* 整车前向速度（右轮等效 CPS）：
+                                 *   = (left_cps/2 + right_cps) / 2
+                                 * 直行时恒等于 right_cps；与物理线速度换算：
+                                 *   v_mps = avg_cps / ROBOT_RIGHT_CPS_PER_MPS
+                                 *         ≈ avg_cps / 309205 (轮径 35mm)
+                                 * 正 = 前进，负 = 后退。 */
     uint8_t  safety_state;      /* app_safety 状态枚举 */
     uint16_t bat_mv;            /* 电池电压 mV */
 } k230_vehicle_status_t;
@@ -77,8 +82,17 @@ typedef struct __attribute__((packed)) {
 
 /** K230→MCU：运动指令帧 (CMD 0x11)，20~50 Hz */
 typedef struct __attribute__((packed)) {
-    int16_t  target_v;          /* 纵向速度（归一化 cps / APP_BALANCE_SPEED_CPS_SCALE） */
-    int16_t  target_omega;      /* 角速度差分量（permille） */
+    int16_t  target_v;          /* 期望前向速度（右轮等效 CPS）：
+                                 *   与 k230_vehicle_status_t.avg_cps 单位相同。
+                                 *   app_balance 直接写入 motion_cmd.target_speed_cps；
+                                 *   换算为 m/s：v = target_v / ROBOT_RIGHT_CPS_PER_MPS
+                                 *   典型范围：[-17000, 17000]（对应 ±0.55 m/s）
+                                 * 若需以 m/s 发送：target_v = (int16_t)(v_mps × 309205)
+                                 *   但需注意 int16_t 量程（±32767），高速时溢出风险。
+                                 * TODO(Stage N): 迁移为 mm/s（int16_t 范围 ±550mm/s 足够）。*/
+    int16_t  target_omega;      /* 期望偏航角速度差分量（permille）；
+                                 *   正 = 顺时针（俯视），对应右轮快 / 左轮慢。
+                                 *   app_balance 直接叠加到差速分配中。 */
     uint8_t  mode;              /* 运动模式：0=停, 1=直行, 2=转弯, ... */
 } k230_motion_cmd_t;
 

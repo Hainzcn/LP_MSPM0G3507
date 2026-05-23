@@ -27,12 +27,35 @@
 #include "bsp_systick.h"
 
 #include <stddef.h>
+#include <stdio.h>
 
 /* -------------------------------------------------------------------------- */
 /* 内部                                                                        */
 /* -------------------------------------------------------------------------- */
 
-static app_safety_state_t s_state = APP_SAFETY_DISARMED;
+/* 用 struct 强制把金丝雀和 s_state 紧邻放置（上次链接器把独立 static 重排
+ * 到了离得很远的地方，导致 canary 失效）。struct 内字段必须按声明顺序连续，
+ * 这下 wild write 命中 s_state 必然同时打到至少一个 canary 上。
+ * volatile 防 -O3 把字段消掉。 */
+#define APP_SAFETY_CANARY_BEFORE_MAGIC  0xDEADBEEFu
+#define APP_SAFETY_CANARY_AFTER_MAGIC   0xCAFEBABEu
+
+typedef struct {
+    volatile uint32_t  canary_before;
+    app_safety_state_t state;
+    volatile uint32_t  canary_after;
+} app_safety_block_t;
+
+static app_safety_block_t s_blk = {
+    APP_SAFETY_CANARY_BEFORE_MAGIC,
+    APP_SAFETY_DISARMED,
+    APP_SAFETY_CANARY_AFTER_MAGIC
+};
+
+#define s_state          (s_blk.state)
+#define s_canary_before  (s_blk.canary_before)
+#define s_canary_after   (s_blk.canary_after)
+
 static uint32_t s_startup_grace_until_ms = 0u;
 static uint8_t s_fall_debounce_count = 0u;
 
@@ -193,7 +216,57 @@ app_safety_state_t app_safety_tick(const app_safety_attitude_t *att)
 
 app_safety_state_t app_safety_get_state(void)
 {
-    return s_state;
+    /* 防御性自检：若 s_state 出现非法值，说明被其它模块越界写脏。
+     * 同时检查前后金丝雀，看是 4 字节精确击中还是连续多字节写入。 */
+    app_safety_state_t s = s_state;
+    uint32_t cb = s_canary_before;
+    uint32_t ca = s_canary_after;
+    bool state_bad   = ((uint32_t)s > (uint32_t)APP_SAFETY_LOW_BAT_STOP);
+    bool canary_bad  = (cb != APP_SAFETY_CANARY_BEFORE_MAGIC) ||
+                       (ca != APP_SAFETY_CANARY_AFTER_MAGIC);
+
+    if (state_bad || canary_bad) {
+        static uint32_t corruption_count = 0u;
+        corruption_count++;
+        if (corruption_count <= 3u) {
+            (void)printf("[safety] CORRUPTION #%lu: s_state=0x%08lx @ %p, "
+                         "canary_before=0x%08lx @ %p (expect 0x%08x), "
+                         "canary_after=0x%08lx @ %p (expect 0x%08x)\r\n",
+                         (unsigned long)corruption_count,
+                         (unsigned long)s,  (void *)&s_state,
+                         (unsigned long)cb, (void *)&s_canary_before,
+                         (unsigned)APP_SAFETY_CANARY_BEFORE_MAGIC,
+                         (unsigned long)ca, (void *)&s_canary_after,
+                         (unsigned)APP_SAFETY_CANARY_AFTER_MAGIC);
+
+            /* 如果被写入 s_state 的"看似指针"的值（state_bad 时）落在 SRAM
+             * 范围内，则 dump 它指向地址前后各 16 字节内存，方便根据字节
+             * 模式（ASCII/小浮点/计数器）反推这是哪个模块的缓冲区。 */
+            if (state_bad) {
+                uint32_t suspect = (uint32_t)s;
+                if (suspect >= 0x20200000u && suspect < 0x20208000u) {
+                    uint32_t base = (suspect & ~0x3u) - 16u;
+                    if (base >= 0x20200000u && (base + 32u) < 0x20208000u) {
+                        const uint8_t *mem = (const uint8_t *)base;
+                        (void)printf("[safety] dump @ 0x%08lx (suspect target):\r\n  ",
+                                     (unsigned long)base);
+                        for (int i = 0; i < 32; i++) {
+                            (void)printf("%02x ", mem[i]);
+                            if (i == 15) { (void)printf("\r\n  "); }
+                        }
+                        (void)printf("\r\n");
+                    }
+                }
+            }
+        }
+        s_canary_before = APP_SAFETY_CANARY_BEFORE_MAGIC;
+        s_canary_after  = APP_SAFETY_CANARY_AFTER_MAGIC;
+        if (state_bad) {
+            s_state = APP_SAFETY_DISARMED;
+            s = APP_SAFETY_DISARMED;
+        }
+    }
+    return s;
 }
 
 bool app_safety_can_drive(void)

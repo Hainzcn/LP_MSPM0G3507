@@ -30,6 +30,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "robot_param.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -141,7 +142,7 @@ extern "C" {
  * 判别方法：上电后用手把车向前推，串口心跳 pitch= 应变为正值；若变负 → 置 1。
  */
 #ifndef APP_BALANCE_PITCH_INVERT
-#define APP_BALANCE_PITCH_INVERT                (1)
+#define APP_BALANCE_PITCH_INVERT                (0)
 #endif
 
 /**
@@ -160,10 +161,19 @@ extern "C" {
 /**
  * 速度反馈量纲缩放因子。
  *
- * 本系统编码器分辨率极高（左轮 68000 cnt/rev，右轮 34000 cnt/rev），
- * 典型平衡漂移速度（~0.1 rev/s）即对应 avg_cps ≈ 5100。
- * 此因子将 avg_cps 除以该值后再进 PID，使速度值落在合理范围。
- *   SCALE=10 → 5100 cps → 510（归一化 cps）
+ * 速度反馈使用"右轮等效 CPS"（见 app_balance.c balance_step_speed 注释）：
+ *   avg_cps_corrected = (left_cps/2 + right_cps) / 2
+ * 在直行时此值恒等于 right_cps，与物理线速度严格成正比。
+ *
+ * 典型场景下的数值估算（右轮 34000 cnt/rev，轮径 35mm）：
+ *   漂移速度  ~11 mm/s（0.1 rev/s） → avg_cps ≈ 3400 → 归一化 = 340
+ *   快速行进 ~110 mm/s（1.0 rev/s） → avg_cps ≈ 34000 → 归一化 = 3400
+ *   最高速度 ~550 mm/s（5.0 rev/s） → avg_cps ≈ 170000 → 归一化 = 17000
+ *
+ * K230 下发的 target_v 字段单位相同（右轮等效 CPS），PID 中 target 与
+ * actual 使用同一单位，SCALE 大小不影响闭环稳定性，仅影响 PID 增益量纲。
+ *
+ * ⚠️  若修改此宏，速度环 Kp/Ki/Kd 需按比例重新整定。
  */
 #ifndef APP_BALANCE_SPEED_CPS_SCALE
 #define APP_BALANCE_SPEED_CPS_SCALE             (10)
@@ -208,9 +218,21 @@ typedef struct {
     bool  attitude_valid;   /* 0x01 帧是否至少收到过 */
 } app_balance_attitude_t;
 
-/** 运动指令（业务侧从 K230 命令 / 本地状态机解析后填入） */
+/**
+ * 运动指令（业务侧从 K230 命令 / 本地状态机解析后填入）。
+ *
+ * target_speed_cps 使用"右轮等效 CPS"作为速度单位：
+ *   right-eq-cps = (left_cps/2 + right_cps) / 2（直行时 ≈ right_cps）
+ *
+ * 换算关系（轮径 35mm，RIGHT_CPR = 34000）：
+ *   1 m/s  ≈ 309205 eq-cps   →  SCALE=10 时归一化 ≈ 30921
+ *   11mm/s ≈ 3400 eq-cps     →  SCALE=10 时归一化 ≈ 340
+ *
+ * 推荐通过 app_balance_set_target_speed_mps() 以物理单位设置目标速度；
+ * 直接赋值请自行乘以 ROBOT_RIGHT_CPS_PER_MPS（见 robot_param.h）。
+ */
 typedef struct {
-    int32_t target_speed_cps;   /* 期望前进速度（counts/s 平均 = (L+R)/2）；正 = 前进 */
+    int32_t target_speed_cps;   /* 期望前进速度（右轮等效 counts/s）；正 = 前进 */
     int16_t target_yaw_pm;      /* 期望转向开环量（permille）；正 = 顺时针俯视 */
 } app_balance_motion_cmd_t;
 
@@ -234,6 +256,18 @@ typedef struct {
 /* ========================================================================== */
 /* API                                                                         */
 /* ========================================================================== */
+
+/**
+ * @brief 以物理单位（m/s）设置速度环目标速度（便捷接口）。
+ *
+ * 内部自动换算：target_speed_cps = v_mps × ROBOT_RIGHT_CPS_PER_MPS
+ * 等效于直接向 app_balance_motion_cmd_t.target_speed_cps 赋值，但无需
+ * 调用方了解编码器换算系数。
+ *
+ * @param cmd    运动指令结构体指针（本函数仅修改 target_speed_cps 字段）
+ * @param v_mps  期望前向速度（m/s），正 = 前进，典型范围 [-0.5, 0.5]
+ */
+void app_balance_set_target_speed_mps(app_balance_motion_cmd_t *cmd, float v_mps);
 
 /** 初始化三路 pid2_t 为安全默认（增益 0 + 限幅 + OutOffset）。 */
 void app_balance_init(void);
