@@ -40,13 +40,14 @@
 ;   <o> Stack Size (in Bytes) <0x0-0xFFFFFFFF:8>
 ; </h>
 
-; Stack_Size 由 0x100 (256 B) 提升到 0x400 (1 KB)：
-;   原 256 B 栈不够装 Keil AC6 标准库 printf("%f") 浮点格式化路径
-;   （vsnprintf + 浮点 → int 转换栈帧典型 200~300 B），1 Hz [hb] 心跳塞
-;   4 个 %.2f/%.1f 时栈瞬间溢出 → HardFault → 主循环死锁。
-;   即便业务层已把 %f 改成手动 %c%ld.%02lu 整数格式化，1 KB 栈仍是
-;   合理裕度，覆盖未来 snprintf / 浮点数学等可能的栈高峰。
-Stack_Size      EQU     0x00000400
+; Stack_Size 演进：
+;   0x100 (256 B) → 初始值，printf("%f") 即 HardFault
+;   0x400 (1 KB)  → 消除 %f 后可用，但新增 circle_demo 等多条 printf
+;                    + 长参数链使栈高峰逼近 1 KB，溢出写脏 .bss 全局变量
+;                    （见 docs/notes/LessonLearned/StackOverflow-Printf-StateCorruption.md）
+;   0x800 (2 KB)  → 当前值。与 .bss 之间留出 >1 KB 缓冲，覆盖 snprintf /
+;                    浮点数学 / ISR 嵌套等可能的栈高峰。
+Stack_Size      EQU     0x00000800
 
                 AREA    STACK, NOINIT, READWRITE, ALIGN=3
 Stack_Mem       SPACE   Stack_Size

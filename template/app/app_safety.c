@@ -27,14 +27,53 @@
 #include "bsp_systick.h"
 
 #include <stddef.h>
+#include <stdio.h>
 
 /* -------------------------------------------------------------------------- */
 /* 内部                                                                        */
 /* -------------------------------------------------------------------------- */
 
-static app_safety_state_t s_state = APP_SAFETY_DISARMED;
+/**
+ * Canary 包装：强制 canary_before | state | canary_after 连续布局，
+ * 栈溢出写脏时 canary 会先被破坏，get_state() 可检测并 auto-heal。
+ */
+#define SAFETY_CANARY_VALUE  (0xDEAD5AFEu)
+
+typedef struct {
+    uint32_t              canary_before;
+    app_safety_state_t    state;
+    uint32_t              canary_after;
+} app_safety_block_t;
+
+static app_safety_block_t s_blk = {
+    .canary_before = SAFETY_CANARY_VALUE,
+    .state         = APP_SAFETY_DISARMED,
+    .canary_after  = SAFETY_CANARY_VALUE,
+};
+
+#define s_state  s_blk.state
+
 static uint32_t s_startup_grace_until_ms = 0u;
 static uint8_t s_fall_debounce_count = 0u;
+
+/** 检测 canary 和 state 合法性；corruption 时 auto-heal 到 DISARMED。 */
+static app_safety_state_t sanitize_state(void)
+{
+    bool corrupt = false;
+    if (s_blk.canary_before != SAFETY_CANARY_VALUE) corrupt = true;
+    if (s_blk.canary_after  != SAFETY_CANARY_VALUE) corrupt = true;
+    if ((uint32_t)s_blk.state > (uint32_t)APP_SAFETY_LOW_BAT_STOP) corrupt = true;
+
+    if (corrupt) {
+        (void)printf("[safety] CORRUPTION detected, auto-heal -> DISARMED\r\n");
+        s_blk.canary_before = SAFETY_CANARY_VALUE;
+        s_blk.state         = APP_SAFETY_DISARMED;
+        s_blk.canary_after  = SAFETY_CANARY_VALUE;
+        bsp_motor_brake_pulse_ms(APP_SAFETY_FALL_BRAKE_MS);
+        bsp_motor_enable(false);
+    }
+    return s_blk.state;
+}
 
 static bool is_startup_grace_active(void)
 {
@@ -99,7 +138,9 @@ static void transition(app_safety_state_t next)
 
 void app_safety_init(void)
 {
+    s_blk.canary_before = SAFETY_CANARY_VALUE;
     s_state = APP_SAFETY_DISARMED;
+    s_blk.canary_after  = SAFETY_CANARY_VALUE;
     s_startup_grace_until_ms =
         bsp_systick_get_ms() + APP_SAFETY_STARTUP_FALL_MUTE_MS;
     s_fall_debounce_count = 0u;
@@ -193,7 +234,7 @@ app_safety_state_t app_safety_tick(const app_safety_attitude_t *att)
 
 app_safety_state_t app_safety_get_state(void)
 {
-    return s_state;
+    return sanitize_state();
 }
 
 bool app_safety_can_drive(void)
