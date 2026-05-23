@@ -10,6 +10,7 @@
 
 #include "app_balance.h"
 
+#include "app_circle_demo.h"
 #include "app_safety.h"
 #include "bsp_battery.h"
 #include "bsp_gpio.h"
@@ -21,6 +22,7 @@
 #include "k230_protocol.h"
 #include "ms901m.h"
 #include "pid.h"
+#include "robot_param.h"
 #include "ti_msp_dl_config.h"
 
 #include <stdio.h>
@@ -408,8 +410,9 @@ static void balance_step_angle(const app_balance_attitude_t *att,
     pid2_update(&s_bal.angle_pid);
     float ave_pwm = s_bal.angle_pid.out;
 
-    /* 航向差分：left = ave + yaw/2, right = ave - yaw/2 */
-    float dif_half = s_bal.yaw_corr_pm * 0.5f;
+    /* 航向差分 = 闭环 yaw_corr + 开环 target_yaw_pm（圆运动 / K230 转向指令） */
+    float yaw_total_pm = s_bal.yaw_corr_pm + (float)cmd->target_yaw_pm;
+    float dif_half = yaw_total_pm * 0.5f;
     int16_t left_pm  = clamp_pwm_pm(ave_pwm + dif_half);
     int16_t right_pm = clamp_pwm_pm(ave_pwm - dif_half);
 
@@ -610,6 +613,8 @@ static void print_pid_help(void)
     (void)printf("[pid] offset_pm: direct permille, NOT x1000 (e.g. bo 80 = 80pm dead-zone comp)\r\n");
     (void)printf("[pid] example: bo 80 ; bp 5000 0 5000 80 ; sp 2000 50 0 0 ; yp 800 0 200 0\r\n");
     (void)printf("[pid] si?/si0/si1=speed_invert  yi?/yi0/yi1=yaw_invert\r\n");
+    (void)printf("[pid] c/circle=start circle (800mm/200mm/s CW), "
+                 "circle <diam_mm> <v_mm/s>=custom, cx=cancel\r\n");
 }
 
 static void send_lt_header(void)
@@ -784,6 +789,36 @@ static bool handle_pid_command(const char *cmd)
             app_balance_set_speed_inverted(cmd[2] == '1');
             (void)printf("[speed] invert=%u\r\n",
                          app_balance_get_speed_inverted() ? 1u : 0u);
+            return true;
+        }
+    }
+
+    /* cx：取消圆运动 */
+    if ((cmd[0]=='c') && (cmd[1]=='x') && (cmd[2]=='\0')) {
+        app_circle_demo_cancel();
+        return true;
+    }
+
+    /* c / circle / circle <diam> <v> */
+    if (cmd[0]=='c') {
+        bool is_c_bare = (cmd[1]=='\0');
+        bool is_circle = (cmd[1]=='i') && (cmd[2]=='r') && (cmd[3]=='c')
+                         && (cmd[4]=='l') && (cmd[5]=='e');
+        if (is_c_bare || is_circle) {
+            uint16_t diam = APP_CIRCLE_DEFAULT_DIAMETER_MM;
+            int16_t  spd  = APP_CIRCLE_DEFAULT_SPEED_MM_S;
+            bool     cw   = (APP_CIRCLE_DEFAULT_CLOCKWISE != 0);
+            if (is_circle && is_field_separator(cmd[6])) {
+                int32_t d_i, v_i;
+                const char *p = &cmd[6];
+                if (parse_i32_token(&p, &d_i)) {
+                    if (d_i > 0 && d_i <= 10000) diam = (uint16_t)d_i;
+                }
+                if (parse_i32_token(&p, &v_i)) {
+                    if (v_i != 0 && v_i >= -1000 && v_i <= 1000) spd = (int16_t)v_i;
+                }
+            }
+            app_circle_demo_start(diam, spd, cw);
             return true;
         }
     }
@@ -1038,6 +1073,14 @@ bool app_balance_run(void)
             /* 20 Hz 速度/转向外环（每 50 ticks）—— 先跑，更新 target_tilt_deg */
             if ((tick_count % APP_BAL_PHASE_SPEED_TICKS) == 0u) {
                 balance_step_speed(&att, &cmd);
+
+                /* 圆运动子任务：激活时覆盖 cmd（在 speed 环之后、angle 环之前） */
+                {
+                    bsp_motor_feedback_t fb_cir;
+                    bsp_motor_get_feedback(&fb_cir);
+                    app_circle_demo_tick_20hz(&snap, &fb_cir, &cmd);
+                }
+
                 k230_send_vehicle_status();
             }
 
@@ -1111,6 +1154,17 @@ bool app_balance_run(void)
                 (long)left_cnt, (long)right_cnt,
                 (unsigned long)delta_enc,
                 encQ ? " [ISR_QUENCH!]" : "");
+
+            if (app_circle_demo_is_active()) {
+                app_circle_diag_t cd;
+                app_circle_demo_get_diag(&cd);
+                (void)printf("[hb] circle=run yaw=%c%ld.%02lu arc=%ldmm t=%lums\n",
+                    BAL_F2_S(cd.yaw_accum_deg),
+                    (long)BAL_F2_I(cd.yaw_accum_deg),
+                    (unsigned long)BAL_F2_F(cd.yaw_accum_deg),
+                    (long)cd.arc_mm,
+                    (unsigned long)cd.elapsed_ms);
+            }
         }
     }
 }

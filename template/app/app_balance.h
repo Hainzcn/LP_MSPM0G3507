@@ -211,7 +211,8 @@ typedef struct {
 /** 运动指令（业务侧从 K230 命令 / 本地状态机解析后填入） */
 typedef struct {
     int32_t target_speed_cps;   /* 期望前进速度（counts/s 平均 = (L+R)/2）；正 = 前进 */
-    int16_t target_yaw_pm;      /* 期望转向开环量（permille）；正 = 顺时针俯视 */
+    int16_t target_yaw_pm;      /* 开环转向差分量（permille）；正 = 左加右减（顺时针俯视）。
+                                 * 非零时同时禁用 yaw 闭环，值真实叠加到左右轮 PWM 差分。 */
 } app_balance_motion_cmd_t;
 
 /* ========================================================================== */
