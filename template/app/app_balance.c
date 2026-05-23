@@ -905,11 +905,92 @@ static k230_parser_t s_k230_parser;
 static uint32_t      s_k230_last_rx_ms = 0u;
 static bool          s_k230_online     = false;
 
+static void k230_send_text_resp(const char *text);
+
 static void k230_comm_init(void)
 {
     k230_parser_init(&s_k230_parser);
     s_k230_last_rx_ms = bsp_systick_get_ms();
     s_k230_online     = false;
+}
+
+/**
+ * @brief 格式化一组 PID 参数为 x1000 文本，写入 buf。
+ * @return snprintf 写入字符数
+ */
+static int fmt_pid2_resp(char *buf, size_t cap, const char *tag, const pid2_t *p)
+{
+    return snprintf(buf, cap, "%s kp=%ld ki=%ld kd=%ld ofs=%ld",
+        tag,
+        (long)float_to_scaled(p->kp),
+        (long)float_to_scaled(p->ki),
+        (long)float_to_scaled(p->kd),
+        (long)(int32_t)(p->out_offset + 0.5f));
+}
+
+/**
+ * @brief 处理 K230 TEXT_CMD：执行命令并回传 TEXT_RESP。
+ *
+ * 调用 handle_pid_command() 执行（printf 输出照常到 UART0），
+ * 然后根据命令类型格式化简短 TEXT_RESP 回传 K230。
+ */
+static void k230_handle_text_cmd(const uint8_t *payload, uint8_t len)
+{
+    char cmd_str[APP_BAL_CMD_BUF_LEN];
+    uint8_t copy_len = (len < sizeof(cmd_str) - 1u) ? len : (uint8_t)(sizeof(cmd_str) - 1u);
+    memcpy(cmd_str, payload, copy_len);
+    cmd_str[copy_len] = '\0';
+
+    for (uint8_t i = 0u; i < copy_len; ++i) {
+        if ((cmd_str[i] >= 'A') && (cmd_str[i] <= 'Z')) {
+            cmd_str[i] = (char)(cmd_str[i] - 'A' + 'a');
+        }
+    }
+
+    (void)printf("[k230] text_cmd: %s\r\n", cmd_str);
+
+    bool handled = handle_pid_command(cmd_str);
+
+    char resp[120];
+    int n = 0;
+
+    if (!handled) {
+        n = snprintf(resp, sizeof(resp), "ERR unknown: %s\r\n", cmd_str);
+    } else if ((cmd_str[0]=='b') && (cmd_str[1]=='p')) {
+        n = snprintf(resp, sizeof(resp), "OK ");
+        n += fmt_pid2_resp(resp + n, sizeof(resp) - (size_t)n, "bp", &s_bal.angle_pid);
+        n += snprintf(resp + n, sizeof(resp) - (size_t)n, "\r\n");
+    } else if ((cmd_str[0]=='s') && (cmd_str[1]=='p') && is_field_separator(cmd_str[2])) {
+        n = snprintf(resp, sizeof(resp), "OK ");
+        n += fmt_pid2_resp(resp + n, sizeof(resp) - (size_t)n, "sp", &s_bal.speed_pid);
+        n += snprintf(resp + n, sizeof(resp) - (size_t)n, "\r\n");
+    } else if ((cmd_str[0]=='y') && (cmd_str[1]=='p')) {
+        n = snprintf(resp, sizeof(resp), "OK ");
+        n += fmt_pid2_resp(resp + n, sizeof(resp) - (size_t)n, "yp", &s_bal.yaw_pid);
+        n += snprintf(resp + n, sizeof(resp) - (size_t)n, "\r\n");
+    } else if ((cmd_str[0]=='b') && (cmd_str[1]=='o')) {
+        n = snprintf(resp, sizeof(resp), "OK bo ofs=%ld\r\n",
+            (long)(int32_t)(s_bal.angle_pid.out_offset + 0.5f));
+    } else if ((cmd_str[0]=='p') && (cmd_str[1]=='i') && (cmd_str[2]=='d')) {
+        n = snprintf(resp, sizeof(resp), "OK ");
+        n += fmt_pid2_resp(resp + n, sizeof(resp) - (size_t)n, "bp", &s_bal.angle_pid);
+        n += snprintf(resp + n, sizeof(resp) - (size_t)n, " | ");
+        n += fmt_pid2_resp(resp + n, sizeof(resp) - (size_t)n, "sp", &s_bal.speed_pid);
+        n += snprintf(resp + n, sizeof(resp) - (size_t)n, " | ");
+        n += fmt_pid2_resp(resp + n, sizeof(resp) - (size_t)n, "yp", &s_bal.yaw_pid);
+        n += snprintf(resp + n, sizeof(resp) - (size_t)n, "\r\n");
+    } else if ((cmd_str[0]=='c') && (cmd_str[1]=='x')) {
+        n = snprintf(resp, sizeof(resp), "OK circle cancel\r\n");
+    } else if (cmd_str[0]=='c') {
+        n = snprintf(resp, sizeof(resp), "OK circle start\r\n");
+    } else if (cmd_str[0]=='h') {
+        n = snprintf(resp, sizeof(resp),
+            "OK cmds: bp/sp/yp <kp> <ki> <kd> <ofs>, bo, pid?, c, cx, si, yi\r\n");
+    } else {
+        n = snprintf(resp, sizeof(resp), "OK %s\r\n", cmd_str);
+    }
+
+    if (n > 0) k230_send_text_resp(resp);
 }
 
 static void k230_drain_and_dispatch(app_balance_motion_cmd_t *cmd, uint32_t now_ms)
@@ -947,6 +1028,10 @@ static void k230_drain_and_dispatch(app_balance_motion_cmd_t *cmd, uint32_t now_
             break;
 
         case K230_CMD_HEARTBEAT_K230:
+            break;
+
+        case K230_CMD_TEXT_CMD:
+            k230_handle_text_cmd(s_k230_parser.payload, s_k230_parser.len);
             break;
 
         default:
@@ -992,6 +1077,22 @@ static void k230_send_heartbeat(uint32_t now_ms)
     size_t len = k230_encode_frame(K230_CMD_HEARTBEAT_MCU,
         &hb, (uint8_t)sizeof(hb), frame, sizeof(frame));
     if (len > 0u) bsp_k230_uart_write_blocking(frame, len);
+}
+
+/**
+ * @brief 发送 TEXT_RESP 帧到 K230（远程调试文本回传）。
+ * @param text  ASCII 文本，超过 K230_PROTO_MAX_PAYLOAD 时截断。
+ */
+static void k230_send_text_resp(const char *text)
+{
+    if (text == NULL) return;
+    size_t slen = strlen(text);
+    if (slen > K230_PROTO_MAX_PAYLOAD) slen = K230_PROTO_MAX_PAYLOAD;
+
+    uint8_t frame[K230_PROTO_MAX_FRAME];
+    size_t flen = k230_encode_frame(K230_CMD_TEXT_RESP,
+        text, (uint8_t)slen, frame, sizeof(frame));
+    if (flen > 0u) bsp_k230_uart_write_blocking(frame, flen);
 }
 
 static void k230_flush_rx_buffer(void)
@@ -1164,6 +1265,33 @@ bool app_balance_run(void)
                     (unsigned long)BAL_F2_F(cd.yaw_accum_deg),
                     (long)cd.arc_mm,
                     (unsigned long)cd.elapsed_ms);
+            }
+
+            /* K230 远程调试：镜像精简心跳文本 */
+            if (s_k230_online) {
+                char hb_txt[120];
+                int hn = snprintf(hb_txt, sizeof(hb_txt),
+                    "[hb] t=%lus %s pit=%c%ld.%02lu spd=%ldcps L=%ld R=%ld bat=%lumV",
+                    (unsigned long)(tick_count / 1000u),
+                    safety_state_to_str(app_safety_get_state()),
+                    BAL_F2_S(diag.pitch_meas_deg),
+                    (long)BAL_F2_I(diag.pitch_meas_deg),
+                    (unsigned long)BAL_F2_F(diag.pitch_meas_deg),
+                    (long)diag.speed_meas_cps,
+                    (long)diag.left_cmd_pm, (long)diag.right_cmd_pm,
+                    (unsigned long)batt_mv);
+                if (app_circle_demo_is_active()) {
+                    app_circle_diag_t cd2;
+                    app_circle_demo_get_diag(&cd2);
+                    hn += snprintf(hb_txt + hn, sizeof(hb_txt) - (size_t)hn,
+                        " cir:yaw=%c%ld.%02lu arc=%ldmm",
+                        BAL_F2_S(cd2.yaw_accum_deg),
+                        (long)BAL_F2_I(cd2.yaw_accum_deg),
+                        (unsigned long)BAL_F2_F(cd2.yaw_accum_deg),
+                        (long)cd2.arc_mm);
+                }
+                (void)hn;
+                k230_send_text_resp(hb_txt);
             }
         }
     }

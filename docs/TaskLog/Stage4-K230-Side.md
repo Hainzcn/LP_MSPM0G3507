@@ -1,13 +1,31 @@
 # K230 端协同工作手册（Stage 4）
 
-> **文档定位**：面向 K230（CanMV）侧开发者，描述与 MCU 通讯所需的全部硬件接线、协议实现和集成逻辑。本文是 [Stage4-K230-Communication.md](Stage4-K230-Communication.md)（MCU 侧实现记录）的对应文档。
+> **文档定位**：K230 ↔ MCU 通讯的**唯一协议真源**。面向 K230（CanMV）侧开发者，涵盖硬件接线、帧协议、远程调试、Python 参考实现与集成逻辑。
 >
-> **平台假设**：K230 运行 CanMV MicroPython（固件 ≥ 2.x），代码示例均为 MicroPython；如使用 C SDK，数据结构与协议完全一致，可直接对照移植。
+> **平台假设**：K230 运行 CanMV MicroPython（固件 ≥ 2.x），代码示例均为 MicroPython；如使用 C SDK，数据结构与协议完全一致，可直接对照 [`k230_protocol.h`](../../template/middle/k230_protocol.h) 移植。
+>
+> **MCU 侧实现记录**（SysConfig、CRC 修复历史、验证清单）：[Stage4-K230-Communication.md](Stage4-K230-Communication.md)
 >
 > **关联文档**：
-> - MCU 侧实现记录：[Stage4-K230-Communication.md](Stage4-K230-Communication.md)
 > - 引脚分配（MCU 侧）：[Stage0-PinAllocation.md](Stage0-PinAllocation.md)
 > - 项目总览：[Overview.md](../Overview/Overview.md)
+
+---
+
+## 0. 系统架构概览
+
+```
+MS901M TX ──┬──→ MCU UART3 RX (PB13)    [MCU 姿态环]
+            └──→ K230 UART(1) RX         [K230 云台/视觉，200 Hz 原始 6 轴]
+
+MCU UART1 TX (PB6) ──115200──→ K230 UART(2) RX   [MCU→K230：状态/心跳/文本响应]
+MCU UART1 RX (PB7) ←──115200──  K230 UART(2) TX   [K230→MCU：运动/PID/文本命令]
+GND — 三端共地（星型汇接）
+```
+
+- IMU 数据**不走** MCU↔K230 帧协议，由 MS901M TX Y 分线直达 K230
+- MCU↔K230 命令链路 115200 8N1，定长 CRC 帧 + 文本透传帧（远程调试）
+- MCU 500 ms 无 K230 帧 → 运动指令自动归零
 
 ---
 
@@ -150,9 +168,25 @@ class MS901MParser:
 
 - **CRC16-CCITT**：多项式 `0x1021`，初始值 `0xFFFF`
 - 校验范围：`LEN + CMD + PAYLOAD`（不含帧头尾）
-- 最大 PAYLOAD：32 字节
+- 最大 PAYLOAD：**128 字节**（v0.3 自 32 扩展，支持文本透传帧）
 
-### 3.2 CRC16-CCITT 实现
+### 3.2 帧类型总表
+
+| 方向 | CMD | 名称 | 频率 | PAYLOAD |
+|------|-----|------|------|---------|
+| MCU→K230 | 0x01 | VEHICLE_STATUS | 20 Hz | `avg_cps:i32 + safety_state:u8 + bat_mv:u16` (7 B) |
+| MCU→K230 | 0x02 | HEARTBEAT_MCU | 1 Hz | `uptime_ms:u32` (4 B) |
+| MCU→K230 | 0x22 | TEXT_RESP | 按需 + 1 Hz | ASCII 文本，≤128 B |
+| K230→MCU | 0x11 | MOTION_CMD | 20~50 Hz | `target_v:i16 + target_omega:i16 + mode:u8` (5 B) |
+| K230→MCU | 0x12 | HEARTBEAT_K230 | 1 Hz | `uptime_ms:u32` (4 B) |
+| K230→MCU | 0x13 | PID_INJECT | 按需 | `pid_id:u8 + kp/ki/kd:f32` (13 B) |
+| K230→MCU | 0x21 | TEXT_CMD | 按需 | ASCII 文本命令，≤120 B，**不含** `\r\n` |
+
+> **`pid_id`**：0=角度，2=速度，3=航向；1（rate）/4（turn）已废弃。
+>
+> **`target_omega`**：映射为 MCU `target_yaw_pm`（permille）；非 0 时航向角闭环暂停。
+
+### 3.3 CRC16-CCITT 实现
 
 ```python
 def crc16_ccitt(data: bytes | bytearray) -> int:
@@ -165,13 +199,13 @@ def crc16_ccitt(data: bytes | bytearray) -> int:
     return crc
 ```
 
-### 3.3 帧编码（K230 → MCU）
+### 3.4 帧编码（K230 → MCU）
 
 ```python
 def encode_frame(cmd: int, payload: bytes | bytearray = b'') -> bytes:
     """构造一帧完整数据（含帧头、CRC、帧尾）。"""
     length = len(payload)
-    assert length <= 32, "payload too long"
+    assert length <= 128, "payload too long"
     crc_data = bytes([length, cmd]) + bytes(payload)
     crc = crc16_ccitt(crc_data)
     return (bytes([0xAA, 0x55, length, cmd])
@@ -180,17 +214,19 @@ def encode_frame(cmd: int, payload: bytes | bytearray = b'') -> bytes:
             + bytes([0x55, 0xAA]))
 ```
 
-### 3.4 帧解析器（MCU → K230）
+### 3.5 帧解析器（MCU → K230）
 
 ```python
 class MCUFrameParser:
     """逐字节解析 MCU → K230 帧。"""
 
+    MAX_PAYLOAD = 128
+
     def __init__(self):
         self._state   = 0
         self._len     = 0
         self._cmd     = 0
-        self._payload = bytearray(32)
+        self._payload = bytearray(self.MAX_PAYLOAD)
         self._pidx    = 0
         self._crc_rx  = 0
         self.good = 0
@@ -215,7 +251,7 @@ class MCUFrameParser:
         elif s == 1:
             self._state = 2 if b == 0x55 else (1 if b == 0xAA else 0)
         elif s == 2:
-            if b > 32:
+            if b > self.MAX_PAYLOAD:
                 self.bad += 1; self._state = 0
             else:
                 self._len = b; self._state = 3
@@ -312,9 +348,118 @@ def make_pid_inject(pid_id: int, kp: float, ki: float, kd: float) -> bytes:
     return encode_frame(0x13, payload)
 ```
 
+#### TEXT_CMD (CMD=0x21, 按需) — 远程调试透传
+
+将 UART0 文本命令封装为帧发送给 MCU。payload 为纯 ASCII，**不含** `\r\n`，建议 ≤120 字节。
+
+```python
+def make_text_cmd(text: str) -> bytes:
+    """例：make_text_cmd('bp 5000 0 5000 80')"""
+    payload = text.encode('ascii')
+    assert len(payload) <= 120
+    return encode_frame(0x21, payload)
+```
+
+**支持的命令**（与 MCU UART0 本地调试一致）：
+
+| 命令 | 说明 |
+|------|------|
+| `bp <kp> <ki> <kd> [ofs]` | 角度环 PID（kp/ki/kd ×1000，ofs 直接 permille） |
+| `sp ...` / `yp ...` | 速度环 / 航向环 |
+| `bo <ofs>` | 仅设角度环 out_offset |
+| `pid` / `pid?` | 查询三组 PID |
+| `c` / `circle` | 启动圆运动（默认 800mm/200mm/s CW） |
+| `circle <diam> <v>` | 自定义圆运动 |
+| `cx` | 取消圆运动 |
+| `h` | 简短帮助 |
+
+### 4.3 MCU → K230 文本响应（接收）
+
+#### TEXT_RESP (CMD=0x22)
+
+MCU 执行 TEXT_CMD 后回传执行结果；K230 在线时 MCU 还以 1 Hz 推送精简心跳文本。
+
+```python
+def parse_text_resp(payload: bytes) -> str:
+    """返回 ASCII 文本（已截断至 payload 长度）。"""
+    return payload.decode('ascii', errors='replace')
+```
+
+**典型响应格式**：
+
+| 触发命令 | TEXT_RESP 示例 |
+|----------|----------------|
+| `bp 5000 0 5000 80` | `OK bp kp=5000 ki=0 kd=5000 ofs=80\r\n` |
+| `pid?` | `OK bp kp=... \| sp kp=... \| yp kp=...\r\n` |
+| `c` | `OK circle start\r\n` |
+| `cx` | `OK circle cancel\r\n` |
+| 未识别 | `ERR unknown: xxx\r\n` |
+| （1 Hz 自动） | `[hb] t=5s ARMED pit=+0.12 spd=0cps L=0 R=0 bat=7800mV` |
+
+> kp/ki/kd 值为 ×1000 整数，与 UART0 本地命令格式一致。
+
 ---
 
-## 5. 完整集成示例
+## 5. 远程调试（WiFi AP + TCP 透传）
+
+K230 侧通过 WiFi AP 模式提供 TCP 服务，将 PC/手机发来的文本命令转为 TEXT_CMD 帧，并将 TEXT_RESP 回传给 TCP 客户端。
+
+```
+PC/手机 ──TCP──→ K230 WiFi AP ──TEXT_CMD(0x21)──→ MCU UART1
+PC/手机 ←─TCP──  K230 WiFi AP ←─TEXT_RESP(0x22)──  MCU UART1
+```
+
+**K230 侧桥接职责**（本仓库不含可运行脚本，需在 CanMV 上实现）：
+
+1. 启动 WiFi AP（SSID/密码自行配置）
+2. 监听 TCP 端口（建议 8888，裸 TCP，PuTTY / netcat 可直接连接）
+3. 收到一行 ASCII（以 `\n` 结尾）→ 去掉 `\r\n` → `make_text_cmd()` → 写 UART(2)
+4. 从 UART(2) 解析 `CMD=0x22` 帧 → 解码 payload → 追加 `\n` 写回 TCP
+
+**桥接伪代码**：
+
+```python
+import socket
+from machine import UART
+
+uart_mcu = UART(2, baudrate=115200, bits=8, parity=None, stop=1)
+mcu_parser = MCUFrameParser()
+tcp_clients = []   # 已连接的远程调试客户端
+
+def on_mcu_rx(data: bytes):
+    for cmd, payload in mcu_parser.feed(data):
+        if cmd == 0x22:   # TEXT_RESP
+            text = parse_text_resp(payload)
+            for cli in tcp_clients:
+                try:
+                    cli.send(text.encode('ascii'))
+                except OSError:
+                    pass
+
+def on_tcp_line(line: str):
+    line = line.strip()
+    if line:
+        uart_mcu.write(make_text_cmd(line))
+```
+
+**使用示例**（PC 连接 K230 AP 后）：
+
+```text
+> bp 5000 0 5000 80
+OK bp kp=5000 ki=0 kd=5000 ofs=80
+
+> c
+OK circle start
+
+> pid?
+OK bp kp=5000 ki=0 kd=5000 ofs=80 | sp kp=2000 ki=50 kd=0 ofs=0 | yp kp=800 ki=0 kd=200 ofs=0
+
+[hb] t=12s ARMED pit=+1.23 spd=150cps L=120 R=115 bat=7800mV
+```
+
+---
+
+## 6. 完整集成示例
 
 以下是一个完整的 K230 主控脚本骨架，演示两路 UART 并发工作的典型结构：
 
@@ -384,6 +529,10 @@ while True:
                 vehicle_avg_cps, vehicle_safety, vehicle_bat_mv = parse_vehicle_status(payload)
             elif cmd == 0x02:                        # HEARTBEAT_MCU
                 mcu_last_hb_ms = now
+            elif cmd == 0x22:                        # TEXT_RESP（远程调试回传）
+                text = parse_text_resp(payload)
+                for cli in tcp_clients:             # 转发给 WiFi TCP 客户端
+                    cli.send(text.encode('ascii'))
 
     # 3. 20~50 Hz：发送运动指令
     if time.ticks_diff(now, last_cmd_ms) >= CMD_PERIOD:
@@ -412,7 +561,7 @@ while True:
 
 ---
 
-## 6. 安全规则
+## 7. 安全规则
 
 | 规则 | 说明 |
 |------|------|
@@ -423,9 +572,9 @@ while True:
 
 ---
 
-## 7. 调试方法
+## 8. 调试方法
 
-### 7.1 单步验证 IMU 链路
+### 8.1 单步验证 IMU 链路
 
 ```python
 uart_imu = UART(1, baudrate=115200, bits=8, parity=None, stop=1)
@@ -441,7 +590,7 @@ while True:
 
 正常情况下 pitch 以 200 Hz 刷新；若无数据，检查 MS901M TX → K230 RX 分线焊点和共地。
 
-### 7.2 单步验证 MCU 命令链路（无 K230 侧主逻辑）
+### 8.2 单步验证 MCU 命令链路（无 K230 侧主逻辑）
 
 在 PC 上用任意串口工具连接 MCU PB6（115200 8N1），应能看到：
 - 每 50 ms 一帧 `AA 55 07 01 ...` (VEHICLE_STATUS)
@@ -458,15 +607,57 @@ print(frame.hex())
 
 收到后 MCU 日志会显示 `k230_ON`，车辆以 v=100 (×10 = 1000 raw cps ≈ 低速前行)  运动。
 
-### 7.3 回环自测（不接 MCU）
+### 8.3 回环自测（不接 MCU）
 
 将 K230 命令 UART 的 TX 短接 RX，发送任意帧后解析器应立即收到同一帧，`good` 计数递增。
 
+### 8.4 远程调试 TEXT_CMD 自测
+
+在 K230 侧直接发送 TEXT_CMD 帧（无需 WiFi）：
+
+```python
+# 设置角度环 PID
+uart_mcu.write(make_text_cmd('bp 5000 0 5000 80'))
+time.sleep_ms(50)
+d = uart_mcu.read(256)
+for cmd, payload in mcu_parser.feed(d):
+    if cmd == 0x22:
+        print(parse_text_resp(payload))
+# 预期：OK bp kp=5000 ki=0 kd=5000 ofs=80
+```
+
 ---
 
-## 8. 变更日志
+## 9. MCU 上行坏帧判读（联调参考）
+
+K230 侧可统计 MCU→K230 坏帧，日志格式：
+
+```text
+mcu_bad=lenX/t1Y/t2Z/crcW last=reason:Lxx:Cyy:rx/calc
+```
+
+| 字段 | 含义 |
+|------|------|
+| `lenX` | `LEN > 128` 的坏帧数 |
+| `t1Y` | 帧尾第 1 字节不是 `0x55` |
+| `t2Z` | 帧尾第 2 字节不是 `0xAA` |
+| `crcW` | CRC16 不匹配 |
+| `last=crc:L4:C02:rx/calc` | 最近坏帧：LEN=4、CMD=0x02、收到 CRC vs 本地计算 |
+
+**在线判定**：收到任意合法 MCU 上行帧（`VEHICLE_STATUS` 或 `HEARTBEAT_MCU` 或 `TEXT_RESP`）均应刷新在线时间戳，避免单一帧类型 CRC 问题导致 `MCU:ON/OFF` 抖动。
+
+**CRC 参数**（两端必须一致）：
+
+- poly = `0x1021`，init = `0xFFFF`，不反射
+- 校验范围 = `LEN + CMD + PAYLOAD`（不含帧头尾）
+- CRC 字节序：低字节在前
+
+---
+
+## 10. 变更日志
 
 | 日期 | 版本 | 内容 |
 |------|------|------|
-| 2026-05-17 | v0.1 | 初版，完整描述 K230 端 IMU 解析、命令帧协议、集成示例与调试方法 |
-| 2026-05-21 | v0.2 | 对齐 Stage 3.7：`pid_id` 0/2/3（角度/速度/航向）；`target_omega` → `target_yaw_pm` 语义说明 |
+| 2026-05-17 | v0.1 | 初版：IMU 解析、命令帧协议、集成示例与调试方法 |
+| 2026-05-21 | v0.2 | 对齐 Stage 3.7：`pid_id` 0/2/3；`target_omega` → `target_yaw_pm` |
+| 2026-05-24 | v0.3 | 合并为协议唯一真源；新增 TEXT_CMD(0x21)/TEXT_RESP(0x22)；MAX_PAYLOAD 32→128；远程调试 WiFi AP+TCP 桥接说明；移植联调坏帧判读 |

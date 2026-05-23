@@ -13,11 +13,13 @@
  *   MCU → K230（阻塞 TX，~240 B/s）：
  *     VEHICLE_STATUS  0x01   20 Hz   avg_cps(i32) + safety_state(u8) + bat_mv(u16)
  *     HEARTBEAT_MCU   0x02    1 Hz   uptime_ms(u32)
+ *     TEXT_RESP        0x22   按需    ASCII 文本响应（远程调试回传）
  *
  *   K230 → MCU（DMA RX）：
  *     MOTION_CMD      0x11  20~50 Hz  target_v(i16) + target_omega(i16) + mode(u8)
  *     HEARTBEAT_K230  0x12    1 Hz    uptime_ms(u32)
  *     PID_INJECT      0x13   按需     pid_id(u8) + kp(f32) + ki(f32) + kd(f32)
+ *     TEXT_CMD         0x21   按需    ASCII 文本命令（远程调试透传）
  */
 
 #ifndef K230_PROTOCOL_H
@@ -40,7 +42,7 @@ extern "C" {
 #define K230_PROTO_SYNC_TAIL_0      0x55u
 #define K230_PROTO_SYNC_TAIL_1      0xAAu
 
-#define K230_PROTO_MAX_PAYLOAD      32u
+#define K230_PROTO_MAX_PAYLOAD      128u
 /** 完整帧最大长度：2(head) + 1(len) + 1(cmd) + payload + 2(crc) + 2(tail) */
 #define K230_PROTO_MAX_FRAME        (2u + 1u + 1u + K230_PROTO_MAX_PAYLOAD + 2u + 2u)
 /** 帧开销（不含 payload 的固定字节数） */
@@ -53,11 +55,13 @@ extern "C" {
 /* MCU → K230 */
 #define K230_CMD_VEHICLE_STATUS     0x01u
 #define K230_CMD_HEARTBEAT_MCU      0x02u
+#define K230_CMD_TEXT_RESP          0x22u   /* ASCII 文本响应（远程调试回传） */
 
 /* K230 → MCU */
 #define K230_CMD_MOTION_CMD         0x11u
 #define K230_CMD_HEARTBEAT_K230     0x12u
 #define K230_CMD_PID_INJECT         0x13u
+#define K230_CMD_TEXT_CMD           0x21u   /* ASCII 文本命令（远程调试透传） */
 
 /* ======================================================================== */
 /* 业务 Payload 结构体                                                        */
