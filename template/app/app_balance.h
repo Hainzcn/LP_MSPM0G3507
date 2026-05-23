@@ -141,7 +141,7 @@ extern "C" {
  * 判别方法：上电后用手把车向前推，串口心跳 pitch= 应变为正值；若变负 → 置 1。
  */
 #ifndef APP_BALANCE_PITCH_INVERT
-#define APP_BALANCE_PITCH_INVERT                (1)
+#define APP_BALANCE_PITCH_INVERT                (0)
 #endif
 
 /**
