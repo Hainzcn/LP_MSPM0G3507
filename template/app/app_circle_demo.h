@@ -34,30 +34,19 @@ extern "C" {
 /* ========================================================================== */
 
 #ifndef APP_CIRCLE_DEFAULT_DIAMETER_MM
-#define APP_CIRCLE_DEFAULT_DIAMETER_MM      (800)
+#define APP_CIRCLE_DEFAULT_DIAMETER_MM      (500)
 #endif
 
 #ifndef APP_CIRCLE_DEFAULT_SPEED_MM_S
-#define APP_CIRCLE_DEFAULT_SPEED_MM_S       (200)
+#define APP_CIRCLE_DEFAULT_SPEED_MM_S       (-100)
 #endif
 
 #ifndef APP_CIRCLE_DEFAULT_CLOCKWISE
 #define APP_CIRCLE_DEFAULT_CLOCKWISE        (1)
 #endif
 
-/**
- * 开环转向增益：每 rad/s 角速度需要的 PWM permille 差分 × 100。
- *
- * 物理含义：robot 以 omega rad/s 转弯时，左右轮需
- *   delta_PWM = omega × GAIN_X100 / 100  permille 差分。
- *
- * 初始经验值 12000 = 120 permille / (rad/s)，上车标定后替换：
- *   1. 发 `c` 跑默认圆，观察一圈终止时车体是否回到原朝向。
- *   2. 偏小（不够一圈）→ 加大此值；偏大（超过一圈）→ 减小此值。
- */
-#ifndef APP_CIRCLE_OPEN_YAW_PM_PER_RAD_S_X100
-#define APP_CIRCLE_OPEN_YAW_PM_PER_RAD_S_X100  (12000)
-#endif
+/* 圆运动现在通过 robot_param.h 中的运动学函数计算差速目标，
+ * 不再需要经验开环增益宏。 */
 
 /** 弧长备份判据：弧长超过圆周长的此倍率即判停（×100 避浮点，120 = 1.20 倍）。 */
 #ifndef APP_CIRCLE_ARC_OVERSHOOT_X100
@@ -104,7 +93,7 @@ void app_circle_demo_get_diag(app_circle_diag_t *out);
 /**
  * @brief 20 Hz 调度入口，由 app_balance_run 主循环在速度环后调用。
  *
- * 激活期间会覆盖 cmd->target_speed_cps 和 cmd->target_yaw_pm。
+ * 激活期间会覆盖 cmd->target_speed_cps 和 cmd->target_dif_cps。
  * 非激活时不修改 cmd。
  *
  * @param snap  最新 IMU 快照（gz_dps 用于偏航积分）

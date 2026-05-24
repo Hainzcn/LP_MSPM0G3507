@@ -51,6 +51,8 @@ typedef struct {
     uint32_t speed_window_acc_ms;
     int32_t  left_speed_cps;
     int32_t  right_speed_cps;
+    float    left_speed_lpf;        /* EMA-filtered left cps (float) */
+    float    right_speed_lpf;       /* EMA-filtered right cps (float) */
 
     /* --- 脉冲刹车定时（主循环私有，update() 内倒计时；0 = 无 pending） -------- */
     uint32_t brake_pulse_remain_ms;
@@ -533,6 +535,8 @@ void bsp_motor_init(void)
     s_motor.speed_window_acc_ms    = 0u;
     s_motor.left_speed_cps         = 0;
     s_motor.right_speed_cps        = 0;
+    s_motor.left_speed_lpf         = 0.0f;
+    s_motor.right_speed_lpf        = 0.0f;
 
     s_motor.brake_pulse_remain_ms  = 0u;
 
@@ -958,6 +962,11 @@ void bsp_motor_update(void)
         s_motor.left_speed_cps  = (dl * 1000) / (int32_t)s_motor.speed_window_acc_ms;
         s_motor.right_speed_cps = (dr * 1000) / (int32_t)s_motor.speed_window_acc_ms;
 
+        s_motor.left_speed_lpf  += BSP_MOTOR_SPEED_LPF_ALPHA *
+            ((float)s_motor.left_speed_cps  - s_motor.left_speed_lpf);
+        s_motor.right_speed_lpf += BSP_MOTOR_SPEED_LPF_ALPHA *
+            ((float)s_motor.right_speed_cps - s_motor.right_speed_lpf);
+
         s_motor.left_speed_prev_count  = left_now;
         s_motor.right_speed_prev_count = right_now;
         s_motor.speed_window_acc_ms    = 0u;
@@ -975,17 +984,22 @@ void bsp_motor_get_feedback(bsp_motor_feedback_t *feedback)
     int32_t left_speed_cps;
     int32_t right_speed_cps;
 
+    float left_lpf;
+    float right_lpf;
+
     MOTOR_LOCK();
     left_count       = s_motor.left_count;
     right_count      = s_motor.right_count;
     left_speed_cps   = s_motor.left_speed_cps;
     right_speed_cps  = s_motor.right_speed_cps;
+    left_lpf         = s_motor.left_speed_lpf;
+    right_lpf        = s_motor.right_speed_lpf;
     MOTOR_UNLOCK();
 
     feedback->left_count        = left_count;
     feedback->right_count       = right_count;
-    feedback->left_speed_cps    = left_speed_cps;
-    feedback->right_speed_cps   = right_speed_cps;
+    feedback->left_speed_cps    = (int32_t)left_lpf;
+    feedback->right_speed_cps   = (int32_t)right_lpf;
 
     /* 浮点换算只在调用方需要时算，1 kHz update 路径里不动浮点 */
     feedback->left_angle_deg    = (float)left_count       * LEFT_DEG_PER_COUNT;
@@ -1037,6 +1051,8 @@ void bsp_motor_reset_encoders(void)
     s_motor.right_speed_prev_count = 0;
     s_motor.left_speed_cps         = 0;
     s_motor.right_speed_cps        = 0;
+    s_motor.left_speed_lpf         = 0.0f;
+    s_motor.right_speed_lpf        = 0.0f;
     s_motor.speed_window_acc_ms    = 0u;
     /* 让下次 update() 把当前 16-bit raw 当作 0 起点，避免一次性吃进上一段差值 */
     s_motor.left_raw_prev = (uint16_t)DL_TimerG_getTimerCount(QEI_LEFT_INST);

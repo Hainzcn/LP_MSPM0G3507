@@ -19,4 +19,4 @@ syscfg.bat
 eide.yml
 /.*
 /tools/motor_calib/result
-docs/chore/
+docs/chore

@@ -82,7 +82,7 @@ typedef struct __attribute__((packed)) {
 /** K230→MCU：运动指令帧 (CMD 0x11)，20~50 Hz */
 typedef struct __attribute__((packed)) {
     int16_t  target_v;          /* 纵向速度（归一化 cps / APP_BALANCE_SPEED_CPS_SCALE） */
-    int16_t  target_omega;      /* 角速度差分量（permille） */
+    int16_t  target_omega;      /* 差速目标（归一化 cps）；非零时禁用航向闭环 */
     uint8_t  mode;              /* 运动模式：0=停, 1=直行, 2=转弯, ... */
 } k230_motion_cmd_t;
 

@@ -30,7 +30,7 @@ typedef struct {
 
     /* 运动参数（start 时计算，运行期间只读） */
     int32_t  target_avg_cps;
-    int16_t  target_yaw_pm;
+    int32_t  target_dif_cps;
     int32_t  circumference_mm;
     uint32_t expected_ms;
 
@@ -74,16 +74,16 @@ void app_circle_demo_start(uint16_t diameter_mm, int16_t v_mm_s, bool clockwise)
     /* 中心线速度 → avg_cps */
     s_cir.target_avg_cps = robot_v_mm_s_to_avg_cps((int32_t)v_mm_s);
 
-    /* 角速度 omega = v / r = v / (diameter/2) = 2v / diameter   (rad/s)
-     * 开环转向 PWM = omega × gain
-     *   target_yaw_pm = (2 * v * GAIN_X100) / (diameter * 100)
+    /* 角速度 omega = 2v / diameter (rad/s)
+     * 差速 = omega × wheel_base (mm/s) → 转 cps 再归一化
+     * omega_mrad_s = omega × 1000 = 2000 × abs_v / diameter
      */
-    int32_t omega_x1000 = (int32_t)((2000LL * (int64_t)abs_v) / (int64_t)diameter_mm);
-    int32_t yaw_pm_raw = (int32_t)(((int64_t)omega_x1000 *
-                          APP_CIRCLE_OPEN_YAW_PM_PER_RAD_S_X100) / (1000LL * 100LL));
+    int32_t omega_mrad_s = (int32_t)((2000LL * (int64_t)abs_v) / (int64_t)diameter_mm);
 
     s_cir.yaw_sign = clockwise ? (int8_t)1 : (int8_t)-1;
-    s_cir.target_yaw_pm = (int16_t)(yaw_pm_raw * (int32_t)s_cir.yaw_sign);
+    int32_t dif_cps_raw = robot_omega_mrad_to_delta_cps(omega_mrad_s);
+    int32_t dif_cps_norm = dif_cps_raw / (int32_t)APP_BALANCE_SPEED_CPS_SCALE;
+    s_cir.target_dif_cps = dif_cps_norm * (int32_t)s_cir.yaw_sign;
 
     /* 记录起始编码器计数 */
     bsp_motor_feedback_t fb;
@@ -99,13 +99,13 @@ void app_circle_demo_start(uint16_t diameter_mm, int16_t v_mm_s, bool clockwise)
     s_cir.phase = CIRCLE_RUNNING;
 
     (void)printf("[circle] start diam=%umm v=%dmm/s %s circ=%ldmm "
-                 "avg_cps=%ld yaw_pm=%d expect=%lums\r\n",
+                 "avg_cps=%ld dif_cps=%ld expect=%lums\r\n",
         (unsigned int)diameter_mm,
         (int)v_mm_s,
         clockwise ? "CW" : "CCW",
         (long)circ_mm,
         (long)s_cir.target_avg_cps,
-        (int)s_cir.target_yaw_pm,
+        (long)s_cir.target_dif_cps,
         (unsigned long)s_cir.expected_ms);
 }
 
@@ -167,7 +167,7 @@ void app_circle_demo_tick_20hz(const ms901m_snapshot_t *snap,
 
     /* ── 写入运动指令 ──────────────────────────────────────────── */
     cmd->target_speed_cps = s_cir.target_avg_cps;
-    cmd->target_yaw_pm    = s_cir.target_yaw_pm;
+    cmd->target_dif_cps   = s_cir.target_dif_cps;
 
     /* ── 判停 ──────────────────────────────────────────────────── */
     float yaw_abs = (s_cir.yaw_accum_deg < 0.0f)
@@ -205,7 +205,7 @@ void app_circle_demo_tick_20hz(const ms901m_snapshot_t *snap,
 
     if (done) {
         cmd->target_speed_cps = 0;
-        cmd->target_yaw_pm    = 0;
+        cmd->target_dif_cps   = 0;
         s_cir.phase = CIRCLE_IDLE;
         (void)printf("[circle] done reason=%s yaw=%c%ld.%02lu arc=%ldmm t=%lums\r\n",
             reason,

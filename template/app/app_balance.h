@@ -1,18 +1,19 @@
 /**
  * @file    app_balance.h
- * @brief   平衡车两级级联控制（角度环 100Hz + 速度/转向环 20Hz）
+ * @brief   平衡车四环控制（角度环 100Hz + 速度/差速/航向环 20Hz）
  *
  * ============================================================================
  * ⚠️ 整定提示（必读）
  * ============================================================================
  * 本模块**默认所有 PID 增益 = 0**，即上电后输出恒为 0、电机不会自己动。
  *
- * 推荐整定顺序（与 STM32 demo 对齐）：
+ * 推荐整定顺序：
  *
  *   ① 串口 `bo 80`        → 粗调 OutOffset 突破 TB6612 死区
  *   ② 串口 `bp 5 0 5 80`  → (kp/ki/kd/offset) 角度环能站稳
  *   ③ 串口 `sp 2 0.05 0 0`→ 速度环消静态漂移
- *   ④ 串口 `yp 800 0 200 0` → 航向角环（锁 yaw，见 APP_BALANCE_YAW_SOURCE）
+ *   ④ 串口 `dp 4 3 0 0`   → 差速环（闭环控制左右轮速差）
+ *   ⑤ 串口 `yp 800 0 200 0` → 航向角环（锁 yaw，输出→差速环 target）
  *
  * ============================================================================
  * 调用模型
@@ -21,6 +22,7 @@
  *   app_balance_init();
  *   app_balance_set_balance_gains(kp, ki, kd, out_offset);
  *   app_balance_set_speed_gains  (kp, ki, kd, out_offset);
+ *   app_balance_set_diff_gains   (kp, ki, kd, out_offset);  差速环
  *   app_balance_set_yaw_gains    (kp, ki, kd, out_offset);  航向角环
  *   app_balance_run();   内部多速率调度 100/20 Hz
  */
@@ -59,9 +61,22 @@ extern "C" {
 #define APP_BALANCE_MAX_PWM_PERMILLE            (1000)
 #endif
 
-/** 航向环差分 PWM 绝对值上限（permille）。 */
-#ifndef APP_BALANCE_YAW_MAX_CORRECTION_PM
-#define APP_BALANCE_YAW_MAX_CORRECTION_PM       (200)
+/** 差速环输出差分 PWM 绝对值上限（permille）。 */
+#ifndef APP_BALANCE_DIFF_MAX_PWM_PM
+#define APP_BALANCE_DIFF_MAX_PWM_PM             (300)
+#endif
+
+/** 差速反馈 EMA 低通系数（0~1），20 Hz 更新。α=0.3 → 时间常数 ~120 ms。 */
+#ifndef APP_BALANCE_DIFF_LPF_ALPHA
+#define APP_BALANCE_DIFF_LPF_ALPHA              (0.3f)
+#endif
+
+/**
+ * 航向环输出（target_dif_cps）绝对值上限（归一化 cps）。
+ * 航向环现在输出的是差速目标而非直接 PWM，需按差速环量纲限幅。
+ */
+#ifndef APP_BALANCE_YAW_MAX_DIF_CPS
+#define APP_BALANCE_YAW_MAX_DIF_CPS             (500.0f)
 #endif
 
 /** 航向角环开关：直行时闭环锁定偏航（抑制原地绕圈）。 */
@@ -92,9 +107,9 @@ extern "C" {
 #define APP_BALANCE_YAW_INVERT                  (1)
 #endif
 
-/** 航向角环积分项独立上限（permille）。 */
-#ifndef APP_BALANCE_YAW_INTEGRAL_LIMIT_PM
-#define APP_BALANCE_YAW_INTEGRAL_LIMIT_PM       (100.0f)
+/** 航向角环积分项独立上限（归一化 cps；量纲与航向环输出一致）。 */
+#ifndef APP_BALANCE_YAW_INTEGRAL_LIMIT
+#define APP_BALANCE_YAW_INTEGRAL_LIMIT          (200.0f)
 #endif
 
 /**
@@ -124,11 +139,11 @@ extern "C" {
 /**
  * 速度反馈低通滤波系数（0~1）。
  *
- * 编码器 20ms 差分窗口在低速时量化噪声严重，此 EMA 平滑速度测量：
- *   20 Hz × α=0.15 → 时间常数 ~280ms → 带宽 ~0.6 Hz
+ * BSP 层已有 100 Hz EMA 预滤波（α=0.3），此处 20 Hz 二级 EMA 进一步平滑：
+ *   20 Hz × α=0.25 → 时间常数 ~150ms → 带宽 ~1.0 Hz
  */
 #ifndef APP_BALANCE_SPEED_LPF_ALPHA
-#define APP_BALANCE_SPEED_LPF_ALPHA             (0.15f)
+#define APP_BALANCE_SPEED_LPF_ALPHA             (0.25f)
 #endif
 
 /**
@@ -208,11 +223,12 @@ typedef struct {
     bool  attitude_valid;   /* 0x01 帧是否至少收到过 */
 } app_balance_attitude_t;
 
-/** 运动指令（业务侧从 K230 命令 / 本地状态机解析后填入） */
+/** 运动指令（业务侧从 K230 命令 / 圆运动 / 本地状态机解析后填入） */
 typedef struct {
     int32_t target_speed_cps;   /* 期望前进速度（counts/s 平均 = (L+R)/2）；正 = 前进 */
-    int16_t target_yaw_pm;      /* 开环转向差分量（permille）；正 = 左加右减（顺时针俯视）。
-                                 * 非零时同时禁用 yaw 闭环，值真实叠加到左右轮 PWM 差分。 */
+    int32_t target_dif_cps;     /* 期望差速（归一化 cps，(L-R)/SCALE）；
+                                 * 正 = 左快右慢（顺时针俯视）。
+                                 * 非零时禁用航向闭环，值作为差速环 target。 */
 } app_balance_motion_cmd_t;
 
 /* ========================================================================== */
@@ -225,10 +241,13 @@ typedef struct {
     float   pitch_meas_deg;     /* 实际俯仰（已减零点，°） */
     float   balance_out_pwm;    /* 角度环输出 PWM（permille） */
     float   yaw_error_deg;      /* 航向角环误差（°）；源 1 时为 -gz 积分量 */
-    int16_t yaw_correction_pm;  /* 航向环差分补偿（permille）；正值 = 左加右减 */
+    int16_t yaw_correction_pm;  /* 航向环输出（归一化 cps → 差速环 target）*/
     int16_t left_cmd_pm;        /* 最终左轮命令（permille） */
     int16_t right_cmd_pm;       /* 最终右轮命令（permille） */
     int32_t speed_meas_cps;     /* 实际平均速度 = (L+R)/2（counts/s） */
+    int32_t diff_target_cps;    /* 差速环目标（归一化 cps） */
+    int32_t diff_meas_cps;      /* 差速环实际（归一化 cps） */
+    int16_t diff_out_pm;        /* 差速环输出（permille） */
     bool    driving;            /* 本拍是否真在驱动（受 safety 限制） */
 } app_balance_diag_t;
 
@@ -236,10 +255,10 @@ typedef struct {
 /* API                                                                         */
 /* ========================================================================== */
 
-/** 初始化三路 pid2_t 为安全默认（增益 0 + 限幅 + OutOffset）。 */
+/** 初始化四路 pid2_t 为安全默认（增益 0 + 限幅 + OutOffset）。 */
 void app_balance_init(void);
 
-/** 复位：清三路 PID 内部状态（i_term + 微分历史 + 级联中间变量）。 */
+/** 复位：清四路 PID 内部状态（i_term + 微分历史 + 级联中间变量）。 */
 void app_balance_reset(void);
 
 /**
@@ -278,7 +297,16 @@ void app_balance_set_balance_gains(float kp, float ki, float kd, float out_offse
  */
 void app_balance_set_speed_gains(float kp, float ki, float kd, float out_offset);
 
-/** 设置航向角环增益（闭环锁 yaw）。 */
+/**
+ * @brief 设置差速环增益。
+ * @param kp         比例增益
+ * @param ki         积分增益
+ * @param kd         微分增益
+ * @param out_offset 死区补偿（permille），差速环通常设 0
+ */
+void app_balance_set_diff_gains(float kp, float ki, float kd, float out_offset);
+
+/** 设置航向角环增益（闭环锁 yaw，输出→差速环 target）。 */
 void app_balance_set_yaw_gains(float kp, float ki, float kd, float out_offset);
 
 void app_balance_set_yaw_inverted(bool inverted);

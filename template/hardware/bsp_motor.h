@@ -235,6 +235,18 @@ extern "C" {
 #endif
 
 /**
+ * 编码器速度 EMA 低通滤波系数（0~1）。
+ *
+ * 每次速度窗口差分完成后（100 Hz），对各轮 cps 施加一阶 EMA：
+ *   lpf += alpha × (raw - lpf)
+ * α=0.3 @ 100 Hz → 时间常数 ~30 ms，衰减编码器量化噪声的同时保持
+ * 足够快的响应。差速环反馈 (L-R) 对噪声敏感，此滤波尤为关键。
+ */
+#ifndef BSP_MOTOR_SPEED_LPF_ALPHA
+#define BSP_MOTOR_SPEED_LPF_ALPHA                  (0.3f)
+#endif
+
+/**
  * 右编码器 ISR 雪崩保护（Stage 2.4 新增）：
  *   ─ `BSP_MOTOR_ENC_IRQ_QUENCH_PER_MS`：单毫秒边沿率上限（边/ms）。
  *     低于此值：正常计数。超过此值：判定为噪声/浮空雪崩，关中断保护 CPU。
