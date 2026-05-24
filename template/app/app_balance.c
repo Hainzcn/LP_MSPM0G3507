@@ -898,7 +898,7 @@ static const char *safety_state_to_str(app_safety_state_t s)
 /* K230 通讯（Stage 4 IMU TX 一分二方案）                                      */
 /* ========================================================================== */
 
-#define K230_HEARTBEAT_TIMEOUT_MS   500u
+#define K230_HEARTBEAT_TIMEOUT_MS   1500u  /* > 心跳周期(1 Hz)，含足够裕度 */
 #define K230_RX_DRAIN_CHUNK         64u
 
 static k230_parser_t s_k230_parser;
@@ -910,7 +910,11 @@ static void k230_send_text_resp(const char *text);
 static void k230_comm_init(void)
 {
     k230_parser_init(&s_k230_parser);
-    s_k230_last_rx_ms = bsp_systick_get_ms();
+    /* 用 0 初始化：主循环以 tick_count(从0起) 作为时间戳，
+     * bsp_systick_get_ms() 与 tick_count 基准不同，直接赋值会导致
+     * 首 tick uint32 下溢误判超时。
+     * 初始值 0 使超时在 500 ms 后自然触发（K230 未在线时的正常行为）。*/
+    s_k230_last_rx_ms = 0u;
     s_k230_online     = false;
 }
 
