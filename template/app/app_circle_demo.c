@@ -83,7 +83,13 @@ void app_circle_demo_start(uint16_t diameter_mm, int16_t v_mm_s, bool clockwise)
     s_cir.yaw_sign = clockwise ? (int8_t)1 : (int8_t)-1;
     int32_t dif_cps_raw = robot_omega_mrad_to_delta_cps(omega_mrad_s);
     int32_t dif_cps_norm = dif_cps_raw / (int32_t)APP_BALANCE_SPEED_CPS_SCALE;
-    s_cir.target_dif_cps = dif_cps_norm * (int32_t)s_cir.yaw_sign;
+
+    /* target_dif_cps 约定：正值 = 代数意义的 L > R（前进时左快，倒退时左慢）。
+     * 倒退 CW 时外圈轮需要更快倒退（代数更小），对应 L-R < 0，需乘以 v 的符号。
+     * 前进时 v_sign=+1 不变；倒退时 v_sign=-1 翻转差速方向。 */
+    int8_t v_sign = (v_mm_s >= 0) ? (int8_t)1 : (int8_t)-1;
+    s_cir.target_dif_cps = dif_cps_norm * (int32_t)s_cir.yaw_sign
+                                        * (int32_t)v_sign;
 
     /* 记录起始编码器计数 */
     bsp_motor_feedback_t fb;

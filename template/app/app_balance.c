@@ -133,8 +133,8 @@ void app_balance_init(void)
     /* 差速环 20 Hz：输出差分 PWM permille */
     s_bal.diff_pid.out_min    = -(float)APP_BALANCE_DIFF_MAX_PWM_PM;
     s_bal.diff_pid.out_max    =  (float)APP_BALANCE_DIFF_MAX_PWM_PM;
-    s_bal.diff_pid.i_min      = -100.0f;
-    s_bal.diff_pid.i_max      =  100.0f;
+    s_bal.diff_pid.i_min      = -300.0f;
+    s_bal.diff_pid.i_max      =  300.0f;
     s_bal.diff_pid.out_offset = 0.0f;
 
     /* 航向角环 20 Hz：输出差速目标（归一化 cps） */
@@ -369,22 +369,15 @@ static void balance_step_speed(const app_balance_attitude_t *att,
     s_bal.speed_lpf_cps += APP_BALANCE_SPEED_LPF_ALPHA *
                            (norm_cps - s_bal.speed_lpf_cps);
 
-    /* ── 2) 差速反馈（差速环） ────────────────────────────────── */
-    /* 左右轮编码器分辨率不同（68000 vs 34000 cnt/rev），原始 (L-R)
-     * 即使两轮等速也不为零。先将各轮 cps 归一化到相同的 avg_counts_per_mm
-     * 基准，再做差，使差值真正反映物理速度差。 */
-    int32_t left_norm_cps  = (int32_t)(((int64_t)fb.left_speed_cps
-                             * ROBOT_AVG_COUNTS_PER_MM_X100)
-                             / ROBOT_LEFT_COUNTS_PER_MM_X100);
-    int32_t right_norm_cps = (int32_t)(((int64_t)fb.right_speed_cps
-                             * ROBOT_AVG_COUNTS_PER_MM_X100)
-                             / ROBOT_RIGHT_COUNTS_PER_MM_X100);
-    int32_t dif_cps_raw = (left_norm_cps - right_norm_cps)
-                          * (int32_t)s_bal.speed_sign;
-    float norm_dif = (float)dif_cps_raw / (float)APP_BALANCE_SPEED_CPS_SCALE;
+    /* ── 2) 差速反馈（差速环，RPM 量纲） ────────────────────── */
+    /* BSP 的 RPM 值已按各轮实际 CPR 换算，天然消除左右编码器分辨率差异。
+     * 旧方案使用"归一化 cps（÷10）"，1 RPM ≈ 85 单位，导致 kp=0.3 即
+     * 开环增益 >12 而立刻振荡。改用 RPM 后推荐 kp=4~8、ki=1~3。 */
+    float dif_rpm = (fb.left_speed_rpm - fb.right_speed_rpm)
+                    * (float)s_bal.speed_sign;
 
     s_bal.diff_speed_lpf_cps += APP_BALANCE_DIFF_LPF_ALPHA *
-                                (norm_dif - s_bal.diff_speed_lpf_cps);
+                                (dif_rpm - s_bal.diff_speed_lpf_cps);
 
     /* ── 3) 加速度门控（转弯时放宽） ─────────────────────────── */
     float a2 = (att->ax_g * att->ax_g) +
@@ -413,29 +406,32 @@ static void balance_step_speed(const app_balance_attitude_t *att,
     /* ── 5) 航向环 → target_dif_cps ──────────────────────────── */
     (void)yaw_angle_step(att, cmd);
 
-    /* ── 6) 差速环 → dif_pwm ─────────────────────────────────── */
-    float diff_target_raw;
+    /* ── 6) 差速环 → dif_pwm（RPM 量纲） ─────────────────────── */
+    /* 外部输入（K230 / 圆运动 / 航向环）仍为归一化 cps，统一乘以
+     * DIFF_NORM_TO_RPM 转换到 RPM 后再进差速 PID。 */
+    float diff_target_norm;
     if (cmd->target_dif_cps != 0) {
-        diff_target_raw = (float)cmd->target_dif_cps;
+        diff_target_norm = (float)cmd->target_dif_cps;
     } else {
-        diff_target_raw = s_bal.yaw_dif_cps;
+        diff_target_norm = s_bal.yaw_dif_cps;
     }
+    float diff_target_rpm = diff_target_norm * APP_BALANCE_DIFF_NORM_TO_RPM;
 
-    /* 差速目标低通：与速度目标同理，平滑阶跃转向指令 */
+    /* 差速目标低通：与速度目标同理，平滑阶跃转向指令（RPM 域） */
     s_bal.diff_target_lpf += APP_BALANCE_DIFF_TARGET_LPF_ALPHA
-                             * (diff_target_raw - s_bal.diff_target_lpf);
+                             * (diff_target_rpm - s_bal.diff_target_lpf);
 
     s_bal.diff_pid.target = s_bal.diff_target_lpf;
     s_bal.diff_pid.actual = s_bal.diff_speed_lpf_cps;
     pid2_update(&s_bal.diff_pid);
     s_bal.dif_pwm = s_bal.diff_pid.out;
 
-    /* ── 诊断 ─────────────────────────────────────────────────── */
+    /* ── 诊断（RPM × 100 保留精度） ──────────────────────────── */
     s_bal.diag.target_tilt_deg   = s_bal.target_tilt_deg;
     s_bal.diag.yaw_correction_pm = (int16_t)s_bal.yaw_dif_cps;
     s_bal.diag.speed_meas_cps    = (int32_t)s_bal.speed_lpf_cps;
-    s_bal.diag.diff_target_cps   = (int32_t)s_bal.diff_target_lpf;
-    s_bal.diag.diff_meas_cps     = (int32_t)s_bal.diff_speed_lpf_cps;
+    s_bal.diag.diff_target_cps   = (int32_t)(s_bal.diff_target_lpf * 100.0f);
+    s_bal.diag.diff_meas_cps     = (int32_t)(s_bal.diff_speed_lpf_cps * 100.0f);
     s_bal.diag.diff_out_pm       = clamp_diff_pm(s_bal.dif_pwm);
 }
 
@@ -696,7 +692,7 @@ static void print_pid_help(void)
                  "bo, si0/si1, yi0/yi1, pid?, pid0, lt, lt0, t/test\r\n");
     (void)printf("[pid] bp=angle(100Hz) sp=speed(20Hz) dp=diff(20Hz) yp=yaw(20Hz) bo=angle_offset_only\r\n");
     (void)printf("[pid] offset_pm: direct permille, NOT x1000 (e.g. bo 80 = 80pm dead-zone comp)\r\n");
-    (void)printf("[pid] example: bo 80 ; bp 5000 0 5000 80 ; sp 2000 50 0 0 ; dp 4000 3000 0 0 ; yp 800 0 200 0\r\n");
+    (void)printf("[pid] example: bo 80 ; bp 5000 0 5000 80 ; sp 2000 50 0 0 ; dp 4000 3000 0 0 (RPM) ; yp 800 0 200 0\r\n");
     (void)printf("[pid] si?/si0/si1=speed_invert  yi?/yi0/yi1=yaw_invert\r\n");
     (void)printf("[pid] c/circle=start circle (500mm/100mm/s CW), "
                  "circle <diam_mm> <v_mm/s>=custom, cx=cancel\r\n");
@@ -836,13 +832,14 @@ static bool handle_pid_command(const char *cmd)
     if ((cmd[0]=='d') && (cmd[1]=='p') && is_field_separator(cmd[2])) {
         float kp, ki, kd, offset;
         if (!parse_pid_quad(&cmd[2], &kp, &ki, &kd, &offset)) {
-            (void)printf("[pid] bad dp command, use: dp 4000 3000 0 0\r\n");
+            (void)printf("[pid] bad dp command, use: dp 4000 3000 0 0 (RPM unit)\r\n");
             return true;
         }
         app_balance_set_diff_gains(kp, ki, kd, offset);
         pid2_reset(&s_bal.diff_pid);
         s_bal.diff_speed_lpf_cps = 0.0f;
-        print_pid2_status("diff", &s_bal.diff_pid);
+        s_bal.diff_target_lpf    = 0.0f;
+        print_pid2_status("diff(RPM)", &s_bal.diff_pid);
         return true;
     }
 
@@ -1341,7 +1338,7 @@ bool app_balance_run(void)
             uint32_t log_ovr  = bsp_log_uart_rx_overrun();
 
             (void)printf("[hb] t=%lus state=%s pitch=%c%ld.%02lu tilt*=%c%ld.%02lu "
-                         "pwm=%c%ld.%02lu yawErr=%c%ld.%02lu yawDif=%d dif=%ld/%ld->%d "
+                         "pwm=%c%ld.%02lu yawErr=%c%ld.%02lu yawDif=%d dif=%ld/%ld->%dpm "
                          "L=%ld R=%ld v=%ldcps "
                          "batt=%lumV ms901m_g=%lu/b=%lu log_ovr=%lu k230_rx=%lub/s "
                          "k230_g=%lu/b=%lu k230_%s "

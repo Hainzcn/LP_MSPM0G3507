@@ -12,7 +12,7 @@
  *   ① 串口 `bo 80`        → 粗调 OutOffset 突破 TB6612 死区
  *   ② 串口 `bp 5 0 5 80`  → (kp/ki/kd/offset) 角度环能站稳
  *   ③ 串口 `sp 2 0.05 0 0`→ 速度环消静态漂移
- *   ④ 串口 `dp 4 3 0 0`   → 差速环（闭环控制左右轮速差）
+ *   ④ 串口 `dp 4000 3000 0 0` → 差速环（RPM 量纲，kp=4 ki=3）
  *   ⑤ 串口 `yp 800 0 200 0` → 航向角环（锁 yaw，输出→差速环 target）
  *
  * ============================================================================
@@ -61,10 +61,35 @@ extern "C" {
 #define APP_BALANCE_MAX_PWM_PERMILLE            (1000)
 #endif
 
-/** 差速环输出差分 PWM 绝对值上限（permille）。 */
+/**
+ * 差速环输出差分 PWM 绝对值上限（permille）。
+ *
+ * 值过小（如 300）会导致紧凑圆弧（≤500mm）差速饱和，车辆跑不出目标曲率。
+ * 200mm 圆弧 @100mm/s 需约 430 pm 差速。设 600 以覆盖常见轨迹，
+ * 角度环 ±1000 pm 仍有足够余量叠加。
+ */
 #ifndef APP_BALANCE_DIFF_MAX_PWM_PM
-#define APP_BALANCE_DIFF_MAX_PWM_PM             (300)
+#define APP_BALANCE_DIFF_MAX_PWM_PM             (600)
 #endif
+
+/**
+ * 差速环量纲转换因子：归一化 cps → RPM。
+ *
+ * 差速 PID 内部以 RPM 为量纲工作。外部输入（K230 target_dif_cps、
+ * 航向环输出 yaw_dif_cps、圆运动 target_dif_cps）仍为归一化 cps，
+ * 乘此系数统一转换。
+ *
+ * 推导：norm_cps = raw_cps / SPEED_CPS_SCALE；
+ *       RPM     = raw_cps × 60 / AVG_CPR
+ *       → RPM   = norm_cps × SPEED_CPS_SCALE × 60 / AVG_CPR
+ *
+ * 旧量纲下 1 RPM ≈ 85 归一化 cps，kp=0.3 即产生 25 pm 级差速扭矩，
+ * 开环增益 >12，直接振荡。改 RPM 后推荐 kp=4~8, ki=1~3（同 STM32 demo）。
+ */
+#define APP_BALANCE_DIFF_NORM_TO_RPM \
+    ((float)APP_BALANCE_SPEED_CPS_SCALE * 60.0f / \
+     (float)((BSP_MOTOR_LEFT_COUNTS_PER_OUTPUT_REV \
+            + BSP_MOTOR_RIGHT_COUNTS_PER_OUTPUT_REV) / 2))
 
 /** 差速反馈 EMA 低通系数（0~1），20 Hz 更新。α=0.3 → 时间常数 ~120 ms。 */
 #ifndef APP_BALANCE_DIFF_LPF_ALPHA
