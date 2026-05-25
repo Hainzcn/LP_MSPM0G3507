@@ -23,7 +23,7 @@ MS901M TX ──┬──→ MCU UART3 RX (PB13)
             └──→ K230 UART RX
 
 MCU UART1 TX (PB6) ──阻塞写──→ K230 CMD RX    [~240 B/s + TEXT_RESP]
-MCU UART1 RX (PB7) ←──DMA────  K230 CMD TX    [运动/PID/TEXT_CMD]
+MCU UART1 RX (PB7) ←──中断RX──  K230 CMD TX    [运动/PID/TEXT_CMD]
 ```
 
 **收益**：释放 UART1 TX DMA；K230 获 200 Hz 原始 6 轴；MCU→K230 降至 ~240 B/s，阻塞写无压力。
@@ -53,8 +53,8 @@ MCU UART1 RX (PB7) ←──DMA────  K230 CMD TX    [运动/PID/TEXT_CMD
 
 ### 2.2 ti_msp_dl_config
 
-- 移除 `DMA_CH1`（TX DMA）
-- `gDMA_CH0Config` 改为 `DL_DMA_WIDTH_BYTE` + dest increment
+- 移除 `DMA_CH0`（RX DMA，v0.8）+ `DMA_CH1`（TX DMA，v0.1）
+- **v0.8 起 RX 改为 FIFO 半满中断驱动**（不再使用 DMA），`bsp_k230_uart` 内 512 B 环缓替代 DMA buffer
 - UART1 @ PB6/PB7，115200 8N1
 
 ---
@@ -64,7 +64,7 @@ MCU UART1 RX (PB7) ←──DMA────  K230 CMD TX    [运动/PID/TEXT_CMD
 | 模块 | 文件 | 职责 |
 |------|------|------|
 | 协议层 | `k230_protocol.c/.h` | CRC16 按位计算、帧编解码、状态机解析 |
-| BSP | `bsp_k230_uart.c/.h` | DMA RX 256 B → 512 B 环缓；阻塞 TX |
+| BSP | `bsp_k230_uart.c/.h` | **v0.8**：FIFO 半满中断 + 512 B 环缓 RX；阻塞 TX |
 | 应用层 | `app_balance.c` | drain/dispatch、超时、TX 调度、TEXT_CMD 处理 |
 
 ### 3.1 主循环调度
@@ -120,3 +120,4 @@ MCU UART1 RX (PB7) ←──DMA────  K230 CMD TX    [运动/PID/TEXT_CMD
 | 2026-05-20 | v0.5 | 波特率 921600→115200 | 主控团队 |
 | 2026-05-21 | v0.6 | 对齐 Stage 3.7 pid_id 0/2/3 | 主控团队 |
 | 2026-05-24 | v0.7 | TEXT_CMD/TEXT_RESP 远程调试；MAX_PAYLOAD 128；协议真源合并至 Side.md | 主控团队 |
+| 2026-05-24 | v0.8 | K230 UART RX 由 DMA block 模式改为 FIFO 半满中断驱动（`3518414`）；移除 `DMA_CH0` RX 配置，改用 512 B 中断环缓；简化接收逻辑（-94/+53 行） | 主控团队 |

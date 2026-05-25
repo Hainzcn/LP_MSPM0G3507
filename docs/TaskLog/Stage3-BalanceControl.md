@@ -14,9 +14,15 @@
 >
 > **🔁 Stage 3.6 速度反馈极性翻转 + 文档瘦身（2026-05-17，`b8a5783`）**：新增速度反馈极性翻转支持（`si0/si1` 串口命令 / `APP_BALANCE_SPEED_INVERT` 宏），允许在线切换编码器方向与平衡环的符号关系；引入速度反馈低通 LPF（`APP_BALANCE_SPEED_LPF_ALPHA=0.15`）；引入速度量纲缩放（`APP_BALANCE_SPEED_CPS_SCALE=10`）；清理 `docs/chore/` 下过时参考文件、`tools/motor_calib/` 下旧 PNG 与 log。详见 §7。
 >
-> **🏗️ Stage 3.7 两级级联重构 + 航向角环收敛（2026-05-21，`adc5344`，`pid2` 分支）**：对照 STM32 demo 将俯仰控制从四级级联（含独立角速度内环 `rp`）**收敛为两级串级**：速度外环（20 Hz）→ 角度环（100 Hz，**直接输出 PWM**）。控制器库切换为 **`pid2_t`**（积分按拍累加、微分先行、OutOffset 死区补偿）；平衡模式 **关闭 BSP 死区重映射**，改由角度环 `bo`/`bp` offset 突破静摩擦。横摆仅保留 **航向角环 `yp`**（EKF / 陀螺积分双源，20 Hz），**移除轮速差转向环 `tp`**。串口整定命令：`bo` / `bp` / `sp` / `yp`（无 `rp`）。详见 **§7A**；**下文 §2~§6 保留 Stage 3.1~3.6 历史记录**，以 Stage 3.7 为当前代码真源。
+> **🏗️ Stage 3.7 两级级联重构 + 航向角环收敛（2026-05-21，`adc5344`，`pid2` 分支）**：对照 STM32 demo 将俯仰控制从四级级联（含独立角速度内环 `rp`）**收敛为两级串级**：速度外环（20 Hz）→ 角度环（100 Hz，**直接输出 PWM**）。控制器库切换为 **`pid2_t`**（积分按拍累加、微分先行、OutOffset 死区补偿）；平衡模式 **关闭 BSP 死区重映射**，改由角度环 `bo`/`bp` offset 突破静摩擦。横摆仅保留 **航向角环 `yp`**（EKF / 陀螺积分双源，20 Hz），**移除轮速差转向环 `tp`**。串口整定命令：`bo` / `bp` / `sp` / `yp`（无 `rp`）。详见 **§7A**。
 >
-> 文档定位：阶段 3 自 2026-05-11 起演进；**当前装车控制架构以 Stage 3.7（`pid2`）为准**。Stage 3.1~3.6 记录仍保留供对照，其中 §5 四级级联、`rp` 角速度内环、50 Hz 航向调度等描述**已被 Stage 3.7 取代**。
+> **🔄 Stage 3.8 差速闭环 + EMA 滤波（2026-05-24~26，`03dc3a3` / `412800f` / `f8dba1e`）**：新增 **差速环 `diff_pid`**（20 Hz），航向角环 `yp` 输出不再直接叠加 PWM 差分，而是作为差速环的 `target_dif_cps`；差速环输出再叠加到左右 PWM，形成 **航向角环 → 差速环 → 左右 PWM** 的三级链。同步引入速度/差速**目标 EMA 低通**（防阶跃振荡）、差速环 RPM 量纲化、差速方向校正。详见 **§7B**。
+>
+> **📐 Stage 3.9 圆弧运动演示 + 车体参数集中管理（2026-05-24，`e3e7e50`）**：新增 `app_circle_demo` 子任务（寄生 20 Hz 分支），串口 `c`/`circle` 触发指定直径+速度的整圆运动，三重判停（IMU 偏航 360° / 弧长 / 超时兜底）。新建 `robot_param.h` 集中管理车体几何参数（轮径 65 mm / 轴距 185 mm）与运动学换算（mm/s ↔ avg_cps ↔ 弧长），消除代码中散落的魔法数字。详见 **§7C**。
+>
+> **🔧 Stage 3.10 自校零开关 + 栈修复 v2.0 + RPM 量纲化（2026-05-24~26）**：新增 `APP_BALANCE_PITCH_AUTOZERO_ENABLE` 总开关、`PITCH_OFFSET_DEFAULT_DEG` 硬编码回退值。栈从 1 KB 扩至 2 KB + canary 防护（`76d7d30`）。差速环量纲由归一化 cps 切换为 RPM。详见 **§7D**。
+>
+> 文档定位：阶段 3 自 2026-05-11 起演进；**当前装车控制架构以 Stage 3.10 为准**。Stage 3.1~3.6 记录仍保留供对照，其中 §5 四级级联、`rp` 角速度内环、50 Hz 航向调度等描述**已被 Stage 3.7 取代**。
 >
 > 关联文档：
 >
@@ -37,7 +43,10 @@
 |---|-----------|---------|
 | 1 | 静止状态先调俯仰平衡环（PD 起步，后期可升级为 LQR） | **完成** —— Stage 3.7 两级串级（速度/角度 + 航向角），`pid2_t` + 串口 `bo/bp/sp/yp` |
 | 2 | 叠加速度环（外环 PI 输出俯仰参考角 → 内环平衡环），消除贴地慢漂 | **完成** —— 速度外环 20 Hz，输出目标 tilt deg，含 LPF + 极性翻转 + 量纲归一化 |
-| 3 | 验收：原地直立 ≥ 3 s，前后偏移 ≤ 10 cm | **整定中** —— 两级架构已就绪，串口 `bo/bp/sp/yp` 注入增益，配合 `serial_plot.py` 可视化闭环整定 |
+| 3 | 验收：原地直立 ≥ 3 s，前后偏移 ≤ 10 cm | **整定中** —— 两级架构已就绪，串口 `bo/bp/sp/yp/dp` 注入增益，配合 `serial_plot.py` 可视化闭环整定 |
+| — | **Stage 3.8** 差速闭环 | **完成** —— 航向角环 → `diff_pid` → PWM 三级级联，串口 `dp`，EMA 目标/测量双滤波 |
+| — | **Stage 3.9** 圆弧运动演示 | **完成** —— `app_circle_demo` + `robot_param.h`，串口 `c`/`circle`/`cx` |
+| — | **Stage 3.10** 自校零开关 + 栈修复 | **完成** —— `AUTOZERO_ENABLE` 默认关闭；栈 2 KB + canary |
 
 > **架构演进路线图**（各版本里程碑）：
 >
@@ -49,7 +58,10 @@
 > Stage 3.4 (0542060)           四级级联多速率架构                     20/50/100/200 Hz
 > Stage 3.5 (79b9348)           + 角速率 LPF + sigma-delta dither     抗振动 + 子死区平滑
 > Stage 3.6 (b8a5783)           + 速度极性翻转 + 量纲归一化             串口 si0/si1
-> Stage 3.7 (adc5344)           两级级联 + pid2 + 航向角环             移除 rp/tp，当前架构
+> Stage 3.7 (adc5344)           两级级联 + pid2 + 航向角环             移除 rp/tp
+> Stage 3.8 (03dc3a3/412800f)   + 差速闭环 + EMA 目标/测量滤波         航向环→diff_pid 级联
+> Stage 3.9 (e3e7e50)           + 圆弧运动演示（circle demo）          三重判停 + robot_param
+> Stage 3.10 (f527a3d/f8dba1e)  + 自校零开关 + 差速环 RPM 量纲化       当前架构
 > ```
 
 ---
@@ -541,6 +553,196 @@ int32_t avg_cps_raw = ((fb.left_speed_cps + fb.right_speed_cps) / 2)
 
 ---
 
+## 7B. Stage 3.8 ｜ 差速闭环 + EMA 目标/测量低通滤波
+
+> 提交：`03dc3a3`（2026-05-24）→ `412800f`（2026-05-26）→ `f8dba1e`（2026-05-26，HEAD），三连提交，变更 3 文件，+120/-45。
+
+### 7B.1 动机
+
+Stage 3.7 中航向角环 `yp` 输出直接以差分 PWM permille 叠加到左右轮：
+
+```
+left_pwm  = balance_out + yaw_correction
+right_pwm = balance_out - yaw_correction
+```
+
+这导致两个问题：
+1. **航向环与平衡环量纲不匹配**：航向环输出是 PWM permille，而实际需要控制的是左右轮**速度差**，PWM 到速度差的映射受电池电压/地面摩擦/电机温度影响，时变严重
+2. **K230 `target_omega` 直接写 `target_yaw_pm`** 没有经过速度闭环校准，原地旋转角速度不可控
+
+### 7B.2 新架构：三级级联（航向角 → 差速 → PWM）
+
+```
+航向角环 (20 Hz)   输入: yaw 误差 deg         → 输出: target_dif（RPM/cps）
+    ↓
+差速环   (20 Hz)   输入: dif 误差              → 输出: diff_out_pm
+    ↓
+左右 PWM 叠加:  left  = balance_out + diff_out_pm
+                right = balance_out - diff_out_pm
+```
+
+- **`app_balance_motion_cmd_t` 新增 `target_dif_cps`**：K230 `MOTION_CMD.target_omega` / 圆弧运动计算后填入此处
+- 航向角环输出 `yaw_correction` 改为差速环 **目标**（归一化 cps → RPM）
+- 差速环用 `pid2_t`（与角度/速度环统一），串口指令 `dp <kp> <ki> <kd> <offset>`
+
+### 7B.3 关键可配宏
+
+| 宏 | 默认值 | 含义 |
+|---|--------|------|
+| `APP_BALANCE_SPEED_TARGET_LPF_ALPHA` | 0.10 | 速度目标 EMA（20 Hz * 0.10 → τ ≈ 330 ms，抑制阶跃导致的"微倾启动→后仰回退→再启动"顿挫） |
+| `APP_BALANCE_DIFF_TARGET_LPF_ALPHA` | 0.20 | 差速目标 EMA（20 Hz * 0.20 → τ ≈ 250 ms） |
+| `APP_BALANCE_SPEED_LPF_ALPHA` | 0.25（原 0.15） | 速度测量 EMA，适度收紧以平衡噪声与延迟 |
+| `APP_BALANCE_DIFF_LPF_ALPHA` | 0.30 | 差速测量 EMA |
+| `APP_BALANCE_DIFF_MAX_PM` | 300 | 差速环输出绝对值上限（permille），防止紧弧运动饱和 |
+| `APP_BALANCE_YAW_MAX_DIF_CPS` | 500 | 航向角环输出上限（归一化 cps），防止航向修正过冲 |
+| `APP_BALANCE_DIFF_INVERT` | — | 差速方向校正编译期宏 |
+
+### 7B.4 串口命令更新
+
+| 命令 | 作用 | 新增/变更 |
+|------|------|-----------|
+| `dp <kp> <ki> <kd> <offset>` | 差速环增益 ×1000 + offset | **新增** |
+| `yp ...` | 航向角环增益（输出改为差速环 target 而非直接 PWM） | 行为变更 |
+| `yi0` / `yi1` | 航向 yaw/gz 极性翻转 | 保持 |
+| `pid?` | 回显四环（bp/sp/yp/dp）增益 | 新增 dp |
+
+### 7B.5 差速环 RPM 量纲化（`f8dba1e`）
+
+`03dc3a3` 初版差速环使用归一化 cps（÷`SPEED_CPS_SCALE`）作为量纲。`f8dba1e` 切换为 **RPM 量纲**：
+
+| 版本 | 差速量纲 | 航向环输出量纲 |
+|------|---------|---------------|
+| `03dc3a3` | 归一化 cps | 归一化 cps |
+| `f8dba1e` | **RPM** | 归一化 cps（经 BSP `cps_to_rpm` 换算后送入差速环） |
+
+RPM 量纲的优势：与 `bsp_motor_feedback_t.left/right_speed_rpm` 直接可比，整定直觉更好（"差速 20 RPM"比"差速 200 cps"更直观）。
+
+### 7B.6 `app_balance_diag_t` 新增字段
+
+```c
+typedef struct {
+    // ... 原有字段 ...
+    int32_t diff_target_cps;    /* 差速环目标（归一化 cps） */
+    int32_t diff_meas_cps;      /* 差速环实际（归一化 cps） */
+    int16_t diff_out_pm;        /* 差速环输出（permille） */
+    float   yaw_error_deg;      /* 航向角环误差（°） */
+} app_balance_diag_t;
+```
+
+---
+
+## 7C. Stage 3.9 ｜ 圆弧运动演示 + 车体参数集中管理
+
+> 提交：`e3e7e50`（2026-05-24），变更 3 新文件 + 2 已有文件，+540/-3。
+
+### 7C.1 功能概述
+
+新增 `app_circle_demo` 子任务，支持平衡车在直立状态下执行**指定直径 + 速度的整圆轨迹运动**，一圈完成后自动停止。
+
+### 7C.2 新文件
+
+| 文件 | 行数 | 职责 |
+|------|------|------|
+| `template/app/app_circle_demo.h` | 111 | API 声明 + 编译期宏 + 诊断快照 |
+| `template/app/app_circle_demo.c` | 218 | 核心状态机：启动→运行→三重判停 |
+| `template/middle/robot_param.h` | 142 | 车体几何常数 + inline 运动学换算 |
+
+### 7C.3 串口触发
+
+| 命令 | 行为 |
+|------|------|
+| `c` / `circle` | 默认参数启动：直径 500 mm、速度 100 mm/s（倒退）、顺时针（俯视） |
+| `circle <diam_mm> <v_mm_s>` | 自定义直径与速度（正=前进，负=倒退） |
+| `cx` | 立即中止，运动指令归零 |
+
+### 7C.4 三重判停逻辑
+
+| 判据 | 条件 | 优先级 |
+|------|------|--------|
+| ① IMU 偏航积分 | `|gz_dps 累计| ≥ 360°` | **主判据** |
+| ② 编码器弧长 | `arc_mm ≥ circumference × 1.2`（备防 gz 漂移） | 备份 |
+| ③ 超时兜底 | `elapsed ≥ expected × 3`（最小 5 s） | 兜底 |
+
+### 7C.5 调度寄生
+
+`app_circle_demo_tick_20hz()` 在 `app_balance_run` 主循环的 20 Hz 分支中调用（速度环之后），激活时**覆盖** `cmd->target_speed_cps` 与 `cmd->target_dif_cps`。非激活时不做任何写入。
+
+### 7C.6 `robot_param.h` —— 车体参数集中管理
+
+**设计原则**：所有 mm 级物理量集中定义，消除散落各处的魔法数字；带 `#ifndef` 包裹支持工程级 `-D` 覆盖；带编译期 sanity check。
+
+| 参数 | 默认值 | 含义 |
+|------|--------|------|
+| `ROBOT_WHEEL_DIAMETER_MM` | 65 | 轮胎外径（含橡胶、实测） |
+| `ROBOT_WHEEL_BASE_MM` | 185 | 左右轮接地中心间距（实测） |
+| `ROBOT_WHEEL_CIRCUMFERENCE_MM_F` | π×D | 轮周长（浮点） |
+| `ROBOT_AVG_COUNTS_PER_MM_X100` | — | 每 mm 行程对应编码器计数 ×100（整数，无浮点） |
+
+**inline 运动学函数**：
+
+| 函数 | 输入 | 输出 |
+|------|------|------|
+| `robot_v_mm_s_to_avg_cps(v)` | 线速度 mm/s | 左右轮平均 counts/s |
+| `robot_arc_mm_from_avg_counts(cnt)` | 编码器累计差值 | 行驶弧长 mm |
+| `robot_omega_mrad_to_delta_cps(ω)` | 角速度 mrad/s | 左右轮差速 counts/s |
+
+圆弧运动计算链：`v_mm_s + diameter_mm` → `avg_cps` + `omega(mrad/s)` → `delta_cps` → 写入 `cmd.target_speed_cps / target_dif_cps` → 差速环闭环。
+
+### 7C.7 默认编译期宏
+
+```c
+#define APP_CIRCLE_DEFAULT_DIAMETER_MM    (500)
+#define APP_CIRCLE_DEFAULT_SPEED_MM_S     (-100)    // 负=倒退
+#define APP_CIRCLE_DEFAULT_CLOCKWISE      (1)
+#define APP_CIRCLE_ARC_OVERSHOOT_X100     (120)     // 弧长 1.2 倍判停
+#define APP_CIRCLE_TIMEOUT_FACTOR_X100    (300)     // 超时 3 倍兜底
+```
+
+---
+
+## 7D. Stage 3.10 ｜ 自校零总开关 + 栈修复 v2.0 + 差速环 RPM 量纲化
+
+> 涉及提交：`f527a3d`（2026-05-25，自校零开关）、`76d7d30`（2026-05-24，栈修复）、`f8dba1e`（2026-05-26，RPM 量纲化，已在 §7B.5 详述）。
+
+### 7D.1 上电自校零总开关（`f527a3d`）
+
+Stage 3.7 中 `app_balance_run()` 入口强制阻赛 ~1.5 s 采样 pitch 均值做 `pitch_offset`。这在调试期频繁烧录时每次都要等，且如果上电姿态不标准会学错零点。
+
+**新增**：
+
+```c
+#define APP_BALANCE_PITCH_AUTOZERO_ENABLE    (0)   // 默认关闭！
+#define APP_BALANCE_PITCH_OFFSET_DEFAULT_DEG  (-2.5f) // 硬编码回退值
+```
+
+- **`AUTOZERO_ENABLE=1`**：行为与之前一致，上电阻赛采样，失败回退到 `OFFSET_DEFAULT_DEG`
+- **`AUTOZERO_ENABLE=0`（默认）**：直接使用 `OFFSET_DEFAULT_DEG`，零等待启动
+
+`OFFSET_DEFAULT_DEG = -2.5°` 根据实车重心位置预先测量填入，可消除大部分静态偏角。
+
+### 7D.2 栈溢出修复 v2.0（`76d7d30`）
+
+> **背景**：Stage 1.6 首次实测曾遇到 printf `%f` 栈溢出 → 栈从 256 B 扩到 1 KB（见 [Stage1.5-IMU-Swap-MS901M.md §12.2](Stage1.5-IMU-Swap-MS901M.md)）。本次是 **第二次栈溢出**，根因不同。
+
+**现象**：在叠加了 K230 TEXT_CMD 处理 + 圆弧运动 + 差速环后的复杂调用链下，`app_safety` 的全局状态变量被随机改写 → 安全状态机异常跳变 → 电机突然断电或无法 arm。
+
+**根因**：`app_safety` 的状态变量（`s_state` / `s_fall_debounce` 等）是文件作用域 `static` 变量，放在 `.bss` 段。栈从高地址向下生长，`.bss` 从低地址向上——当栈峰值超过预留空间时，会**静默覆盖** `.bss` 中紧邻的全局变量，且无任何硬件异常触发。
+
+**修复**：
+
+| 措施 | 内容 |
+|------|------|
+| 栈扩容 | `startup_mspm0g350x_uvision.s`：`Stack_Size EQU 0x00000800`（**2 KB**） |
+| canary 检测 | `app_safety` 结构体首尾插入 `canary_start` / `canary_end` 魔数；`app_safety_get_state()` 每次校验，不一致则 `NVIC_SystemReset()` |
+| 结构体包装 | `app_safety` 的全局变量从散落 `static` 收编为单一结构体，确保 canary 覆盖全部敏感字段 |
+| 经验文档 | 新建 `docs/notes/LessonsLearned/StackOverflow-Printf-StateCorruption.md` |
+
+### 7D.3 差速环 RPM 量纲化
+
+详见 §7B.5，此处仅记录在修订历史中。
+
+---
+
 ## 8. 调试工具链
 
 ### 8.1 串口实时 CSV 数据流（lt_stream）
@@ -661,3 +863,4 @@ lt,<t_ms>,<pitch_deg>,<left_target_rpm>,<right_target_rpm>,<left_actual_rpm>,<ri
 | v0.5 | 2026-05-16 | + Stage 3.5 角速率 LPF + sigma-delta dither |
 | v0.6 | 2026-05-17 | + Stage 3.6 速度极性翻转 + 量纲归一化 + 文档清理；首版完整 TaskLog |
 | v0.7 | 2026-05-21 | + Stage 3.7 两级级联（`pid2`）+ 航向角环收敛；移除 `rp`/`tp`；更新验收清单与 §8.3 |
+| v0.8 | 2026-05-26 | + Stage 3.8 差速闭环（`03dc3a3`/`412800f`/`f8dba1e`）——新增 `diff_pid` + EMA 目标/测量滤波 + RPM 量纲化 + 航向→差速三级级联；+ Stage 3.9 圆弧运动演示（`e3e7e50`）——`app_circle_demo` + `robot_param.h` + 三重判停；+ Stage 3.10 自校零总开关（`f527a3d`）+ 栈修复 v2.0（`76d7d30`）——2 KB + canary + 结构体包装；补写 §7B/§7C/§7D 完整章节 |
