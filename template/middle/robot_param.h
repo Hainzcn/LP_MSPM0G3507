@@ -33,7 +33,7 @@ extern "C" {
 
 /** 轮胎外径（mm），含橡胶。 */
 #ifndef ROBOT_WHEEL_DIAMETER_MM
-#define ROBOT_WHEEL_DIAMETER_MM             (35)
+#define ROBOT_WHEEL_DIAMETER_MM             (65)
 #endif
 
 /** 两轮接地中心间距（mm）。 */

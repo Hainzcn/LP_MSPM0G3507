@@ -45,6 +45,8 @@ typedef struct {
     float   yaw_gz_integrated;  /* 源 1：gz 积分累积偏航（°） */
     float   speed_lpf_cps;      /* 平均速度反馈 EMA 低通（归一化 cps） */
     float   diff_speed_lpf_cps; /* 差速反馈 EMA 低通（归一化 cps） */
+    float   speed_target_lpf;   /* 速度目标 EMA 低通（归一化 cps） */
+    float   diff_target_lpf;    /* 差速目标 EMA 低通（归一化 cps） */
     float   pitch_offset_deg;   /* 直立零点 */
     int8_t  speed_sign;         /* +1 正常，-1 编码器方向反向 */
     int8_t  yaw_sign;           /* +1 正常，-1 yaw/gz 符号翻转 */
@@ -145,9 +147,11 @@ void app_balance_init(void)
     s_bal.target_tilt_deg   = 0.0f;
     s_bal.dif_pwm           = 0.0f;
     s_bal.yaw_dif_cps       = 0.0f;
-    s_bal.speed_lpf_cps     = 0.0f;
+    s_bal.speed_lpf_cps      = 0.0f;
     s_bal.diff_speed_lpf_cps = 0.0f;
-    s_bal.pitch_offset_deg  = APP_BALANCE_PITCH_OFFSET_DEFAULT_DEG;
+    s_bal.speed_target_lpf   = 0.0f;
+    s_bal.diff_target_lpf    = 0.0f;
+    s_bal.pitch_offset_deg   = APP_BALANCE_PITCH_OFFSET_DEFAULT_DEG;
     s_bal.speed_sign =
 #if APP_BALANCE_SPEED_INVERT
         -1;
@@ -188,6 +192,8 @@ void app_balance_reset(void)
     s_bal.dif_pwm            = 0.0f;
     s_bal.speed_lpf_cps      = 0.0f;
     s_bal.diff_speed_lpf_cps = 0.0f;
+    s_bal.speed_target_lpf   = 0.0f;
+    s_bal.diff_target_lpf    = 0.0f;
 }
 
 void app_balance_set_pitch_offset(float deg)
@@ -364,7 +370,16 @@ static void balance_step_speed(const app_balance_attitude_t *att,
                            (norm_cps - s_bal.speed_lpf_cps);
 
     /* ── 2) 差速反馈（差速环） ────────────────────────────────── */
-    int32_t dif_cps_raw = (fb.left_speed_cps - fb.right_speed_cps)
+    /* 左右轮编码器分辨率不同（68000 vs 34000 cnt/rev），原始 (L-R)
+     * 即使两轮等速也不为零。先将各轮 cps 归一化到相同的 avg_counts_per_mm
+     * 基准，再做差，使差值真正反映物理速度差。 */
+    int32_t left_norm_cps  = (int32_t)(((int64_t)fb.left_speed_cps
+                             * ROBOT_AVG_COUNTS_PER_MM_X100)
+                             / ROBOT_LEFT_COUNTS_PER_MM_X100);
+    int32_t right_norm_cps = (int32_t)(((int64_t)fb.right_speed_cps
+                             * ROBOT_AVG_COUNTS_PER_MM_X100)
+                             / ROBOT_RIGHT_COUNTS_PER_MM_X100);
+    int32_t dif_cps_raw = (left_norm_cps - right_norm_cps)
                           * (int32_t)s_bal.speed_sign;
     float norm_dif = (float)dif_cps_raw / (float)APP_BALANCE_SPEED_CPS_SCALE;
 
@@ -383,7 +398,13 @@ static void balance_step_speed(const app_balance_attitude_t *att,
     /* ── 4) 速度环 → target_tilt_deg ──────────────────────────── */
     if (accel_ok) {
         float target_norm = (float)cmd->target_speed_cps / (float)APP_BALANCE_SPEED_CPS_SCALE;
-        s_bal.speed_pid.target = target_norm;
+
+        /* 目标低通：阶跃指令平滑爬升，避免启动瞬间速度 PID 输出过大的
+         * target_tilt_deg 引起"微倾→后仰→再倾"顿挫。 */
+        s_bal.speed_target_lpf += APP_BALANCE_SPEED_TARGET_LPF_ALPHA
+                                  * (target_norm - s_bal.speed_target_lpf);
+
+        s_bal.speed_pid.target = s_bal.speed_target_lpf;
         s_bal.speed_pid.actual = s_bal.speed_lpf_cps;
         pid2_update(&s_bal.speed_pid);
         s_bal.target_tilt_deg = s_bal.speed_pid.out;
@@ -393,13 +414,18 @@ static void balance_step_speed(const app_balance_attitude_t *att,
     (void)yaw_angle_step(att, cmd);
 
     /* ── 6) 差速环 → dif_pwm ─────────────────────────────────── */
-    float diff_target;
+    float diff_target_raw;
     if (cmd->target_dif_cps != 0) {
-        diff_target = (float)cmd->target_dif_cps;
+        diff_target_raw = (float)cmd->target_dif_cps;
     } else {
-        diff_target = s_bal.yaw_dif_cps;
+        diff_target_raw = s_bal.yaw_dif_cps;
     }
-    s_bal.diff_pid.target = diff_target;
+
+    /* 差速目标低通：与速度目标同理，平滑阶跃转向指令 */
+    s_bal.diff_target_lpf += APP_BALANCE_DIFF_TARGET_LPF_ALPHA
+                             * (diff_target_raw - s_bal.diff_target_lpf);
+
+    s_bal.diff_pid.target = s_bal.diff_target_lpf;
     s_bal.diff_pid.actual = s_bal.diff_speed_lpf_cps;
     pid2_update(&s_bal.diff_pid);
     s_bal.dif_pwm = s_bal.diff_pid.out;
@@ -408,7 +434,7 @@ static void balance_step_speed(const app_balance_attitude_t *att,
     s_bal.diag.target_tilt_deg   = s_bal.target_tilt_deg;
     s_bal.diag.yaw_correction_pm = (int16_t)s_bal.yaw_dif_cps;
     s_bal.diag.speed_meas_cps    = (int32_t)s_bal.speed_lpf_cps;
-    s_bal.diag.diff_target_cps   = (int32_t)diff_target;
+    s_bal.diag.diff_target_cps   = (int32_t)s_bal.diff_target_lpf;
     s_bal.diag.diff_meas_cps     = (int32_t)s_bal.diff_speed_lpf_cps;
     s_bal.diag.diff_out_pm       = clamp_diff_pm(s_bal.dif_pwm);
 }

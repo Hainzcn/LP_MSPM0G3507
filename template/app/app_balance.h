@@ -147,6 +147,28 @@ extern "C" {
 #endif
 
 /**
+ * 速度 **目标** 低通滤波系数（0~1）。
+ *
+ * 阶跃速度指令经此 EMA 平滑后再进入速度 PID，避免 target_tilt_deg 瞬间跳变
+ * 导致的"微倾启动→后仰回退→再启动"顿挫现象。
+ * 参考 STM32 平衡车 demo 对速度目标做一阶低通的经典做法。
+ *   20 Hz × α=0.15 → 时间常数 ~330ms → 约 0.6s 爬升至 90% 目标值
+ */
+#ifndef APP_BALANCE_SPEED_TARGET_LPF_ALPHA
+#define APP_BALANCE_SPEED_TARGET_LPF_ALPHA      (0.10f)
+#endif
+
+/**
+ * 差速 **目标** 低通滤波系数（0~1）。
+ *
+ * 与速度目标同理，阶跃差速指令平滑后再进入差速 PID。
+ *   20 Hz × α=0.20 → 时间常数 ~250ms
+ */
+#ifndef APP_BALANCE_DIFF_TARGET_LPF_ALPHA
+#define APP_BALANCE_DIFF_TARGET_LPF_ALPHA       (0.20f)
+#endif
+
+/**
  * 俯仰角软件极性翻转。
  *
  * MS901M 前后方向装反时，前倾会被解析成后倾，平衡环反向输出。
@@ -192,7 +214,7 @@ extern "C" {
  *   根据实车重心位置预先测量后填入，可消除大部分静态偏角。
  */
 #ifndef APP_BALANCE_PITCH_OFFSET_DEFAULT_DEG
-#define APP_BALANCE_PITCH_OFFSET_DEFAULT_DEG    (0.8f)
+#define APP_BALANCE_PITCH_OFFSET_DEFAULT_DEG    (-2.5f)
 #endif
 
 /**
@@ -204,7 +226,7 @@ extern "C" {
  *   0        ：立即跳过校零，直接使用 APP_BALANCE_PITCH_OFFSET_DEFAULT_DEG。
  */
 #ifndef APP_BALANCE_PITCH_AUTOZERO_ENABLE
-#define APP_BALANCE_PITCH_AUTOZERO_ENABLE       (1)
+#define APP_BALANCE_PITCH_AUTOZERO_ENABLE       (0)
 #endif
 
 /**
