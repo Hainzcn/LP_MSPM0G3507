@@ -185,11 +185,31 @@ extern "C" {
 #endif
 
 /**
- * 上电静止采样时长（毫秒）。用于自动校准 pitch_offset_deg：
+ * 直立零点硬编码默认值（°）。
  *
- *   app_balance_run() 入口阻塞此段时间，连续对 MS901M pitch_deg 求平均后
- *   写入 pitch_offset_deg。期间电机不输出（PWM 维持 0）。
- *   设 0 跳过自动校零，沿用 init 时的初始值。
+ *   APP_BALANCE_PITCH_AUTOZERO_ENABLE=0 时直接作为 pitch_offset_deg 初始值；
+ *   APP_BALANCE_PITCH_AUTOZERO_ENABLE=1 时若自校零 FAILED 则回退至此值。
+ *   根据实车重心位置预先测量后填入，可消除大部分静态偏角。
+ */
+#ifndef APP_BALANCE_PITCH_OFFSET_DEFAULT_DEG
+#define APP_BALANCE_PITCH_OFFSET_DEFAULT_DEG    (0.8f)
+#endif
+
+/**
+ * 上电自动校零总开关（1=启用，0=禁用）。
+ *
+ *   1（默认）：app_balance_run() 入口阻塞 APP_BALANCE_PITCH_AUTOZERO_MS 毫秒，
+ *              对 MS901M pitch_deg 静止采样取均值写入 pitch_offset_deg。
+ *              期间电机 PWM 维持 0；上电姿态须为"标准直立 + 静止"。
+ *   0        ：立即跳过校零，直接使用 APP_BALANCE_PITCH_OFFSET_DEFAULT_DEG。
+ */
+#ifndef APP_BALANCE_PITCH_AUTOZERO_ENABLE
+#define APP_BALANCE_PITCH_AUTOZERO_ENABLE       (1)
+#endif
+
+/**
+ * 上电静止采样时长（毫秒）。仅在 APP_BALANCE_PITCH_AUTOZERO_ENABLE=1 时生效。
+ * 有效样本 < 20 则校零 FAILED，回退至 APP_BALANCE_PITCH_OFFSET_DEFAULT_DEG。
  *
  *   小车上电姿态必须为"标准直立 + 静止"，否则会把偏角学进零点。
  */

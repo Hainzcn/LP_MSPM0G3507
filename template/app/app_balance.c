@@ -147,7 +147,7 @@ void app_balance_init(void)
     s_bal.yaw_dif_cps       = 0.0f;
     s_bal.speed_lpf_cps     = 0.0f;
     s_bal.diff_speed_lpf_cps = 0.0f;
-    s_bal.pitch_offset_deg  = 0.8f;
+    s_bal.pitch_offset_deg  = APP_BALANCE_PITCH_OFFSET_DEFAULT_DEG;
     s_bal.speed_sign =
 #if APP_BALANCE_SPEED_INVERT
         -1;
@@ -484,15 +484,19 @@ static void balance_step_angle(const app_balance_attitude_t *att,
 
 /**
  * 上电静止采样自校零：阻塞 APP_BALANCE_PITCH_AUTOZERO_MS 毫秒，
- * 仅校准 pitch_offset_deg（新 2 级架构无角速度内环，无需 gyro bias 补偿）。
+ * 仅校准 pitch_offset_deg（2 级架构无角速度内环，无需 gyro bias 补偿）。
+ *
+ * APP_BALANCE_PITCH_AUTOZERO_ENABLE=0 时立即返回，使用硬编码默认值
+ * APP_BALANCE_PITCH_OFFSET_DEFAULT_DEG，不阻塞启动流程。
  *
  * 静止判据：|gy_dps| ≤ DEADBAND_DPS 且 |a_mag² - 1| ≤ 2×ACC_DEVIATION_G
- * 容错：有效样本 < 20 则沿用 init 默认值，日志打印 FAILED。
+ * 容错：有效样本 < 20 则沿用默认值，日志打印 FAILED。
  */
 static void auto_zero_pitch_offset(void)
 {
-#if APP_BALANCE_PITCH_AUTOZERO_MS == 0
-    (void)printf("[autocal] disabled; pitch_offset=%c%ld.%02lu deg\r\n",
+#if !APP_BALANCE_PITCH_AUTOZERO_ENABLE
+    (void)printf("[autocal] disabled (AUTOZERO_ENABLE=0); "
+                 "using hardcoded pitch_offset=%c%ld.%02lu deg\r\n",
                  BAL_F2_S(s_bal.pitch_offset_deg),
                  (long)BAL_F2_I(s_bal.pitch_offset_deg),
                  (unsigned long)BAL_F2_F(s_bal.pitch_offset_deg));
@@ -558,7 +562,7 @@ static void auto_zero_pitch_offset(void)
                      (unsigned long)n_rejected);
     } else {
         (void)printf("[autocal] FAILED n=%lu rejected=%lu; keep car still & power-cycle. "
-                     "Using default pitch_offset=%c%ld.%02lu deg\r\n",
+                     "Using hardcoded pitch_offset=%c%ld.%02lu deg\r\n",
                      (unsigned long)n_samples,
                      (unsigned long)n_rejected,
                      BAL_F2_S(s_bal.pitch_offset_deg),
