@@ -6,94 +6,101 @@
 
 ## 1. 安全管家的优先级决策逻辑 (`app_safety.c`)
 
-在 `app_safety_tick` 函数中，安全管家需要在每一次控制节拍（100Hz）时，综合各方信息决定当前小车处于什么安全级别。这里的代码写得非常有层次感。
+在 `app_safety_tick` 函数中，安全管家需要在每一次控制节拍（100Hz）时，综合各方信息决定当前小车处于什么安全级别。
 
-### 1.1 动作拦截与“按需操作硬件” (`transition` 函数)
-改变状态不仅是改个变量名，还需要让电机做出物理反应（比如急刹）。
-为了防止每 10 毫秒都重复给电机发一次“急刹”指令（这会干扰正常的底层逻辑），代码里写了一个 `transition(app_safety_state_t next)` 包装函数：
-```c
-if (next == s_state) { return; } // 如果状态没变，直接退出
-s_state = next;
-switch (next) {
-    case APP_SAFETY_FALLEN:
-        hw_emergency(APP_SAFETY_FALL_BRAKE_MS); // 物理刹车并断电
-        break;
-    // ...
-}
-```
-这保证了硬件动作只在**状态发生跳变的那一瞬间**执行一次。
+### 1.1 动作拦截与"按需操作硬件" (`transition` 函数)
+改变状态不仅是改个变量名，还需要让电机做出物理反应。为了防止每 10 毫秒都重复给电机发一次"急刹"指令，代码里写了一个 `transition(app_safety_state_t next)` 包装函数——只在**状态发生跳变的那一瞬间**执行一次硬件动作。
 
 ### 1.2 多事件优先级判定 (if-else 瀑布流)
-小车可能同时面临多个情况：比如它现在是解除武装状态（DISARMED），同时电池又没电了（LOW_STOP），同时还倒在地板上（FALLEN）。听谁的？
-代码通过一个精心设计的 `if - else if` 瀑布流解决了优先级冲突：
+小车可能同时面临多个情况：解除武装 + 电池没电 + 倒在地板上。听谁的？代码通过精心设计的 `if - else if` 瀑布流解决优先级：**LOW_STOP > FALLEN > LOW_WARN > ARMED**。
 
-1. **最高优先级：电池致命低压 (`LOW_STOP`)**
-   只要电压触底，不管小车在干嘛，立刻强制进入 `LOW_BAT_STOP`。
-2. **状态回滞保护**
-   如果上一拍是 `LOW_STOP`，但电压稍微弹回了一点（到了 `WARN` 级别），不能马上让它去跑（防止电压在临界点抖动导致车子抽搐），而是把它降级到 `LOW_BAT_WARN` 待命，等人工确认安全后再按键启动。
-3. **人工待机保护 (`DISARMED`)**
-   如果在人工待机时摔倒了，系统会**忽略摔倒事件**（因为车停在地上本来就是倒着的，没必要报警）。
-4. **跌倒保护 (`FALLEN`)**
-   正常行驶时，一旦计算出的 `pitch`（俯仰角绝对值）超过了 `APP_SAFETY_FALL_PITCH_DEG`（例如 60 度），立刻判定跌倒，切断动力。
+### 1.3 栈溢出防护 (canary)
+安全管家的状态变量包裹在 `app_safety_block_t` 结构体中，首尾各有 `canary_start` / `canary_end` 魔数。每次读取状态时校验，若 canary 损坏则自动复位到 `DISARMED` 并打印 `[safety] CORRUPTION`。这是 2026-05-24 第二次栈溢出事故后加入的防护。
 
 ---
 
-## 2. 平衡大脑的调度与串级执行 (`app_balance.c`)
+## 2. 平衡大脑的多级 PID 调度 (`app_balance.c`)
 
 这里是单片机算力的集中消耗地，它需要精准的时间控制。
 
-### 2.1 串级 PID 的代码连接
+### 2.1 四级 PID 的代码连接
 
-当前实现拆为 `balance_step_speed()`（20 Hz）与 `balance_step_angle()`（100 Hz），控制器为 `pid2_t`：
+当前实现包含四路 `pid2_t` 控制器，按以下链路组织：
 
 ```c
-// 20 Hz：速度外环 → target_tilt_deg
-s_bal.speed_pid.target = target_norm;
-s_bal.speed_pid.actual = speed_lpf_cps;   /* 归一化 + EMA 低通 */
+// === 20 Hz：速度外环 → target_tilt_deg ===
+s_bal.speed_pid.target = target_norm;         // 归一化速度目标（含 EMA 低通）
+s_bal.speed_pid.actual = speed_lpf_cps;       // EMA 滤波后的实测速度
 pid2_update(&s_bal.speed_pid);
 s_bal.target_tilt_deg = s_bal.speed_pid.out;
 
-// 20 Hz：航向角环 → yaw_corr_pm（见 yaw_angle_step / pid2_update）
-(void)yaw_angle_step(att, cmd);
+// === 20 Hz：航向角环 → yaw_dif_cps（差速环目标） ===
+s_bal.yaw_pid.target = 0.0f;                  // 锁 yaw=0
+s_bal.yaw_pid.actual = yaw_measured;          // gz积分 或 EKF yaw_deg
+pid2_update(&s_bal.yaw_pid);
+int32_t yaw_dif_cps = clampf(s_bal.yaw_pid.out, YAW_MAX_DIF_CPS);
 
-// 100 Hz：角度环 → ave_pwm
+// === 20 Hz：圆运动覆盖（若激活） ===
+app_circle_demo_tick_20hz(&snap, &fb, cmd);
+// 激活时 cmd->target_speed_cps / target_dif_cps 被圆运动覆盖
+
+// === 20 Hz：差速环 → diff_out_pm ===
+int32_t dif_target = (cmd->target_dif_cps != 0) ? cmd->target_dif_cps : yaw_dif_cps;
+s_bal.diff_pid.target = dif_target * DIFF_NORM_TO_RPM;  // cps → RPM
+s_bal.diff_pid.actual = diff_meas_rpm;                   // EMA 滤波后的 RPM
+pid2_update(&s_bal.diff_pid);
+
+// === 100 Hz：角度环 → ave_pwm ===
 s_bal.angle_pid.target = s_bal.target_tilt_deg;
 s_bal.angle_pid.actual = pitch_meas;
 pid2_update(&s_bal.angle_pid);
 float ave_pwm = s_bal.angle_pid.out;
 
-// 航向差分合成
-int16_t left_pm  = clamp_pwm_pm(ave_pwm + yaw_corr_pm * 0.5f);
-int16_t right_pm = clamp_pwm_pm(ave_pwm - yaw_corr_pm * 0.5f);
+// === 最终合成 ===
+int16_t left_pm  = clamp_pwm_pm(ave_pwm + diff_out_pm);
+int16_t right_pm = clamp_pwm_pm(ave_pwm - diff_out_pm);
 bsp_motor_set_output(left_pm, right_pm);
 ```
 
-外环输出 `target_tilt_deg` 直接成为角度环目标；角度环输出与航向差分叠加后驱动电机。详细调参见 [PIDTuningGuide.md](PIDTuningGuide.md)。
+**关键设计点**：
+- 角度环在 100 Hz 消费最新的 `target_tilt_deg`（由 20 Hz 速度环产生），"一次计算、一次消费"
+- 航向环输出不再是直接 PWM，而是差速环的**速度目标**——差速环以 RPM 闭环补偿 PWM→速度的时变映射
+- 圆运动 (`app_circle_demo_tick`) 寄生在 20 Hz 分支，激活时覆盖 `cmd` 字段
+- 差速环目标优先使用 K230/圆运动的 `target_dif_cps`，若无外部指令则使用航向环输出
 
-### 2.3 `main.c` 里的“启动保险”
-在 `app_balance_run` 的 1Hz 日志打印里，有一段看起来很复杂的 `printf`：
+### 2.2 EMA 目标低通——防止阶跃振荡
+
+速度目标和差速目标在进入 PID 前经过一阶 EMA 低通：
+
 ```c
-BAL_F2_S(diag.pitch_meas_deg), 
-(long)BAL_F2_I(diag.pitch_meas_deg), 
-(unsigned long)BAL_F2_F(diag.pitch_meas_deg)
-```
-- **为什么不直接用 `%f` 打印浮点数？**
-  在单片机上（特别是 M0+ 内核），C 语言标准库的 `printf("%f")` 会消耗巨大的栈内存（动辄几百字节），极易导致栈溢出（HardFault 崩溃），而且会引入庞大的浮点格式化库代码。
-- **怎么解决的？**
-  作者在文件顶部写了几个宏（`BAL_F2_X100`, `BAL_F2_I` 等）。原理是：把浮点数先乘以 100 变成整数（比如 `15.34` 变成 `1534`），然后用除法 `/ 100` 取整数部分（`15`），用取余 `% 100` 取小数部分（`34`）。最后在 `printf` 里用 `%d.%02d` 的形式把它们当做普通整数拼起来。
-  这属于嵌入式开发里极为经典的**“去浮点化”**内存优化技巧。
+// 速度目标平滑（防阶跃→倾角突变→"微倾启动→后仰回退→再启动"顿挫）
+s_bal.speed_target_lpf += SPEED_TARGET_LPF_ALPHA * (raw_target - s_bal.speed_target_lpf);
+// α=0.10 @20Hz → τ≈330ms → 约0.6s爬升至90%
 
-### 2.3 `main.c` 里的“启动保险”
+// 差速目标平滑
+s_bal.diff_target_lpf += DIFF_TARGET_LPF_ALPHA * (raw_target - s_bal.diff_target_lpf);
+// α=0.20 @20Hz → τ≈250ms
+```
+
+### 2.3 `main.c` 里的"启动保险"
 如果在代码刚烧录进去、车还没调好时，开机直接进平衡模式是非常危险的。
 所以在 `main.c` 里有这样一段逻辑：
 1. 所有的 PID 参数 (`Kp`, `Ki`, `Kd`) 在初始化时**全部被默认设为了 0**。这意味着即使进了平衡循环，车子也是软绵绵的，不会发疯。
-2. 只有你在测试完电机 (`app_motor_demo_run`) 之后，主动调用了 `app_balance_set_balance_gains(...)` 给定参数，车子才会真正获得站立的力量。
+2. 只有你在测试完电机之后，通过串口注入增益（如 `bp 5000 0 5000 80`），车子才会真正获得站立的力量。
+
+### 2.4 日志打印的去浮点化技巧
+在 1 Hz 日志打印里，不会直接写 `printf("%f", pitch)`。而是用宏把浮点数 ×100 变成整数，再用 `%d.%02d` 拼接。
+
+**为什么不直接用 `%f`？** Cortex-M0+ 没有 FPU，`printf("%f")` 单次栈帧 200~300 B，极易栈溢出（HardFault）。这是嵌入式开发中极为经典的**"去浮点化"**内存优化技巧。栈已扩至 **2 KB**（经历了两次栈溢出事故后）。
 
 ---
 
 **总结：**
-应用层的代码充满了“工程智慧”。它不仅仅是跑通算法，更多的是在考虑：
+应用层的代码充满了"工程智慧"。它不仅仅是跑通算法，更多的是在考虑：
 - 如何不让 CPU 被日志打印卡死（去浮点化）。
 - 如何让物理动作在状态切换时不冗余执行（状态回滞和拦截）。
-- 如何处理错综复杂的极端情况（安全状态机瀑布流）。
-读懂了这层代码，你基本上就掌握了编写一个稳定可靠的小型机器人控制系统的全套“心法”。
+- 如何处理错综复杂的极端情况（安全状态机瀑布流 + canary 防护）。
+- 如何用多级 PID 链补偿电池电压/地面摩擦的时变性（航向→差速→PWM）。
+- 如何避免阶跃指令引发顿挫（EMA 目标低通）。
+
+读懂了这层代码，你基本上就掌握了编写一个稳定可靠的小型机器人控制系统的全套"心法"。
