@@ -1114,8 +1114,19 @@ static void k230_drain_and_dispatch(app_balance_motion_cmd_t *cmd, uint32_t now_
             if (s_k230_parser.len == sizeof(k230_motion_cmd_t)) {
                 k230_motion_cmd_t mc;
                 memcpy(&mc, s_k230_parser.payload, sizeof(mc));
-                cmd->target_speed_cps = (int32_t)mc.target_v;
-                cmd->target_dif_cps   = (int32_t)mc.target_omega;
+                /* K230 发送的 target_v 已除以 APP_BALANCE_SPEED_CPS_SCALE（归一化），
+                 * 而 balance_step_speed 会再除一次 SCALE；这里乘回来对齐 raw CPS，
+                 * 与 circle_demo 等内部路径的量纲保持一致。 */
+                cmd->target_speed_cps = (int32_t)mc.target_v
+                                        * (int32_t)APP_BALANCE_SPEED_CPS_SCALE;
+                /* K230 发送 target_omega 单位为 mrad/s（plan §7.1）；MCU 差速环
+                 * 消费归一化 cps，与 circle_demo 相同走 robot_omega_mrad_to_delta_cps。 */
+                if (mc.target_omega != 0) {
+                    int32_t dif_raw = robot_omega_mrad_to_delta_cps((int32_t)mc.target_omega);
+                    cmd->target_dif_cps = dif_raw / (int32_t)APP_BALANCE_SPEED_CPS_SCALE;
+                } else {
+                    cmd->target_dif_cps = 0;
+                }
             }
             break;
 
