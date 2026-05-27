@@ -16,7 +16,7 @@
 #include <stdio.h>
 
 #define APP_MOTOR_DEMO_MAX_RPM                     (300u)
-#define APP_MOTOR_DEMO_DEFAULT_RPM                 (300u)
+#define APP_MOTOR_DEMO_DEFAULT_RPM                 (0u)
 #define APP_MOTOR_DEMO_BRAKE_MS                    (120u)
 #define APP_MOTOR_DEMO_RPM_STEP                    (20u)
 
