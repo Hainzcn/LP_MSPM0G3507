@@ -174,7 +174,7 @@ class MS901MParser:
 
 | 方向 | CMD | 名称 | 频率 | PAYLOAD |
 |------|-----|------|------|---------|
-| MCU→K230 | 0x01 | VEHICLE_STATUS | 20 Hz | `avg_cps:i32 + safety_state:u8 + bat_mv:u16` (7 B) |
+| MCU→K230 | 0x01 | VEHICLE_STATUS | 20 Hz | `avg_cps:i32 + safety_state:u8 + bat_mv:u16` (7 B) **或** + `track_phase:u8 + lap:u8` (9 B，Stage 3.11+) |
 | MCU→K230 | 0x02 | HEARTBEAT_MCU | 1 Hz | `uptime_ms:u32` (4 B) |
 | MCU→K230 | 0x22 | TEXT_RESP | 按需 + 1 Hz | ASCII 文本，≤128 B |
 | K230→MCU | 0x11 | MOTION_CMD | 20~50 Hz | `target_v:i16 + target_omega:i16 + mode:u8` (5 B) |
@@ -291,19 +291,28 @@ class MCUFrameParser:
 
 #### VEHICLE_STATUS (CMD=0x01, 20 Hz)
 
-```python
-import struct
+**旧固件 7 B**（`'<iBH'`）：
 
+```python
+avg_cps, safety_state, bat_mv = struct.unpack_from('<iBH', payload, 0)
+```
+
+**新固件 9 B**（`'<iBHBB'`，Stage 3.11 赛道模式，向后兼容）：
+
+```python
 def parse_vehicle_status(payload: bytes):
     """
-    returns: (avg_cps: int, safety_state: int, bat_mv: int)
-      avg_cps      -- 左右轮平均速度 counts/s（有符号，正=前进）
-      safety_state -- 0=DISARMED, 1=ARMED, 2=BAT_WARN, 3=FALLEN, 4=BAT_STOP
-      bat_mv       -- 电池电压 mV
+    returns: (avg_cps, safety_state, bat_mv, track_phase, lap)
+      track_phase -- 见 TRACK_PHASE_*（仅 TRACE=3 时 K230 应下发循线驱动）
+      lap         -- 当前圈号（1 起；0=未开始）
     """
+    if len(payload) >= 9:
+        return struct.unpack_from('<iBHBB', payload, 0)
     avg_cps, safety_state, bat_mv = struct.unpack_from('<iBH', payload, 0)
-    return avg_cps, safety_state, bat_mv
+    return avg_cps, safety_state, bat_mv, 0, 0   # TRACK_PHASE_IDLE
 ```
+
+**K230 阶段闸门**（`config.TRACK_FOLLOW_MCU_PHASE=True` 默认）：主循环每帧 `controller.follow_mcu_phase(vehicle_track_phase == TRACK_PHASE_TRACE)`；非 TRACE 阶段控制律仍可算，但 `mode=idle` → MOTION_CMD `(0,0)`。详见 [K230 phase_G_track_mode.md](../../../K230/docs/TaskLog/phase_G_track_mode.md)。
 
 #### HEARTBEAT_MCU (CMD=0x02, 1 Hz)
 
@@ -661,3 +670,4 @@ mcu_bad=lenX/t1Y/t2Z/crcW last=reason:Lxx:Cyy:rx/calc
 | 2026-05-17 | v0.1 | 初版：IMU 解析、命令帧协议、集成示例与调试方法 |
 | 2026-05-21 | v0.2 | 对齐 Stage 3.7：`pid_id` 0/2/3；`target_omega` → `target_yaw_pm` |
 | 2026-05-24 | v0.3 | 合并为协议唯一真源；新增 TEXT_CMD(0x21)/TEXT_RESP(0x22)；MAX_PAYLOAD 32→128；远程调试 WiFi AP+TCP 桥接说明；移植联调坏帧判读 |
+| 2026-05-30 | v0.4 | **赛道模式流程对齐**：`VEHICLE_STATUS` 9 B 扩展 + `TRACK_PHASE_*` 常量；`McuLink.vehicle_track_phase/lap`；`TrackingController.follow_mcu_phase()`；`TRACK_FOLLOW_MCU_PHASE` 配置项。详见 [phase_G_track_mode.md](../../../K230/docs/TaskLog/phase_G_track_mode.md) |

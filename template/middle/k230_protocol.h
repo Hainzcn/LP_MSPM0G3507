@@ -12,6 +12,7 @@
  *
  *   MCU → K230（阻塞 TX，~240 B/s）：
  *     VEHICLE_STATUS  0x01   20 Hz   avg_cps(i32) + safety_state(u8) + bat_mv(u16)
+ *                                    + track_phase(u8) + lap(u8)
  *     HEARTBEAT_MCU   0x02    1 Hz   uptime_ms(u32)
  *     TEXT_RESP        0x22   按需    ASCII 文本响应（远程调试回传）
  *
@@ -67,11 +68,16 @@ extern "C" {
 /* 业务 Payload 结构体                                                        */
 /* ======================================================================== */
 
-/** MCU→K230：车辆状态帧 (CMD 0x01)，20 Hz */
+/** MCU→K230：车辆状态帧 (CMD 0x01)，20 Hz
+ *
+ * 注：track_phase / lap 为后续追加字段。K230 侧按 payload 长度兼容解析
+ * （旧固件 7 字节无这两字段，新固件 9 字节带）。 */
 typedef struct __attribute__((packed)) {
     int32_t  avg_cps;           /* 左右轮平均速度 counts/s */
     uint8_t  safety_state;      /* app_safety 状态枚举 */
     uint16_t bat_mv;            /* 电池电压 mV */
+    uint8_t  track_phase;       /* app_track 阶段枚举（见 app_track.h app_track_phase_t） */
+    uint8_t  lap;               /* 赛道当前圈号（1 起；0=未开始/未启用） */
 } k230_vehicle_status_t;
 
 /** MCU→K230 / K230→MCU：心跳帧 (CMD 0x02 / 0x12)，1 Hz */

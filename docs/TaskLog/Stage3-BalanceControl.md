@@ -22,7 +22,9 @@
 >
 > **🔧 Stage 3.10 自校零开关 + 栈修复 v2.0 + RPM 量纲化（2026-05-24~26）**：新增 `APP_BALANCE_PITCH_AUTOZERO_ENABLE` 总开关、`PITCH_OFFSET_DEFAULT_DEG` 硬编码回退值。栈从 1 KB 扩至 2 KB + canary 防护（`76d7d30`）。差速环量纲由归一化 cps 切换为 RPM。详见 **§7D**。
 >
-> 文档定位：阶段 3 自 2026-05-11 起演进；**当前装车控制架构以 Stage 3.10 为准**。Stage 3.1~3.6 记录仍保留供对照，其中 §5 四级级联、`rp` 角速度内环、50 Hz 航向调度等描述**已被 Stage 3.7 取代**。
+> **🏁 Stage 3.11 赛道模式 + 自立双 PID（2026-05-30）**：新增 `app_track` 主控状态机（自立→循线→判圈→暂停→停车），MCU 为总指挥；自立段专用 rise PID（猛起→阻尼减速→稳定），摆稳后切运动 PID；`VEHICLE_STATUS` 上报 `track_phase/lap` 与 K230 阶段闸门对齐；自检 `ARMED` 后默认等 K230 在线再起立。详见 **§7E**。
+>
+> 文档定位：阶段 3 自 2026-05-11 起演进；**当前装车控制架构以 Stage 3.11 为准**（含赛道模式）。Stage 3.1~3.6 记录仍保留供对照，其中 §5 四级级联、`rp` 角速度内环、50 Hz 航向调度等描述**已被 Stage 3.7 取代**。
 >
 > 关联文档：
 >
@@ -47,6 +49,7 @@
 | — | **Stage 3.8** 差速闭环 | **完成** —— 航向角环 → `diff_pid` → PWM 三级级联，串口 `dp`，EMA 目标/测量双滤波 |
 | — | **Stage 3.9** 圆弧运动演示 | **完成** —— `app_circle_demo` + `robot_param.h`，串口 `c`/`circle`/`cx` |
 | — | **Stage 3.10** 自校零开关 + 栈修复 | **完成** —— `AUTOZERO_ENABLE` 默认关闭；栈 2 KB + canary |
+| — | **Stage 3.11** 赛道模式 + 自立双 PID | **代码完成，联调中** —— `app_track` 状态机 + rise/motion 双增益 + K230 阶段闸门 |
 
 > **架构演进路线图**（各版本里程碑）：
 >
@@ -61,7 +64,8 @@
 > Stage 3.7 (adc5344)           两级级联 + pid2 + 航向角环             移除 rp/tp
 > Stage 3.8 (03dc3a3/412800f)   + 差速闭环 + EMA 目标/测量滤波         航向环→diff_pid 级联
 > Stage 3.9 (e3e7e50)           + 圆弧运动演示（circle demo）          三重判停 + robot_param
-> Stage 3.10 (f527a3d/f8dba1e)  + 自校零开关 + 差速环 RPM 量纲化       当前架构
+> Stage 3.10 (f527a3d/f8dba1e)  + 自校零开关 + 差速环 RPM 量纲化
+> Stage 3.11 (2026-05-30)       + 赛道模式 app_track + 自立 rise PID      当前架构
 > ```
 
 ---
@@ -743,6 +747,97 @@ Stage 3.7 中 `app_balance_run()` 入口强制阻赛 ~1.5 s 采样 pitch 均值�
 
 ---
 
+## 7E. Stage 3.11 ｜ 赛道模式 + 自立双 PID（2026-05-30）
+
+> **目标**（Overview 发挥项）：上电自检通过后完成自立 → K230 循线 → 满圈暂停 5 s → 第二圈 → 稳定停车；MCU 自主判圈，双端流程对齐防冲突。
+
+### 7E.1 架构：MCU 总指挥 + K230 阶段闸门
+
+```
+SELF_STAND → STAND_SETTLE → TRACE(lap1) → BRAKE → PAUSE(5s)
+           → TRACE(lap2) → FINAL_BRAKE → DONE
+```
+
+| 角色 | 职责 |
+|------|------|
+| **MCU `app_track`** | 阶段状态机、自立/刹车速度包络、偏航+里程判圈、满圈时序 |
+| **MCU `app_balance`** | 100 Hz 角度环 + 20 Hz 速度/差速/航向；`rise_override` 冻结外环 |
+| **K230** | 视觉循线控制律照常算；**仅** MCU 上报 `track_phase==TRACE` 时下发 `(v,ω)` |
+
+协议：`k230_vehicle_status_t` 由 7 B 扩至 **9 B**（追加 `track_phase:u8 + lap:u8`），K230 按 payload 长度向后兼容。详见 [Stage4-K230-Communication.md §7](Stage4-K230-Communication.md)、[Stage4-K230-Side.md §4.1](Stage4-K230-Side.md)。
+
+### 7E.2 自立：专用 rise PID（非设定点斜坡）
+
+**问题背景**：formula.md 实测运动 PID（`bp 70/2/0/20` 等）在 30~40° 起始倾角下若直接把 setpoint 设 0°，角度环积分在 <1 s 内 windup 到 `i_max` → PWM ±1000 饱和 → 电机疯转、encISR 雪崩、K230 EMI 掉线。首版"设定点线性斜坡"也无法实现真正的"猛起摆起"，只会撑着支架往前蹭。
+
+**方案**：自立与运动 **两套角度环增益**，通过 `app_balance_set_rise_override()` 切换：
+
+| 阶段 | 角度环 | 外环 | setpoint |
+|------|--------|------|----------|
+| SELF_STAND / STAND_SETTLE | **rise PID**（`APP_TRACK_RISE_*`） | 速度环在线，`target_speed=0` 防漂移 | 固定 **0°**（靠 PID 动力学摆起） |
+| TRACE 及以后 | **motion PID**（`TRK_GAIN_*` = formula 实测） | 正常级联 | 速度环输出 tilt |
+
+rise 增益设计要点（`app_track.h`）：
+
+- `kp` 大 → 起摆冲量（猛起）
+- **`ki = 0`** → 自立段持续大误差，必须关积分防 windup
+- `kd` → 临近直立阻尼（"减速-稳定"），**首要整定对象**
+- 全输出权限，不额外限幅
+
+默认起点：`RISE_KP=50, RISE_KI=0, RISE_KD=8, RISE_OFS=20`；摆起窗口 `RISE_MS=1000`；稳定判据 `|pitch|<10°` 且 `|gz|<40°/s` 持续 `SETTLE_MS=400`。
+
+### 7E.3 循线加速 / 减速刹车（速度包络）
+
+在 `app_track_tick_20hz` 内对 **下发** `target_speed_cps` 做 `rate_limit`：
+
+- **TRACE 进入/恢复**：`ACCEL_CPS_PER_TICK=400`（20 Hz 下约 0.6 s 爬满）
+- **BRAKE / FINAL_BRAKE**：`DECEL_CPS_PER_TICK=800` 拉到 0；`|avg_cps|<STOP_CPS` 持续 `STOP_SETTLE_MS` 判停稳
+- **不用** `app_safety` 的 `brake_pulse`（会掉平衡）
+
+### 7E.4 判圈（MCU 自主）
+
+复用 `app_circle_demo` 手法 + `robot_param.h`：
+
+- 每拍 `yaw_accum += gz_dps × dt`
+- `arc_mm = robot_arc_mm_from_avg_counts(Δavg_count)`
+- 满圈：`|yaw|≥360°` **且** `arc≥LAP_LENGTH_MM×60%`（默认 `LAP_LENGTH_MM=2500`）；`LAP_TIMEOUT_MS=60s` 兜底
+
+### 7E.5 冷上电时序：等 K230 再起立
+
+**现象**：MCU 自检 ~5 s 进入 `ARMED` 远早于 K230 启动（~10 s）。过早 `app_track_start()` → 编码器浮空噪声 + IMU 未收敛 → 疯冲。
+
+**修复**（`app_track.h` / `app_balance_run`）：
+
+```c
+APP_TRACK_AUTOSTART              = 1   /* 自检 ARMED 后自动启动 */
+APP_TRACK_AUTOSTART_WAIT_K230    = 1   /* 默认等 K230 在线 */
+APP_TRACK_AUTOSTART_K230_WAIT_MS = 15000u
+```
+
+逻辑：首次观测 `APP_SAFETY_ARMED` 起计时；`s_k230_online==true` **或** 超时后才 `app_track_start()`。等待期间 PID 增益仍为 0、电机不驱动。
+
+### 7E.6 新增 / 改动文件
+
+| 文件 | 变更 |
+|------|------|
+| `template/app/app_track.{c,h}` | **新建** — 状态机 + rise/motion 增益 + 包络 + 判圈 |
+| `template/app/app_balance.{c,h}` | `set_rise_override()` / `get_pitch_meas()`；20 Hz 调 `app_track_tick_20hz`；`trk`/`tx` 命令；1 Hz `[hb] track=...` |
+| `template/middle/k230_protocol.h` | `k230_vehicle_status_t` +2 字段 |
+| K230 侧 | 见 [K230/docs/TaskLog/phase_G_track_mode.md](../../../K230/docs/TaskLog/phase_G_track_mode.md) |
+
+### 7E.7 验收清单（赛道模式）
+
+| 项 | 通过条件 | 状态 |
+|---|---------|------|
+| 冷上电不自立疯冲 | K230 未亮屏前心跳无 `[track] start`；或 `[track] autostart: K230 online` 后再起 | [ ] |
+| 自立摆起 | 30~40° 支架姿态 → 1 s 内摆近直立，无持续 ±1000 PWM 饱和 | [ ] |
+| K230 阶段对齐 | 非 TRACE 阶段 K230 OSD `CTRL:idle`；TRACE 时 `CTRL:TRACE` | [ ] |
+| 满圈暂停 | lap1 满圈 → 停稳 → 直立 5 s → lap2 | [ ] |
+| 第二圈结束 | `track_phase=DONE`，保持直立 | [ ] |
+| 远程调试 | TEXT_CMD `trk` / `tx` 可启停 | [ ] |
+
+---
+
 ## 8. 调试工具链
 
 ### 8.1 串口实时 CSV 数据流（lt_stream）
@@ -792,7 +887,8 @@ lt,<t_ms>,<pitch_deg>,<left_target_rpm>,<right_target_rpm>,<left_actual_rpm>,<ri
 | 文件 | 主要变更 |
 |------|---------|
 | `template/app/app_balance.h` | Stage 3.7：两级 API + `pid2_t` + 航向角环；编译期可配宏（周期、LPF、极性、量纲缩放） |
-| `template/app/app_balance.c` | 状态机 + 三路 `pid2` + 多速率调度 + 串口命令 + lt_stream + K230 帧分发 |
+| `template/app/app_balance.c` | 状态机 + 三路 `pid2` + 多速率调度 + 串口命令 + lt_stream + K230 帧分发 + **Stage 3.11** `app_track` 集成 / `rise_override` |
+| `template/app/app_track.{c,h}` | **Stage 3.11 新建** — 赛道主控状态机 + rise/motion 双增益 + 判圈 + 速度包络 |
 | `template/middle/pid.{c,h}` | 保留 `pid_t`；新增 `pid2_t` / `pid2_update()` |
 | `template/app/app_safety.{c,h}` | 保持 Stage 2 不变；200 Hz 角速度环内集成为 `app_safety_tick()` |
 | `template/hardware/bsp_motor.h` | 双门槛死区（静/动摩擦 8 宏）+ sigma-delta dither + 右路正转补偿 + 运行时开关 API |
@@ -849,6 +945,8 @@ lt,<t_ms>,<pitch_deg>,<left_target_rpm>,<right_target_rpm>,<left_actual_rpm>,<ri
 | 4 | EKF 模式（源 0）的 ±180° 跳变在磁场干扰时可能触发短暂反向输出 | **已规避** | 默认使用源 1（陀螺积分），编译期可切 |
 | 5 | XDS-UART 在 CSV 流 + 1 Hz 日志双开时偶有冲突 | **不阻塞** | CSV 流仅调试期用，装车后关闭 |
 | 6 | K230 `MOTION_CMD.target_omega` → `target_yaw_pm`；非 0 时航向环暂停，主动转向协调层待实现 | **部分完成** | 见 Stage 4 TaskLog |
+| 7 | 赛道模式自立 `RISE_KD` / 判圈 `LAP_LENGTH_MM` 待上车标定 | **整定中** | 见 §7E.2 / §7E.4 |
+| 8 | 冷上电 K230 等待超时（15 s）后仍无 K230 时自立可完成、循线需 K230 | **已知** | `APP_TRACK_AUTOSTART_K230_WAIT_MS` |
 
 ---
 
@@ -864,3 +962,4 @@ lt,<t_ms>,<pitch_deg>,<left_target_rpm>,<right_target_rpm>,<left_actual_rpm>,<ri
 | v0.6 | 2026-05-17 | + Stage 3.6 速度极性翻转 + 量纲归一化 + 文档清理；首版完整 TaskLog |
 | v0.7 | 2026-05-21 | + Stage 3.7 两级级联（`pid2`）+ 航向角环收敛；移除 `rp`/`tp`；更新验收清单与 §8.3 |
 | v0.8 | 2026-05-26 | + Stage 3.8 差速闭环（`03dc3a3`/`412800f`/`f8dba1e`）——新增 `diff_pid` + EMA 目标/测量滤波 + RPM 量纲化 + 航向→差速三级级联；+ Stage 3.9 圆弧运动演示（`e3e7e50`）——`app_circle_demo` + `robot_param.h` + 三重判停；+ Stage 3.10 自校零总开关（`f527a3d`）+ 栈修复 v2.0（`76d7d30`）——2 KB + canary + 结构体包装；补写 §7B/§7C/§7D 完整章节 |
+| v0.9 | 2026-05-30 | + Stage 3.11 赛道模式——`app_track` 状态机 + rise/motion 双 PID + 速度包络判圈 + K230 在线等待自启动；`VEHICLE_STATUS` 扩展 `track_phase/lap`；§7E 完整章节 |

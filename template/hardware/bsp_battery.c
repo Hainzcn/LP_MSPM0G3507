@@ -3,7 +3,7 @@
  * @brief   电池电压采样实现，详见 bsp_battery.h。
  *
  * 设计要点：
- *   ─ 两阶段低频采样：自检快照（t = BOOT_SAMPLE_MS，单次）+ 业务周期（UPDATE_PERIOD_MS）；
+ *   ─ 两阶段采样：上电预热（自适应轮询直到读值平台 = 电容充满）+ 业务周期（UPDATE_PERIOD_MS）；
  *   ─ 采样模式"软件触发 + 轮询完成"，单次 < 5 µs；
  *   ─ 去掉 EMA 滤波：旁路电容（τ ≈ 3 s）本身是硬件低通，3 s 采样点读值已是时间平均，
  *     软件层直接使用原始换算值；
@@ -17,11 +17,15 @@
 #include <stdint.h>
 
 typedef struct {
-    uint32_t            latest_mv;       /* 最近一次有效采样换算值（mV） */
+    uint32_t            latest_mv;       /* 最近一次采样换算值（mV）；预热期为爬升瞬时值 */
     uint32_t            next_sample_ms;  /* 下次采样触发的绝对时刻（ms） */
+    uint32_t            warmup_until_ms; /* 预热兜底超时绝对时刻（ms） */
+    uint32_t            ref_mv;          /* 预热平台检测：基线窗口起点读值 */
+    uint32_t            ref_ms;          /* 预热平台检测：基线窗口起点时刻 */
     uint16_t            last_raw;        /* 最近一次 ADC 原始值 */
-    uint8_t             boot_sampled;    /* 0 = 自检快照尚未完成 */
-    uint8_t             boot_ok;         /* 1 = 快照读值 ≥ BOOT_OK_MV，可提前解锁 */
+    uint8_t             warmup_done;     /* 0 = 仍在预热（电容充电中） */
+    uint8_t             have_ref;        /* 预热平台检测：基线起点是否已记录 */
+    uint8_t             boot_ok;         /* 1 = 充满后读值 ≥ BOOT_OK_MV，可提前解锁 */
     uint8_t             low_stop_count;  /* LOW_STOP 连续确认计数 */
     bsp_battery_state_t state;
 } batt_state_t;
@@ -111,16 +115,20 @@ static bsp_battery_state_t classify(uint32_t mv, bsp_battery_state_t prev)
 
 void bsp_battery_init(void)
 {
+    uint32_t now          = bsp_systick_get_ms();
     s_batt.latest_mv      = 0u;
+    s_batt.ref_mv         = 0u;
+    s_batt.ref_ms         = now;
     s_batt.last_raw       = 0u;
-    s_batt.boot_sampled   = 0u;
+    s_batt.warmup_done    = 0u;
+    s_batt.have_ref       = 0u;
     s_batt.boot_ok        = 0u;
     s_batt.low_stop_count = 0u;
     s_batt.state          = BSP_BATT_STATE_UNKNOWN;
 
-    /* 自检快照将在 BOOT_SAMPLE_MS（默认 3 s）后触发首次 ADC 转换。
-     * 期间旁路电容通过分压电阻安静充电，无 ADC 干扰。 */
-    s_batt.next_sample_ms = bsp_systick_get_ms() + BSP_BATTERY_BOOT_SAMPLE_MS;
+    /* 预热从一个轮询周期后开始（让 ADC/基准上电稳定），随后连续采样直至平台。 */
+    s_batt.next_sample_ms = now + BSP_BATTERY_BOOT_POLL_MS;
+    s_batt.warmup_until_ms = now + BSP_BATTERY_BOOT_WARMUP_MAX_MS;
 
     DL_ADC12_clearInterruptStatus(ADC_BAT_INST,
         DL_ADC12_INTERRUPT_MEM0_RESULT_LOADED);
@@ -160,16 +168,46 @@ void bsp_battery_update(void)
     uint16_t raw      = (uint16_t)DL_ADC12_getMemResult(ADC_BAT_INST, DL_ADC12_MEM_IDX_0);
     s_batt.last_raw   = raw;
     uint32_t mv       = bsp_battery_raw_to_mv(raw);
-    s_batt.latest_mv  = mv;
+    s_batt.latest_mv  = mv;   /* 预热期也更新，供心跳观察充电爬升 */
 
-    if (!s_batt.boot_sampled) {
-        /* 阶段 A：自检快照 ─ 仅存值与 boot_ok 标志，state 保持 UNKNOWN。
-         * 旁路电容此时约充至 63 %（τ ≈ 3 s），12 V 电池读值约 7.6 V；
-         * 若 mv ≥ BOOT_OK_MV（7 V），通知 app_safety 可提前结束 BOOT_CHECK。 */
-        s_batt.boot_sampled = 1u;
-        s_batt.boot_ok      = (mv >= (uint32_t)BSP_BATTERY_BOOT_OK_MV) ? 1u : 0u;
-        /* 业务阶段将从 UPDATE_PERIOD_MS 后开始 */
-        s_batt.next_sample_ms = now + BSP_BATTERY_UPDATE_PERIOD_MS;
+    if (!s_batt.warmup_done) {
+        /* 阶段 A：预热 ─ 连续轮询，按"基线窗口总上升量"判定电容/电源是否已稳。
+         * state 保持 UNKNOWN，不参与安全决策。 */
+        bool charged = false;
+        if (!s_batt.have_ref) {
+            s_batt.ref_mv   = mv;
+            s_batt.ref_ms   = now;
+            s_batt.have_ref = 1u;
+        } else if ((int32_t)(now - s_batt.ref_ms) >= (int32_t)BSP_BATTERY_BOOT_BASELINE_MS) {
+            /* 跨过一个基线窗口：比较整段总上升量 */
+            uint32_t rise = (mv > s_batt.ref_mv) ? (mv - s_batt.ref_mv)
+                                                 : (s_batt.ref_mv - mv);
+            if (rise < (uint32_t)BSP_BATTERY_BOOT_STABLE_DELTA_MV) {
+                charged = true;     /* 整窗几乎不再上升 → 已充满 */
+            } else {
+                s_batt.ref_mv = mv; /* 仍在上升：滑动基线，继续观察 */
+                s_batt.ref_ms = now;
+            }
+        }
+
+        bool timeout = ((int32_t)(now - s_batt.warmup_until_ms) >= 0);
+
+        if (charged || timeout) {
+            /* 预热结束：以当前读值定 boot_ok，并落地首个业务分类。
+             * 注意：兜底超时若恰逢电源仍在缓升而读到低压，不直接 latch LOW_STOP
+             * （会触发急停），先降一档为 LOW_WARN，交由业务期去抖确认后再 STOP。 */
+            s_batt.warmup_done = 1u;
+            s_batt.boot_ok     = (mv >= (uint32_t)BSP_BATTERY_BOOT_OK_MV) ? 1u : 0u;
+            bsp_battery_state_t st = classify(mv, BSP_BATT_STATE_UNKNOWN);
+            if (st == BSP_BATT_STATE_LOW_STOP) {
+                st = BSP_BATT_STATE_LOW_WARN;
+                s_batt.low_stop_count = 1u;   /* 预置一档，业务期再确认一次即 STOP */
+            }
+            s_batt.state          = st;
+            s_batt.next_sample_ms = now + BSP_BATTERY_UPDATE_PERIOD_MS;
+        } else {
+            s_batt.next_sample_ms = now + BSP_BATTERY_BOOT_POLL_MS;
+        }
         return;
     }
 
@@ -192,6 +230,11 @@ void bsp_battery_update(void)
 bool bsp_battery_is_boot_ok(void)
 {
     return s_batt.boot_ok != 0u;
+}
+
+bool bsp_battery_is_ready(void)
+{
+    return s_batt.warmup_done != 0u;
 }
 
 uint32_t bsp_battery_get_mv(void)

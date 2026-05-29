@@ -108,10 +108,41 @@ MCU UART1 RX (PB7) ←──中断RX──  K230 CMD TX    [运动/PID/TEXT_CMD]
 - [ ] 断开 500 ms → 归零 + `k230_OFF`
 - [ ] TEXT_CMD `bp 5000 0 5000 80` → TEXT_RESP `OK bp kp=...`
 - [ ] MS901M Y 分线两端均收 200 Hz 数据
+- [ ] **Stage 3.11** PB6 监听 VEHICLE_STATUS payload=9 B；`track_phase` 随 `app_track` 阶段变化
+- [ ] K230 仅 TRACE 阶段收到非零 MOTION_CMD
 
 ---
 
-## 6. 变更日志
+## 6. VEHICLE_STATUS 扩展：赛道阶段上报（2026-05-30，v0.9）
+
+为支持 [Stage 3.11 赛道模式](Stage3-BalanceControl.md#7e-stage-311--赛道模式--自立双-pid2026-05-30)，MCU 在 20 Hz 状态帧末尾追加两字节：
+
+```c
+typedef struct __attribute__((packed)) {
+    int32_t  avg_cps;
+    uint8_t  safety_state;
+    uint16_t bat_mv;
+    uint8_t  track_phase;   /* app_track_phase_t，见 app_track.h */
+    uint8_t  lap;           /* 当前圈号，1 起；0=未开始 */
+} k230_vehicle_status_t;    /* 9 B（旧固件 7 B） */
+```
+
+| `track_phase` | 含义 | K230 驱动闸门 |
+|---------------|------|---------------|
+| 0 IDLE | 未启用赛道 | idle |
+| 1 SELF_STAND | 自立摆起 | idle |
+| 2 STAND_SETTLE | 稳定确认 | idle |
+| **3 TRACE** | **循线** | **trace（下发 v/ω）** |
+| 4 BRAKE | 满圈减速 | idle |
+| 5 PAUSE | 暂停 5 s | idle |
+| 6 FINAL_BRAKE | 末圈刹车 | idle |
+| 7 DONE | 完成 | idle |
+
+**兼容性**：K230 `parse_vehicle_status()` 按 `len(payload)>=9` 解扩展字段；否则 `track_phase=0, lap=0`。枚举顺序须与 [K230 `comms/protocol.py`](../../../K230/comms/protocol.py) 中 `TRACK_PHASE_*` 一致。
+
+---
+
+## 7. 变更日志
 
 | 日期 | 版本 | 内容 | 执行方 |
 |------|------|------|--------|
@@ -121,3 +152,4 @@ MCU UART1 RX (PB7) ←──中断RX──  K230 CMD TX    [运动/PID/TEXT_CMD]
 | 2026-05-21 | v0.6 | 对齐 Stage 3.7 pid_id 0/2/3 | 主控团队 |
 | 2026-05-24 | v0.7 | TEXT_CMD/TEXT_RESP 远程调试；MAX_PAYLOAD 128；协议真源合并至 Side.md | 主控团队 |
 | 2026-05-24 | v0.8 | K230 UART RX 由 DMA block 模式改为 FIFO 半满中断驱动（`3518414`）；移除 `DMA_CH0` RX 配置，改用 512 B 中断环缓；简化接收逻辑（-94/+53 行） | 主控团队 |
+| 2026-05-30 | v0.9 | **`VEHICLE_STATUS` 扩展 9 B**：追加 `track_phase:u8 + lap:u8`（向后兼容 7 B 旧固件）；MCU `k230_send_vehicle_status` 填充 `app_track_get_phase()` / `get_lap()`；K230 `parse_vehicle_status` 返回 5 元组。详见 §6 | 主控团队 |

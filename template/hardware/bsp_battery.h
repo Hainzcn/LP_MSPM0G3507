@@ -8,18 +8,19 @@
  *   ─ 分压：外部 R1 = 100 kΩ + R2 = 22 kΩ → 比值 K = 22/(100+22) ≈ 0.1803
  *     （实测校准后 K ≈ 0.1503，见 BSP_BATTERY_DIVIDER_RATIO_X10000 注释）
  *
- * 采样策略——两阶段低频设计：
+ * 采样策略——预热自适应 + 业务低频两阶段设计：
  *
- *   阶段 A（自检快照，t = BOOT_SAMPLE_MS）：
- *     分压电路旁路电容通过 R_th = R1‖R2 ≈ 18 kΩ 充电，时间常数 τ ≈ 3 s。
- *     在 t = τ ≈ 3 s 处，电容充至约 63 %——对 12 V 电池约 7.6 V，
- *     读值超过 BOOT_OK_MV（7 V）即可判定电池正常，通知 app_safety 提前
- *     结束 BOOT_CHECK（跳过剩余等待，最多节省 2 s）。
+ *   阶段 A（上电预热，自适应）：
+ *     分压电路旁路电容通过 R_th = R1‖R2 充电，τ 实测偏大且受电源缓启动影响，
+ *     固定时刻采样会读到严重偏低的半充电压。改为从上电起按 BOOT_POLL_MS 连续
+ *     采样，待读值爬升到平台期（跨 BASELINE_MS 窗口的总上升量 < STABLE_DELTA_MV）
+ *     判定充满，此刻读值才作有效自检电压并据此置 boot_ok；WARMUP_MAX_MS 兜底。
+ *     预热期 is_ready()=false、state=UNKNOWN，安全层不据此急停。
  *
  *   阶段 B（业务周期，UPDATE_PERIOD_MS = 3 s，直接读值，无 EMA）：
  *     电池电压在正常使用中变化极缓（分钟级放电曲线）；3 s 采样率足以感知
- *     放电趋势，同时旁路电容本身充当硬件低通（τ ≈ 3 s），电机电流瞬态
- *     在到达 ADC 前已大幅衰减，无需再做软件 EMA 滤波。
+ *     放电趋势，同时旁路电容本身充当硬件低通，电机电流瞬态在到达 ADC 前已
+ *     大幅衰减，无需再做软件 EMA 滤波。
  *
  * 接口约定：
  *   ─ `bsp_battery_init()` 清 ADC 标志并设置自检快照触发时刻（不立即转换）；
@@ -97,28 +98,49 @@ extern "C" {
 #define BSP_BATTERY_LOW_STOP_DEBOUNCE_SAMPLES    (2u)
 #endif
 
-/**
- * 自检快照时刻（ms）：bsp_battery_init() 调用后，经过此时间触发首次 ADC 转换。
+/* ---- 上电预热采样（自适应，替代旧的"固定 3 s 单次快照"） ----
  *
- *   选取 τ ≈ 3 s（分压电路旁路电容充电时间常数）：
- *     t = τ 时电容充至 1 − e^{-1} ≈ 63 %，对 12 V 电池读值 ≈ 7.6 V
- *     > BOOT_OK_MV（7 V）——满足提前解锁条件。
- *   若电路无外部电容，可减小至 100 ms；若电容更大（τ 更大），相应增大。
- */
-#ifndef BSP_BATTERY_BOOT_SAMPLE_MS
-#define BSP_BATTERY_BOOT_SAMPLE_MS               (3000u)
+ * 旧设计在固定 t=3 s 采一次，假设旁路电容 τ≈3 s 已充至 63%。实测冷上电时
+ * 电容充电远未完成（τ 比预期大，或电源缓启动），t=3 s 读值严重偏低，导致
+ * boot_ok 误判 + 心跳电压虚低。新设计不再赌固定时刻，而是从上电起以
+ * BOOT_POLL_MS 周期连续采样，待"读值爬升到平台期"（连续若干次样本变化量
+ * < STABLE_DELTA_MV）判定电容已充满，此刻的读值才作为有效自检电压；并设
+ * WARMUP_MAX_MS 兜底超时，防止电池缺接/异常时永久卡在预热。 */
+
+/** 预热期 ADC 轮询周期（ms）。 */
+#ifndef BSP_BATTERY_BOOT_POLL_MS
+#define BSP_BATTERY_BOOT_POLL_MS                 (250u)
 #endif
 
 /**
- * 自检快照"电池正常"判定阈值（mV）。
- *   读值超过此值时 bsp_battery_is_boot_ok() 返回 true，app_safety 可在
- *   BOOT_CHECK 计时器到期前提前完成自检（约节省 2 s）。
+ * 平台判据基线窗口（ms）：与"窗口起点"读值比较，而非相邻拍。
  *
- *   7000 mV 对应 t = τ = 3 s 时实际电池 ≈ 7000/(1−e^{-1}) ≈ 11.1 V，
- *   即仅当电池接近满电（≥ 11.1 V 实际）才触发提前解锁。
+ *   仅比相邻两拍（250 ms）会被"缓慢上升"骗过——若电源/电容 τ 较大，相邻差
+ *   可能 < 阈值却仍在半电压爬升（曾实测自检读到 ~6.5 V）。改为跨 ≥ 此窗口比较
+ *   总上升量：只有整段窗口几乎不再上升才判为充满，可靠拒绝"仍在缓升"。
+ */
+#ifndef BSP_BATTERY_BOOT_BASELINE_MS
+#define BSP_BATTERY_BOOT_BASELINE_MS             (2000u)
+#endif
+
+/** 平台判据：基线窗口内总上升量 < 此值（mV）即判定电容/电源已稳、读值有效。 */
+#ifndef BSP_BATTERY_BOOT_STABLE_DELTA_MV
+#define BSP_BATTERY_BOOT_STABLE_DELTA_MV         (150u)
+#endif
+
+/** 预热兜底超时（ms）：即使未检出平台，超过此时长也以最近读值结束预热。 */
+#ifndef BSP_BATTERY_BOOT_WARMUP_MAX_MS
+#define BSP_BATTERY_BOOT_WARMUP_MAX_MS           (15000u)
+#endif
+
+/**
+ * 自检"电池正常"判定阈值（mV）。
+ *   预热结束（电容充满）后的有效读值 ≥ 此值时 bsp_battery_is_boot_ok()
+ *   返回 true，app_safety 可在 BOOT_CHECK 计时器到期前提前完成自检。
+ *   现在读值取自充满后的稳定电压，可直接按实际电池阈值设定（11 V 满电附近）。
  */
 #ifndef BSP_BATTERY_BOOT_OK_MV
-#define BSP_BATTERY_BOOT_OK_MV                   (7000u)
+#define BSP_BATTERY_BOOT_OK_MV                   (11000u)
 #endif
 
 /**
@@ -163,21 +185,27 @@ void bsp_battery_init(void);
 
 /**
  * @brief 周期采样任务，随主循环调用（调用频率不限，内部按时间戳驱动）：
- *          ─ 自检阶段（前 BOOT_SAMPLE_MS）：定时未到，立即返回；
- *          ─ 快照采样点（t = BOOT_SAMPLE_MS）：触发一次转换，读值，置 boot_ok 标志；
+ *          ─ 预热阶段：每 BOOT_POLL_MS 采样一次，检测读值爬升到平台（电容充满）；
+ *            充满（或 WARMUP_MAX_MS 兜底）后置 boot_ok 并落地首个业务分类；
  *          ─ 业务阶段：每 UPDATE_PERIOD_MS 触发转换 → 读值 → 分类状态。
  *        本函数必须从主循环单线程调用，不要在 ISR 内调。
  */
 void bsp_battery_update(void);
 
 /**
- * @brief 查询自检快照结果：快照已完成 且 读值 ≥ BOOT_OK_MV 时返回 true。
+ * @brief 查询自检结果：预热已结束（电容充满）且充满读值 ≥ BOOT_OK_MV 时返回 true。
  *        供 app_safety_tick() 在 BOOT_CHECK 期间检测，用于提前结束自检。
- *        自检快照完成前（t < BOOT_SAMPLE_MS）始终返回 false。
+ *        预热结束前始终返回 false。
  */
 bool bsp_battery_is_boot_ok(void);
 
-/** @return 最近一次有效采样换算的电池电压（mV）；首次采样前返回 0。 */
+/**
+ * @brief 预热是否结束（旁路电容已充满、读值已可信）。
+ *        预热期间返回 false，此时 get_mv() 仅供观察充电爬升，不应据此做安全决策。
+ */
+bool bsp_battery_is_ready(void);
+
+/** @return 最近一次采样换算的电池电压（mV）；预热期返回正在爬升的瞬时值，首拍前为 0。 */
 uint32_t bsp_battery_get_mv(void);
 
 /** @return 最近一次 ADC 原始读数（0~4095），调试用；首次采样前返回 0。 */

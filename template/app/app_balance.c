@@ -12,6 +12,7 @@
 
 #include "app_circle_demo.h"
 #include "app_safety.h"
+#include "app_track.h"
 #include "bsp_battery.h"
 #include "bsp_gpio.h"
 #include "bsp_imu_uart.h"
@@ -255,6 +256,11 @@ void app_balance_set_yaw_inverted(bool inverted)
 bool app_balance_get_yaw_inverted(void)
 {
     return (s_bal.yaw_sign < 0);
+}
+
+float app_balance_get_pitch_meas(void)
+{
+    return s_bal.diag.pitch_meas_deg;
 }
 
 void app_balance_get_diag(app_balance_diag_t *out)
@@ -696,6 +702,7 @@ static void print_pid_help(void)
     (void)printf("[pid] si?/si0/si1=speed_invert  yi?/yi0/yi1=yaw_invert\r\n");
     (void)printf("[pid] c/circle=start circle (500mm/100mm/s CW), "
                  "circle <diam_mm> <v_mm/s>=custom, cx=cancel\r\n");
+    (void)printf("[pid] trk=start track mode (self-stand->trace->laps), tx=cancel\r\n");
 }
 
 static void send_lt_header(void)
@@ -896,6 +903,18 @@ static bool handle_pid_command(const char *cmd)
         return true;
     }
 
+    /* trk：启动赛道模式（自立→循线→判圈→暂停→停车） */
+    if ((cmd[0]=='t') && (cmd[1]=='r') && (cmd[2]=='k') && (cmd[3]=='\0')) {
+        app_track_start();
+        return true;
+    }
+
+    /* tx：取消赛道模式 */
+    if ((cmd[0]=='t') && (cmd[1]=='x') && (cmd[2]=='\0')) {
+        app_track_cancel();
+        return true;
+    }
+
     /* c / circle / circle <diam> <v> */
     if (cmd[0]=='c') {
         bool is_c_bare = (cmd[1]=='\0');
@@ -1089,6 +1108,11 @@ static void k230_handle_text_cmd(const uint8_t *payload, uint8_t len)
         n += snprintf(resp + n, sizeof(resp) - (size_t)n, "\r\n");
     } else if ((cmd_str[0]=='c') && (cmd_str[1]=='x')) {
         n = snprintf(resp, sizeof(resp), "OK circle cancel\r\n");
+    } else if ((cmd_str[0]=='t') && (cmd_str[1]=='r') && (cmd_str[2]=='k')) {
+        n = snprintf(resp, sizeof(resp), "OK track start phase=%u\r\n",
+            (unsigned int)app_track_get_phase());
+    } else if ((cmd_str[0]=='t') && (cmd_str[1]=='x')) {
+        n = snprintf(resp, sizeof(resp), "OK track cancel\r\n");
     } else if (cmd_str[0]=='c') {
         n = snprintf(resp, sizeof(resp), "OK circle start\r\n");
     } else if (cmd_str[0]=='h') {
@@ -1181,6 +1205,8 @@ static void k230_send_vehicle_status(void)
     vs.avg_cps      = (fb.left_speed_cps + fb.right_speed_cps) / 2;
     vs.safety_state = (uint8_t)app_safety_get_state();
     vs.bat_mv       = (uint16_t)bsp_battery_get_mv();
+    vs.track_phase  = (uint8_t)app_track_get_phase();
+    vs.lap          = app_track_get_lap();
 
     uint8_t frame[K230_PROTO_MAX_FRAME];
     size_t len = k230_encode_frame(K230_CMD_VEHICLE_STATUS,
@@ -1255,6 +1281,11 @@ bool app_balance_run(void)
     k230_flush_rx_buffer();
     k230_comm_init();
 
+    /* 赛道模式状态机初始化（默认 IDLE；自检通过 ARMED 后自动启动） */
+    app_track_init();
+    bool     track_autostarted = false;
+    uint32_t armed_at_ms       = 0u;   /* 首次观测到 ARMED 的时刻（等待 K230 起算） */
+
     for (;;) {
         if (!bsp_systick_consume_tick()) {
             __WFI();
@@ -1263,6 +1294,32 @@ bool app_balance_run(void)
         tick_count++;
 
         if (process_log_uart_commands()) return true;
+
+        /* 上电自检通过（safety 由 BOOT_CHECK 进入 ARMED）后自动启动赛道模式。
+         * 关键：冷上电 ARMED(~5s) 早于 K230 启动(~10s)，此时起立会遇到编码器噪声
+         * 雪崩 + IMU 未收敛 → 疯冲。故默认等待 K230 在线（或超时兜底）再起立。 */
+#if APP_TRACK_AUTOSTART
+        if (!track_autostarted &&
+            (app_safety_get_state() == APP_SAFETY_ARMED) &&
+            !app_track_is_active()) {
+            if (armed_at_ms == 0u) {
+                armed_at_ms = tick_count;
+            }
+#if APP_TRACK_AUTOSTART_WAIT_K230
+            bool k230_ready   = s_k230_online;
+            bool wait_expired = (tick_count - armed_at_ms) >= APP_TRACK_AUTOSTART_K230_WAIT_MS;
+            if (k230_ready || wait_expired) {
+                track_autostarted = true;
+                (void)printf("[track] autostart: %s\r\n",
+                    k230_ready ? "K230 online" : "K230 wait timeout");
+                app_track_start();
+            }
+#else
+            track_autostarted = true;
+            app_track_start();
+#endif
+        }
+#endif
 
         /* ---- 1 kHz：IMU drain + K230 drain + 电机 1 ms 节拍 --------------- */
         {
@@ -1298,6 +1355,8 @@ bool app_balance_run(void)
                     bsp_motor_feedback_t fb_cir;
                     bsp_motor_get_feedback(&fb_cir);
                     app_circle_demo_tick_20hz(&snap, &fb_cir, &cmd);
+                    /* 赛道模式状态机（自立 / 循线 / 判圈 / 刹车），活动时接管 cmd */
+                    app_track_tick_20hz(&snap, &fb_cir, &cmd);
                 }
                 balance_step_speed(&att, &cmd);
 
@@ -1386,6 +1445,20 @@ bool app_balance_run(void)
                     (unsigned long)BAL_F2_F(cd.yaw_accum_deg),
                     (long)cd.arc_mm,
                     (unsigned long)cd.elapsed_ms);
+            }
+
+            if (app_track_is_active()) {
+                app_track_diag_t td;
+                app_track_get_diag(&td);
+                (void)printf("[hb] track=%d lap=%u yaw=%c%ld.%02lu arc=%ldmm cps=%ld t=%lums\n",
+                    (int)td.phase,
+                    (unsigned int)td.lap,
+                    BAL_F2_S(td.yaw_accum_deg),
+                    (long)BAL_F2_I(td.yaw_accum_deg),
+                    (unsigned long)BAL_F2_F(td.yaw_accum_deg),
+                    (long)td.arc_mm,
+                    (long)td.applied_cps,
+                    (unsigned long)td.phase_elapsed_ms);
             }
 
             /* K230 远程调试：镜像精简心跳文本 */

@@ -14,6 +14,8 @@
 | 高 | SDK multi-pad GPIO codegen 不可用 | Stage1 §8、§8.5；Stage0 §4.7 | 下文 §4 |
 | 高 | 编码器 X4 + 高 PPR → ISR 雪崩 | Stage3 §6.1 | 下文 §5 |
 | 高 | ADC 未配 sampleTime → batt=0 误急停 | Stage2 §2.4（v0.6） | 下文 §6 |
+| 高 | 电池固定 t=3s 快照 → 半充电压误 boot_ok / 虚低 batt | Stage2 v0.10（2026-05-30） | 下文 §6B |
+| 中 | 赛道自立 ki windup / K230 未就绪疯冲 | Stage3 §7E（2026-05-30） | 下文 §8A |
 | 中 | LaunchPad 跳线未核对 → 电机/方向异常 | Stage2 §7.5 | 下文 §7 |
 | 中 | 速度环极性反了 → PID 立刻发散 | Stage3 §7.1 | 下文 §8 |
 | 中 | 高分辨率编码器未量纲归一 → 速度环饱和 | Stage3 §7.2 | 下文 §9 |
@@ -168,6 +170,32 @@ MSPM0G350x 上 PB16/PB17、PA15/16/26/27、PB22/26/27 等为 **multi-pad bonded 
 
 ---
 
+## 6B. 电池固定 t=3 s 快照 → 半充电压 / 误 boot_ok
+
+### 现象
+
+冷上电心跳 `batt≈6500~7600 mV`（实际满电 ~12 V）；偶发提前结束 BOOT_CHECK 或业务期误 `BAT_STOP`。
+
+### 根因
+
+旁路电容 τ 实测大于纸面 3 s，且受电源缓启动影响；**固定 t=3 s 单次采样**仍在半电压爬升区。相邻 250 ms 差分也可能 < 阈值但整段窗口仍在缓升（曾误判"已稳"）。
+
+### 修复
+
+- 预热期 `BOOT_POLL_MS=250` 连续采样；
+- **跨 `BOOT_BASELINE_MS=2000` 窗口总上升量** `< STABLE_DELTA_MV=150` 才判充满；
+- `WARMUP_MAX_MS=15s` 兜底；超时若仍 LOW 先 WARN 再去抖 STOP；
+- `DIVIDER_RATIO_X10000` 实测校准 **1503**；`BOOT_OK_MV` 提至 **11000**；
+- 新增 `bsp_battery_is_ready()`。
+
+- **来源**：[Stage2 v0.10](../../TaskLog/Stage2-MotorDrive-Encoder.md)；[Stage3 §7E.5](../../TaskLog/Stage3-BalanceControl.md)
+
+### 规则
+
+> 分压旁路电容的上电读数**不能赌固定时刻**；自检用"平台检测 + 超时兜底"，业务采样等 `warmup_done` 后再参与安全决策。
+
+---
+
 ## 7. LaunchPad 跳线（装车必查）
 
 文档 Stage2 §7.5 列出 15 项跳线；最易踩的两项：
@@ -200,6 +228,30 @@ MSPM0G350x 上 PB16/PB17、PA15/16/26/27、PB22/26/27 等为 **multi-pad bonded 
 ### 规则
 
 > 速度环整定前先用 `si?` 确认 `v_meas` 与前进方向同号。
+
+---
+
+## 8A. 赛道自立：运动 PID + 持续误差 → 积分 windup
+
+### 现象
+
+BOOT_CHECK 结束 → `[track] start` 后 1 s 内 `pwm=±1000`，encISR 数万、ISR_QUENCH，K230 随后 EMI 掉线。
+
+### 根因
+
+首版用 formula 运动增益（含 `ki=2`）做自立；误差大且持续 → 角度环 `i_term` 快速顶满。**仅冻结外环不够**。
+
+### 修复
+
+- 自立专用 **rise PID**：`ki=0`，`kd` 作减速阻尼，target 固定 0°；
+- 摆稳后切 **motion PID**（`TRK_GAIN_*`）；
+- **`APP_TRACK_AUTOSTART_WAIT_K230`** 等 K230/IMU 就绪再起立。
+
+- **来源**：[Stage3 §7E](../../TaskLog/Stage3-BalanceControl.md)
+
+### 规则
+
+> 自立与循线**必须分增益**；自立段 **禁止非零 ki**；双端用 `track_phase` 对齐驱动闸门。
 
 ---
 
@@ -255,7 +307,9 @@ Stage 0→1.6 多次重排总结的元规则：
 | 高速时某一侧速度变 0 | ENC ISR 雪崩 | Stage 3 §6.1 |
 | `state=?` / 计数器离谱 | 栈写 `.bss` 或 buffer 溢出 | 2026-05 + map |
 | SysConfig 一改就崩 | multi-pad GPIO | Stage 1 §8 |
-| PID 怎么调都发散 | 极性 / 量纲 / 正反馈 | Stage 3 §7 |
+| `batt` 冷上电虚低、后恢复正常 | 电容未充满即快照 | Stage 2 v0.10 §6B |
+| 自检后瞬间 PWM ±1000 / encISR 爆炸 | 赛道自立 ki windup 或 K230 未就绪 | Stage 3 §7E |
+| K230 通讯正常但车乱走 | 双端阶段未对齐 | [phase_G_track_mode.md](../../../K230/docs/TaskLog/phase_G_track_mode.md) |
 
 **推荐工具链**：XDS-UART 日志 → `.map` 内存布局 → LED 5 Hz vs 1 Hz 分支定位崩溃时刻 → grep `%f` / `NVIC_EnableIRQ` / `GROUP1_IRQHandler`。
 
@@ -268,10 +322,11 @@ Stage 0→1.6 多次重排总结的元规则：
 | [Stage0-PinAllocation.md](../../TaskLog/Stage0-PinAllocation.md) | §2 跳线；§4.7 GPIO BSP 化；§4.5 蓝牙下线；multi-pad 历史 |
 | [Stage1-IMU-BT-Telemetry.md](../../TaskLog/Stage1-IMU-BT-Telemetry.md) | §8 UART multi-pad；§8.5 GPIO codegen；§8.6 PT_LOAD 对齐 |
 | [Stage1.5-IMU-Swap-MS901M.md](../../TaskLog/Stage1.5-IMU-Swap-MS901M.md) | **§12 首次实测踩坑（NVIC + printf 栈）**；§11 引脚重排 |
-| [Stage2-MotorDrive-Encoder.md](../../TaskLog/Stage2-MotorDrive-Encoder.md) | **§2.4 GROUP1 + ADC**；§7.5 跳线；§2.6 右轮 5% 补偿 |
-| [Stage3-BalanceControl.md](../../TaskLog/Stage3-BalanceControl.md) | **§6.1 X4 雪崩**；§7 极性/量纲；§6.4 dither 死区 |
-| [Stage4-K230-Communication.md](../../TaskLog/Stage4-K230-Communication.md) | DMA 通道；CRC；波特率 |
-| [Stage4-K230-Side.md](../../TaskLog/Stage4-K230-Side.md) | K230 离线归零语义 |
+| [Stage2-MotorDrive-Encoder.md](../../TaskLog/Stage2-MotorDrive-Encoder.md) | **§2.4 GROUP1 + ADC**；§7.5 跳线；§2.6 右轮 5% 补偿；**v0.9 电池预热** |
+| [Stage3-BalanceControl.md](../../TaskLog/Stage3-BalanceControl.md) | **§6.1 X4 雪崩**；§7 极性/量纲；§6.4 dither 死区；**§7E 赛道模式 + rise PID** |
+| [Stage4-K230-Communication.md](../../TaskLog/Stage4-K230-Communication.md) | DMA 通道；CRC；波特率；**§6 VEHICLE_STATUS 9 B** |
+| [Stage4-K230-Side.md](../../TaskLog/Stage4-K230-Side.md) | K230 离线归零语义；**track_phase 闸门** |
+| [phase_G_track_mode.md](../../../K230/docs/TaskLog/phase_G_track_mode.md) | K230 跟随 MCU 赛道阶段 |
 
 ---
 

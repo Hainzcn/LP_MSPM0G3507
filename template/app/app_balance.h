@@ -379,6 +379,9 @@ void app_balance_set_yaw_gains(float kp, float ki, float kd, float out_offset);
 void app_balance_set_yaw_inverted(bool inverted);
 bool app_balance_get_yaw_inverted(void);
 
+/** @return 最近一拍实测俯仰偏差（已减零点，°），供 app_track 取起始倾角。 */
+float app_balance_get_pitch_meas(void);
+
 /** 拷贝一份本拍内部诊断（不影响内部状态）。 */
 void app_balance_get_diag(app_balance_diag_t *out);
 
