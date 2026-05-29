@@ -3,12 +3,11 @@
  * @brief   电池电压采样实现，详见 bsp_battery.h。
  *
  * 设计要点：
- *   ─ 采样模式选择"软件触发 + 轮询完成"而非 IRQ：每 10 ms 一次、单次 < 5 µs，
- *     IRQ 化反而徒增 ISR 复杂度（ADC0 与电机/编码器/IMU UART 共享 NVIC 优先级）；
- *   ─ EMA 用整数 (alpha << 8 / 256) 实现，避免浮点；80 ms 时间常数对 100 Hz
- *     采样率而言抗噪足够，又不会让"急速放电"事件被滤掉；
- *   ─ 状态机有回滞：触发 LOW_WARN 后必须升回 WARN_MV + HYS 才能回 NORMAL，
- *     避免在 9.5 V 阈值附近 ADC 噪声导致 PWM 限幅反复打开 / 关闭。
+ *   ─ 两阶段低频采样：自检快照（t = BOOT_SAMPLE_MS，单次）+ 业务周期（UPDATE_PERIOD_MS）；
+ *   ─ 采样模式"软件触发 + 轮询完成"，单次 < 5 µs；
+ *   ─ 去掉 EMA 滤波：旁路电容（τ ≈ 3 s）本身是硬件低通，3 s 采样点读值已是时间平均，
+ *     软件层直接使用原始换算值；
+ *   ─ 状态机保留回滞（HYS），LOW_STOP 需 DEBOUNCE_SAMPLES（默认 2）次连续确认（= 6 s）。
  */
 
 #include "bsp_battery.h"
@@ -18,12 +17,12 @@
 #include <stdint.h>
 
 typedef struct {
-    uint32_t            ema_mv;               /* 滤波后电池电压（mV） */
-    uint32_t            sample_after_ms;      /* 上电预延迟到期绝对时刻（ms），到期前不采样 */
-    uint16_t            last_raw;             /* 最近一次 ADC 原始值 */
-    uint16_t            startup_grace_left;   /* 上电静默拍数倒计数，0 后开始 classify */
-    uint8_t             primed;               /* 0 = 还没攒够第一次有效采样 */
-    uint8_t             low_stop_count;       /* 连续低于 STOP 的确认计数 */
+    uint32_t            latest_mv;       /* 最近一次有效采样换算值（mV） */
+    uint32_t            next_sample_ms;  /* 下次采样触发的绝对时刻（ms） */
+    uint16_t            last_raw;        /* 最近一次 ADC 原始值 */
+    uint8_t             boot_sampled;    /* 0 = 自检快照尚未完成 */
+    uint8_t             boot_ok;         /* 1 = 快照读值 ≥ BOOT_OK_MV，可提前解锁 */
+    uint8_t             low_stop_count;  /* LOW_STOP 连续确认计数 */
     bsp_battery_state_t state;
 } batt_state_t;
 
@@ -40,10 +39,9 @@ static void trigger_conversion(void)
 }
 
 /**
- * 阻塞等待上一次转换完成（典型 < 5 µs @ 32 MHz）。
- *   通过 raw interrupt status 而非 NVIC 中断，避免占用 ISR 资源。
- *   设最大等待循环 N = 1000，相当于 ~30 µs 超时；正常路径下 ~50 个循环就退出。
- *   超时返回 false，调用方应该跳过本拍而不是用陈旧数据。
+ * 阻塞等待转换完成（典型 < 5 µs @ 32 MHz）。
+ *   通过 raw interrupt status 而非 NVIC，避免占用 ISR 资源。
+ *   最大等待 1000 个循环（约 30 µs 超时）；超时返回 false，调用方推迟重试。
  */
 static bool wait_conversion_done(void)
 {
@@ -60,16 +58,12 @@ static bool wait_conversion_done(void)
 
 /**
  * 阈值 + 回滞状态机：
- *   NORMAL    → LOW_WARN  当 mv ≤ WARN_MV
- *   LOW_WARN  → NORMAL    当 mv ≥ WARN_MV + HYS
- *   LOW_WARN  → LOW_STOP  当 mv ≤ STOP_MV
- *   LOW_STOP  → LOW_WARN  当 mv ≥ STOP_MV + HYS
+ *   NORMAL   → LOW_WARN  当 mv ≤ WARN_MV
+ *   LOW_WARN → NORMAL    当 mv ≥ WARN_MV + HYS
+ *   LOW_WARN → LOW_STOP  当 mv ≤ STOP_MV
+ *   LOW_STOP → LOW_WARN  当 mv ≥ STOP_MV + HYS（不直接回 NORMAL）
  *
- *   STOP 不会直接回 NORMAL（必须经过 WARN 中间态），保证人工判断电池后才解除最严级别。
- *
- *   断线护栏：任何状态下若 mv < BSP_BATTERY_DISCONNECTED_MV（默认 1 V），认定
- *   "PB24 浮空 / 电池电路未连"，state 回到 UNKNOWN，避免误触发 LOW_STOP；正常
- *   3S 锂电（9~12.6 V）远高于 1 V，不会被误识。
+ *   断线护栏：mv < DISCONNECTED_MV 时 state 回 UNKNOWN，避免浮空引脚误触发急停。
  */
 static bsp_battery_state_t classify(uint32_t mv, bsp_battery_state_t prev)
 {
@@ -104,9 +98,9 @@ static bsp_battery_state_t classify(uint32_t mv, bsp_battery_state_t prev)
 
     case BSP_BATT_STATE_UNKNOWN:
     default:
-        /* 首次跨过 DISCONNECTED 阈值后，按当前实测 mv 进入对应分类 */
-        if (mv <= BSP_BATTERY_STOP_MV) return BSP_BATT_STATE_LOW_STOP;
-        if (mv <= BSP_BATTERY_WARN_MV) return BSP_BATT_STATE_LOW_WARN;
+        /* 首次进入业务采样：按实测 mv 直接定位分类，不走回滞 */
+        if (mv <= BSP_BATTERY_STOP_MV)  return BSP_BATT_STATE_LOW_STOP;
+        if (mv <= BSP_BATTERY_WARN_MV)  return BSP_BATT_STATE_LOW_WARN;
         return BSP_BATT_STATE_NORMAL;
     }
 }
@@ -117,19 +111,17 @@ static bsp_battery_state_t classify(uint32_t mv, bsp_battery_state_t prev)
 
 void bsp_battery_init(void)
 {
-    s_batt.ema_mv             = 0u;
-    s_batt.last_raw           = 0u;
-    s_batt.primed             = 0u;
-    s_batt.low_stop_count     = 0u;
-    s_batt.startup_grace_left = (uint16_t)BSP_BATTERY_STARTUP_GRACE_TICKS;
-    s_batt.state              = BSP_BATT_STATE_UNKNOWN;
+    s_batt.latest_mv      = 0u;
+    s_batt.last_raw       = 0u;
+    s_batt.boot_sampled   = 0u;
+    s_batt.boot_ok        = 0u;
+    s_batt.low_stop_count = 0u;
+    s_batt.state          = BSP_BATT_STATE_UNKNOWN;
 
-    /* 上电预采样延迟：到期前 bsp_battery_update() 直接返回，不启动 ADC 转换。
-     * 延迟期间分压电路中的旁路电容有时间通过 R1+R2 充电到接近真实电压，
-     * 避免 ADC 首拍读到未充电的低值后 EMA 被"污染"。 */
-    s_batt.sample_after_ms = bsp_systick_get_ms() + BSP_BATTERY_PRESAMPLE_DELAY_MS;
+    /* 自检快照将在 BOOT_SAMPLE_MS（默认 3 s）后触发首次 ADC 转换。
+     * 期间旁路电容通过分压电阻安静充电，无 ADC 干扰。 */
+    s_batt.next_sample_ms = bsp_systick_get_ms() + BSP_BATTERY_BOOT_SAMPLE_MS;
 
-    /* 清掉 ADC 可能残留的脏中断标志；首次转换由 update() 在延迟到期后触发。 */
     DL_ADC12_clearInterruptStatus(ADC_BAT_INST,
         DL_ADC12_INTERRUPT_MEM0_RESULT_LOADED);
 }
@@ -143,74 +135,68 @@ uint32_t bsp_battery_raw_to_mv(uint16_t raw)
      *   raw ≤ 4095, VREF_MV = 3300 → 中间乘积 ≤ 13.5e6 < 2^24，uint32 安全 */
     uint32_t mv_pin = ((uint32_t)raw * (uint32_t)BSP_BATTERY_ADC_REF_MV)
                        / (uint32_t)BSP_BATTERY_ADC_FULL_SCALE;
-    /* 反算电池端：v_bat = v_pin / divider_ratio = v_pin × 10000 / RATIO_X10000
+    /* 反算电池端：v_bat = v_pin × 10000 / RATIO_X10000
      *   mv_pin ≤ 3300 → 乘 10000 ≤ 33e6 < 2^32，uint32 安全 */
     return (mv_pin * 10000u) / (uint32_t)BSP_BATTERY_DIVIDER_RATIO_X10000;
 }
 
 void bsp_battery_update(void)
 {
-    /* 上电预采样延迟：等待分压电容充电，到期前不启动任何 ADC 转换。
-     * 使用有符号差值比较，可正确处理 bsp_systick_get_ms() 的 uint32 溢出回绕。 */
-    if ((int32_t)(bsp_systick_get_ms() - s_batt.sample_after_ms) < 0) {
-        return;
+    uint32_t now = bsp_systick_get_ms();
+    if ((int32_t)(now - s_batt.next_sample_ms) < 0) {
+        return;  /* 未到采样时刻，立即返回（大多数调用走此路径） */
     }
 
+    /* 触发转换并阻塞等待（< 5 µs，忽略不计）*/
+    DL_ADC12_clearInterruptStatus(ADC_BAT_INST,
+        DL_ADC12_INTERRUPT_MEM0_RESULT_LOADED);
+    trigger_conversion();
     if (!wait_conversion_done()) {
-        /* 上一次转换未完成（或首次进入：尚未触发过转换）：触发一次，等下一拍读取 */
-        trigger_conversion();
+        /* ADC 超时（极罕见）：推迟 10 ms 重试，避免读取陈旧结果 */
+        s_batt.next_sample_ms = now + 10u;
         return;
     }
 
-    uint16_t raw = (uint16_t)DL_ADC12_getMemResult(ADC_BAT_INST,
-                       DL_ADC12_MEM_IDX_0);
-    s_batt.last_raw = raw;
+    uint16_t raw      = (uint16_t)DL_ADC12_getMemResult(ADC_BAT_INST, DL_ADC12_MEM_IDX_0);
+    s_batt.last_raw   = raw;
+    uint32_t mv       = bsp_battery_raw_to_mv(raw);
+    s_batt.latest_mv  = mv;
 
-    uint32_t mv_now = bsp_battery_raw_to_mv(raw);
-
-    if (s_batt.primed == 0u) {
-        /* 首拍直接吃 mv_now，避免 0 → 12000 的慢爬过程被分类成 STOP */
-        s_batt.ema_mv = mv_now;
-        s_batt.primed = 1u;
-    } else {
-        /* EMA：new = (α × now + (256 - α) × old) >> 8
-         *   α = 32 → 时间常数 ≈ 8 拍 = 80 ms @ 100 Hz
-         *   uint32 中间乘积：α × mv ≤ 256 × 16000 = 4.1e6，安全 */
-        uint32_t a = (uint32_t)BSP_BATTERY_EMA_ALPHA_256;
-        s_batt.ema_mv = ((a * mv_now) + ((256u - a) * s_batt.ema_mv) + 128u) >> 8;
-    }
-
-    /* 上电静默：等待 ADC / 分压电容充电稳定。
-     *   EMA 已在上方完成更新（读值逐渐趋近真实电压），但 state 强制保持 UNKNOWN，
-     *   上层 app_safety_tick() 对 UNKNOWN 不做状态迁移，避免误触发 BAT_WARN。
-     *   与 APP_SAFETY_BOOT_CHECK_MS 对齐（默认均为 5 s）。 */
-    if (s_batt.startup_grace_left > 0u) {
-        s_batt.startup_grace_left--;
-        s_batt.state = BSP_BATT_STATE_UNKNOWN;
-        trigger_conversion();
+    if (!s_batt.boot_sampled) {
+        /* 阶段 A：自检快照 ─ 仅存值与 boot_ok 标志，state 保持 UNKNOWN。
+         * 旁路电容此时约充至 63 %（τ ≈ 3 s），12 V 电池读值约 7.6 V；
+         * 若 mv ≥ BOOT_OK_MV（7 V），通知 app_safety 可提前结束 BOOT_CHECK。 */
+        s_batt.boot_sampled = 1u;
+        s_batt.boot_ok      = (mv >= (uint32_t)BSP_BATTERY_BOOT_OK_MV) ? 1u : 0u;
+        /* 业务阶段将从 UPDATE_PERIOD_MS 后开始 */
+        s_batt.next_sample_ms = now + BSP_BATTERY_UPDATE_PERIOD_MS;
         return;
     }
 
-    bsp_battery_state_t next = classify(s_batt.ema_mv, s_batt.state);
+    /* 阶段 B：业务周期采样 ─ classify + LOW_STOP 去抖（DEBOUNCE_SAMPLES 次确认）*/
+    bsp_battery_state_t next = classify(mv, s_batt.state);
     if ((next == BSP_BATT_STATE_LOW_STOP) &&
         (s_batt.state != BSP_BATT_STATE_LOW_STOP)) {
+        s_batt.low_stop_count++;
         if (s_batt.low_stop_count < BSP_BATTERY_LOW_STOP_DEBOUNCE_SAMPLES) {
-            s_batt.low_stop_count++;
-        }
-        if (s_batt.low_stop_count < BSP_BATTERY_LOW_STOP_DEBOUNCE_SAMPLES) {
-            next = BSP_BATT_STATE_LOW_WARN;
+            next = BSP_BATT_STATE_LOW_WARN;  /* 尚未确认，降级为 WARN */
         }
     } else if (next != BSP_BATT_STATE_LOW_STOP) {
         s_batt.low_stop_count = 0u;
     }
     s_batt.state = next;
 
-    trigger_conversion();   /* 为下一拍预备 */
+    s_batt.next_sample_ms = now + BSP_BATTERY_UPDATE_PERIOD_MS;
+}
+
+bool bsp_battery_is_boot_ok(void)
+{
+    return s_batt.boot_ok != 0u;
 }
 
 uint32_t bsp_battery_get_mv(void)
 {
-    return s_batt.ema_mv;
+    return s_batt.latest_mv;
 }
 
 uint16_t bsp_battery_get_raw(void)

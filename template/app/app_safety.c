@@ -208,8 +208,10 @@ app_safety_state_t app_safety_tick(const app_safety_attitude_t *att)
 {
     /* ---- 0) BOOT_CHECK：上电自检静默期，忽略所有外部事件 ---- */
     if (s_state == APP_SAFETY_BOOT_CHECK) {
-        if (!is_boot_check_active()) {
-            /* 自检计时到期：标记完成，按 pending arm 与电池状态决定目标态 */
+        /* 解锁条件（满足其一即可）：
+         *   ① 5 s 计时器到期（正常流程）
+         *   ② bsp_battery 在 t=3 s 自检快照读值 > BOOT_OK_MV（电池满足条件，提前约省 2 s）*/
+        if (!is_boot_check_active() || bsp_battery_is_boot_ok()) {
             s_boot_check_done     = true;
             s_fall_debounce_count = 0u;
             bool arm_req          = s_pending_arm;
