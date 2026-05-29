@@ -4,6 +4,13 @@
  *
  * 状态转移图（大写 = 顶层状态；Bat / Pitch 是事件源）：
  *
+ *   上电（首次 init）
+ *       │
+ *       ▼  等待 BOOT_CHECK_MS (5 s)
+ *  BOOT_CHECK ─(arm pending + Bat≠LOW_STOP)─► ARMED
+ *       │    ─(arm pending + Bat==LOW_STOP)─► LOW_BAT_STOP
+ *       └────(no pending arm)───────────────► DISARMED
+ *
  *            app_safety_arm()                |pitch|>60
  *  DISARMED ─────────────► ARMED ─────────────────► FALLEN
  *      ▲                    │   │                     │
@@ -54,7 +61,17 @@ static app_safety_block_t s_blk = {
 #define s_state  s_blk.state
 
 static uint32_t s_startup_grace_until_ms = 0u;
-static uint8_t s_fall_debounce_count = 0u;
+static uint8_t  s_fall_debounce_count    = 0u;
+
+/* BOOT_CHECK 相关：
+ *   s_boot_check_done  — 静态标志，C 启动清零；首次上电为 false，自检完成后置 true。
+ *                        模式切换时 app_safety_init() 见 true 则直接进 DISARMED。
+ *   s_pending_arm      — arm() 在 BOOT_CHECK 期间被调用时置 true；自检结束后据此
+ *                        决定进入 ARMED 还是 DISARMED。
+ *   s_boot_check_until_ms — 自检结束的绝对时间戳（ms）。 */
+static bool     s_boot_check_done     = false;   /* C 启动 BSS 初始化为 false */
+static bool     s_pending_arm         = false;
+static uint32_t s_boot_check_until_ms = 0u;
 
 /** 检测 canary 和 state 合法性；corruption 时 auto-heal 到 DISARMED。 */
 static app_safety_state_t sanitize_state(void)
@@ -62,7 +79,7 @@ static app_safety_state_t sanitize_state(void)
     bool corrupt = false;
     if (s_blk.canary_before != SAFETY_CANARY_VALUE) corrupt = true;
     if (s_blk.canary_after  != SAFETY_CANARY_VALUE) corrupt = true;
-    if ((uint32_t)s_blk.state > (uint32_t)APP_SAFETY_LOW_BAT_STOP) corrupt = true;
+    if ((uint32_t)s_blk.state > (uint32_t)APP_SAFETY_BOOT_CHECK) corrupt = true;
 
     if (corrupt) {
         (void)printf("[safety] CORRUPTION detected, auto-heal -> DISARMED\r\n");
@@ -78,6 +95,11 @@ static app_safety_state_t sanitize_state(void)
 static bool is_startup_grace_active(void)
 {
     return ((int32_t)(s_startup_grace_until_ms - bsp_systick_get_ms()) > 0);
+}
+
+static bool is_boot_check_active(void)
+{
+    return ((int32_t)(s_boot_check_until_ms - bsp_systick_get_ms()) > 0);
 }
 
 /** 进入"急停"硬件操作：brake_pulse + enable(false)。可重入（再次跌倒不出问题）。 */
@@ -139,11 +161,20 @@ static void transition(app_safety_state_t next)
 void app_safety_init(void)
 {
     s_blk.canary_before = SAFETY_CANARY_VALUE;
-    s_state = APP_SAFETY_DISARMED;
     s_blk.canary_after  = SAFETY_CANARY_VALUE;
-    s_startup_grace_until_ms =
-        bsp_systick_get_ms() + APP_SAFETY_STARTUP_FALL_MUTE_MS;
-    s_fall_debounce_count = 0u;
+    s_fall_debounce_count    = 0u;
+    s_pending_arm            = false;
+    s_startup_grace_until_ms = bsp_systick_get_ms() + APP_SAFETY_STARTUP_FALL_MUTE_MS;
+
+    if (!s_boot_check_done) {
+        /* 首次上电（MCU 硬件复位后 BSS 清零）：进入 BOOT_CHECK 静默自检态 */
+        s_state               = APP_SAFETY_BOOT_CHECK;
+        s_boot_check_until_ms = bsp_systick_get_ms() + APP_SAFETY_BOOT_CHECK_MS;
+    } else {
+        /* 模式切换后重新 init（非首次上电）：直接 DISARMED，跳过自检 */
+        s_state = APP_SAFETY_DISARMED;
+    }
+
     /* 上电默认电机已经被 bsp_motor_init 设为 STBY=0，但保险起见再做一遍 */
     bsp_motor_set_pwm_limit(1000u);
     bsp_motor_brake_pulse_ms(0u);   /* 等价 stop */
@@ -152,6 +183,12 @@ void app_safety_init(void)
 
 bool app_safety_arm(void)
 {
+    if (s_state == APP_SAFETY_BOOT_CHECK) {
+        /* 自检期间受理 arm 请求；自检结束后在 tick 内自动执行真正的 arm 动作。
+         * 返回 true 告知调用方"请求已受理"，不阻塞 main() 的后续流程。 */
+        s_pending_arm = true;
+        return true;
+    }
     if (s_state == APP_SAFETY_LOW_BAT_STOP) {
         return false;   /* 电池保护态拒绝重启，调用方自行蜂鸣 / 报警 */
     }
@@ -169,6 +206,29 @@ void app_safety_disarm(void)
 
 app_safety_state_t app_safety_tick(const app_safety_attitude_t *att)
 {
+    /* ---- 0) BOOT_CHECK：上电自检静默期，忽略所有外部事件 ---- */
+    if (s_state == APP_SAFETY_BOOT_CHECK) {
+        if (!is_boot_check_active()) {
+            /* 自检计时到期：标记完成，按 pending arm 与电池状态决定目标态 */
+            s_boot_check_done     = true;
+            s_fall_debounce_count = 0u;
+            bool arm_req          = s_pending_arm;
+            s_pending_arm         = false;
+
+            bsp_battery_state_t bs = bsp_battery_get_state();
+            if (bs == BSP_BATT_STATE_LOW_STOP) {
+                /* 自检期间电池已确认低于急停阈值，优先进 LOW_BAT_STOP */
+                transition(APP_SAFETY_LOW_BAT_STOP);
+            } else if (arm_req) {
+                transition(APP_SAFETY_ARMED);
+                /* 若电池为 LOW_WARN，下一拍 tick 会自动降级到 LOW_BAT_WARN */
+            } else {
+                transition(APP_SAFETY_DISARMED);
+            }
+        }
+        return s_state;
+    }
+
     /* ---- 1) 跌倒检测（仅 ARMED / LOW_BAT_WARN 时有意义） ---- */
     bool fallen = false;
     if (is_startup_grace_active() || (att == NULL) || !att->attitude_valid) {

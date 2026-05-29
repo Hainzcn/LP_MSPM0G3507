@@ -75,6 +75,29 @@ extern "C" {
 #define APP_SAFETY_FALL_DEBOUNCE_TICKS          (5u)
 #endif
 
+/**
+ * 上电静默自检时长（ms）。
+ *
+ *   安全状态机在首次上电后停留在 BOOT_CHECK 态，期间：
+ *     ─ 电机保持 STBY=0（禁止输出），PID 环路不产生驱动指令
+ *     ─ 忽略电池保护评估（配合 BSP_BATTERY_STARTUP_GRACE_TICKS，等待 ADC / 分压
+ *       电容充电稳定，避免冷启动时 ADC 读值偏低导致误报 BAT_WARN）
+ *     ─ 忽略跌倒检测（等待 MS901M EKF 输出稳定）
+ *
+ *   到期后根据情况自动转态：
+ *     ─ 若之前 arm() 被调用（pending=true）且电池非 LOW_STOP → ARMED
+ *     ─ 若之前 arm() 被调用且电池为 LOW_STOP              → LOW_BAT_STOP
+ *     ─ 若 arm() 未被调用                                  → DISARMED
+ *
+ *   注意：BOOT_CHECK 仅在首次上电（MCU 硬件复位后 C 启动清零 RAM）时触发一次；
+ *   后续模式切换（app_balance_run → app_motor_demo_run → ...）重新调用
+ *   app_safety_init() 时直接进入 DISARMED，不再重新自检。
+ *   与 BSP_BATTERY_STARTUP_GRACE_TICKS（500 拍 × 10 ms = 5 s）保持一致。
+ */
+#ifndef APP_SAFETY_BOOT_CHECK_MS
+#define APP_SAFETY_BOOT_CHECK_MS                (5000u)
+#endif
+
 /* ========================================================================== */
 /* 状态机                                                                       */
 /* ========================================================================== */
@@ -85,6 +108,7 @@ typedef enum {
     APP_SAFETY_LOW_BAT_WARN = 2,    /* 电池告警；电机已被限速但仍可走 */
     APP_SAFETY_FALLEN       = 3,    /* 跌倒；电机已急停 */
     APP_SAFETY_LOW_BAT_STOP = 4,    /* 电池保护；电机已急停 */
+    APP_SAFETY_BOOT_CHECK   = 5,    /* 上电自检（仅首次上电触发）：5 s 静默，电机禁用 */
 
     APP_SAFETY_FORCE_INT32_ = 0x7FFFFFFF   /* 强制枚举占 4 字节，降低
         --short-enums 单字节枚举被相邻写入污染的风险 */

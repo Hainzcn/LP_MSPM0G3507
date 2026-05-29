@@ -9,9 +9,9 @@
  *      电池电压 V_bat = ADC_mV / K ≈ ADC_mV × 5.545
  *
  * 接口约定：
- *   ─ `bsp_battery_init()` 只触发首次软件转换；ADC 已在 `SYSCFG_DL_init()` 中
- *      enable conversions（AUTO_NEXT 模式），后续靠 `bsp_battery_update()` 触发
- *      新一轮采样并读取 MEM0；
+ *   ─ `bsp_battery_init()` 清 ADC 中断标志并记录预采样等待截止时刻（不触发转换）；
+ *      ADC 已在 `SYSCFG_DL_init()` 中 enable conversions（AUTO_NEXT 模式），
+ *      首次转换由 `bsp_battery_update()` 在预采样延迟（默认 1 s）到期后触发；
  *   ─ `bsp_battery_update()` 建议 100 Hz 调用，内部做 EMA 滤波，整数实现，
  *      不动浮点；
  *   ─ 读 `bsp_battery_get_mv()` 拿 EMA 后的电池毫伏值；
@@ -47,12 +47,20 @@ extern "C" {
 #endif
 
 /**
- * 分压系数 = R2 / (R1 + R2)，定点表示放大 10000 倍
- *   默认 R1 = 100 k, R2 = 22 k → K = 22 / 122 ≈ 0.18033 → 1803
- *   电池满电 12.6 V 对应 ADC ≈ 12600 × 0.1803 / 3300 × 4095 ≈ 2820（< 4095，安全）
+ * 分压系数 = R2 / (R1 + R2)，定点表示放大 10000 倍。
+ *
+ *   标称值：R1 = 100 kΩ, R2 = 22 kΩ → K = 22/122 ≈ 0.1803 → 1803
+ *   实测校准：上电稳定后 ADC 读约 10 V，万用表量同一电池实际约 12 V。
+ *     实际 K = (10000 × 1803/10000) mV / 12000 mV = 1803/12000 ≈ 0.15025
+ *     → 校准后 RATIO_X10000 = round(0.15025 × 10000) = 1503
+ *   验证：mv_pin = 1803 mV → v_bat = 1803 × 10000/1503 ≈ 11993 mV ≈ 12 V ✓
+ *   阈值校核（以实际电压表示）：
+ *     WARN 9500 mV → 实际 ≈ 9500 × 1503/10000/0.15025 = 9.5 V ✓
+ *     STOP 9000 mV → 实际 ≈ 9.0 V ✓
+ *   电池满电 12.6 V → ADC ≈ 12600 × 0.15025/3.3 × 4095 ≈ 2350（< 4095，安全）
  */
 #ifndef BSP_BATTERY_DIVIDER_RATIO_X10000
-#define BSP_BATTERY_DIVIDER_RATIO_X10000         (1803)
+#define BSP_BATTERY_DIVIDER_RATIO_X10000         (1503)
 #endif
 
 /** EMA 滤波系数（α × 256）：value = (α × new + (256-α) × old) >> 8。
@@ -82,6 +90,30 @@ extern "C" {
  */
 #ifndef BSP_BATTERY_LOW_STOP_DEBOUNCE_SAMPLES
 #define BSP_BATTERY_LOW_STOP_DEBOUNCE_SAMPLES    (20u)
+#endif
+
+/**
+ * 上电预采样延迟（ms）：bsp_battery_init() 调用后，需等待本宏指定的毫秒数，
+ * bsp_battery_update() 才会触发首次 ADC 转换。
+ *
+ *   分压电路若含旁路电容，上电后电容通过 R1（约 100 kΩ）缓慢充电到真实电池电压；
+ *   在此之前采样会得到严重偏低的读数（如实际 12 V 读到 5 V）。
+ *   等待 1 s 后再采样，让电容充电到足够准确的水平，随后 EMA 快速收敛。
+ */
+#ifndef BSP_BATTERY_PRESAMPLE_DELAY_MS
+#define BSP_BATTERY_PRESAMPLE_DELAY_MS           (4950u)
+#endif
+
+/**
+ * 上电 ADC 稳定等待拍数：预采样延迟结束后，连续采样本宏指定拍数期间
+ * EMA 持续更新但 state 锁定 UNKNOWN，避免 EMA 尚未完全收敛就触发分类。
+ *
+ *   默认 500 拍 = 5 s @ 100 Hz；结合预采样延迟（1 s），上电到首次分类约 6 s。
+ *   BOOT_CHECK（5 s）结束时电池仍为 UNKNOWN → 安全状态机按 pending arm 进 ARMED，
+ *   约 1 s 后电池分类为 NORMAL，ARMED 状态不变。
+ */
+#ifndef BSP_BATTERY_STARTUP_GRACE_TICKS
+#define BSP_BATTERY_STARTUP_GRACE_TICKS          (500u)
 #endif
 
 /**
@@ -116,8 +148,10 @@ typedef enum {
 /* ========================================================================== */
 
 /**
- * @brief 初始化：清状态、触发首次软件转换。
- *        前提：`SYSCFG_DL_init()` 已完成（含 `SYSCFG_DL_ADC_BAT_init()`）。
+ * @brief 初始化：清状态、记录预采样等待截止时刻。
+ *        前提：`SYSCFG_DL_init()` 已完成（含 `SYSCFG_DL_ADC_BAT_init()`）
+ *              且 `bsp_systick_init()` 已完成（需要 ms 时间戳）。
+ *        首次 ADC 转换在 `bsp_battery_update()` 延迟到期后自动触发。
  */
 void bsp_battery_init(void);
 

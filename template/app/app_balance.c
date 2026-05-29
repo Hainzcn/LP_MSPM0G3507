@@ -987,6 +987,7 @@ static const char *safety_state_to_str(app_safety_state_t s)
     case APP_SAFETY_LOW_BAT_WARN: return "BAT_WARN";
     case APP_SAFETY_FALLEN:       return "FALLEN";
     case APP_SAFETY_LOW_BAT_STOP: return "BAT_STOP";
+    case APP_SAFETY_BOOT_CHECK:   return "BOOT";
     default:                      return "?";
     }
 }

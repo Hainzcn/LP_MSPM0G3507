@@ -12,15 +12,18 @@
  */
 
 #include "bsp_battery.h"
+#include "bsp_systick.h"
 #include "ti_msp_dl_config.h"
 
 #include <stdint.h>
 
 typedef struct {
-    uint32_t            ema_mv;          /* 滤波后电池电压（mV） */
-    uint16_t            last_raw;        /* 最近一次 ADC 原始值 */
-    uint8_t             primed;          /* 0 = 还没攒够第一次有效采样 */
-    uint8_t             low_stop_count;  /* 连续低于 STOP 的确认计数 */
+    uint32_t            ema_mv;               /* 滤波后电池电压（mV） */
+    uint32_t            sample_after_ms;      /* 上电预延迟到期绝对时刻（ms），到期前不采样 */
+    uint16_t            last_raw;             /* 最近一次 ADC 原始值 */
+    uint16_t            startup_grace_left;   /* 上电静默拍数倒计数，0 后开始 classify */
+    uint8_t             primed;               /* 0 = 还没攒够第一次有效采样 */
+    uint8_t             low_stop_count;       /* 连续低于 STOP 的确认计数 */
     bsp_battery_state_t state;
 } batt_state_t;
 
@@ -114,16 +117,21 @@ static bsp_battery_state_t classify(uint32_t mv, bsp_battery_state_t prev)
 
 void bsp_battery_init(void)
 {
-    s_batt.ema_mv   = 0u;
-    s_batt.last_raw = 0u;
-    s_batt.primed   = 0u;
-    s_batt.low_stop_count = 0u;
-    s_batt.state    = BSP_BATT_STATE_UNKNOWN;
+    s_batt.ema_mv             = 0u;
+    s_batt.last_raw           = 0u;
+    s_batt.primed             = 0u;
+    s_batt.low_stop_count     = 0u;
+    s_batt.startup_grace_left = (uint16_t)BSP_BATTERY_STARTUP_GRACE_TICKS;
+    s_batt.state              = BSP_BATT_STATE_UNKNOWN;
 
-    /* 清掉可能的脏中断标志，触发首次转换；下次 update 调用时即可读到结果 */
+    /* 上电预采样延迟：到期前 bsp_battery_update() 直接返回，不启动 ADC 转换。
+     * 延迟期间分压电路中的旁路电容有时间通过 R1+R2 充电到接近真实电压，
+     * 避免 ADC 首拍读到未充电的低值后 EMA 被"污染"。 */
+    s_batt.sample_after_ms = bsp_systick_get_ms() + BSP_BATTERY_PRESAMPLE_DELAY_MS;
+
+    /* 清掉 ADC 可能残留的脏中断标志；首次转换由 update() 在延迟到期后触发。 */
     DL_ADC12_clearInterruptStatus(ADC_BAT_INST,
         DL_ADC12_INTERRUPT_MEM0_RESULT_LOADED);
-    trigger_conversion();
 }
 
 uint32_t bsp_battery_raw_to_mv(uint16_t raw)
@@ -142,8 +150,14 @@ uint32_t bsp_battery_raw_to_mv(uint16_t raw)
 
 void bsp_battery_update(void)
 {
+    /* 上电预采样延迟：等待分压电容充电，到期前不启动任何 ADC 转换。
+     * 使用有符号差值比较，可正确处理 bsp_systick_get_ms() 的 uint32 溢出回绕。 */
+    if ((int32_t)(bsp_systick_get_ms() - s_batt.sample_after_ms) < 0) {
+        return;
+    }
+
     if (!wait_conversion_done()) {
-        /* 上一次转换未完成（异常）：跳过本拍，重新触发，等下一拍 */
+        /* 上一次转换未完成（或首次进入：尚未触发过转换）：触发一次，等下一拍读取 */
         trigger_conversion();
         return;
     }
@@ -164,6 +178,17 @@ void bsp_battery_update(void)
          *   uint32 中间乘积：α × mv ≤ 256 × 16000 = 4.1e6，安全 */
         uint32_t a = (uint32_t)BSP_BATTERY_EMA_ALPHA_256;
         s_batt.ema_mv = ((a * mv_now) + ((256u - a) * s_batt.ema_mv) + 128u) >> 8;
+    }
+
+    /* 上电静默：等待 ADC / 分压电容充电稳定。
+     *   EMA 已在上方完成更新（读值逐渐趋近真实电压），但 state 强制保持 UNKNOWN，
+     *   上层 app_safety_tick() 对 UNKNOWN 不做状态迁移，避免误触发 BAT_WARN。
+     *   与 APP_SAFETY_BOOT_CHECK_MS 对齐（默认均为 5 s）。 */
+    if (s_batt.startup_grace_left > 0u) {
+        s_batt.startup_grace_left--;
+        s_batt.state = BSP_BATT_STATE_UNKNOWN;
+        trigger_conversion();
+        return;
     }
 
     bsp_battery_state_t next = classify(s_batt.ema_mv, s_batt.state);
