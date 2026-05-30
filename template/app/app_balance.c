@@ -10,6 +10,7 @@
 
 #include "app_balance.h"
 
+#include "app_buzzer.h"
 #include "app_circle_demo.h"
 #include "app_safety.h"
 #include "app_track.h"
@@ -1282,6 +1283,7 @@ bool app_balance_run(void)
     k230_comm_init();
 
     /* 赛道模式状态机初始化（默认 IDLE；自检通过 ARMED 后自动启动） */
+    app_buzzer_init();
     app_track_init();
     bool     track_autostarted = false;
     uint32_t armed_at_ms       = 0u;   /* 首次观测到 ARMED 的时刻（等待 K230 起算） */
@@ -1294,6 +1296,8 @@ bool app_balance_run(void)
         tick_count++;
 
         if (process_log_uart_commands()) return true;
+
+        app_buzzer_tick_1ms();
 
         /* 上电自检通过（safety 由 BOOT_CHECK 进入 ARMED）后自动启动赛道模式。
          * 关键：冷上电 ARMED(~5s) 早于 K230 启动(~10s)，此时起立会遇到编码器噪声

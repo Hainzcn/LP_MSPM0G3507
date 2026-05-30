@@ -5,6 +5,7 @@
 
 #include "app_track.h"
 
+#include "app_buzzer.h"
 #include "app_safety.h"
 #include "bsp_motor.h"
 #include "bsp_systick.h"
@@ -212,6 +213,8 @@ void app_track_start(void)
     s_trk.stop_ms      = 0u;
     s_trk.rise_pitch0  = app_balance_get_pitch_meas();
     enter_phase(APP_TRACK_SELF_STAND);
+    /* 上电自检已通过（ARMED）；赛道模式启动时播放《兰花草》，播完自动静音。 */
+    app_buzzer_play_lanhua_cao();
     (void)printf("[track] start: rise from pitch0=%c%ld.%02lu deg (rise kp=%d kd=%d)\r\n",
         TRK_F2_S(s_trk.rise_pitch0),
         (long)TRK_F2_I(s_trk.rise_pitch0),
@@ -222,6 +225,7 @@ void app_track_start(void)
 void app_track_cancel(void)
 {
     if (s_trk.phase == APP_TRACK_IDLE) return;
+    app_buzzer_stop();
     /* 恢复角度环运动增益，避免取消后仍停留在自立增益。 */
     track_set_angle_motion();
     s_trk.applied_cps = 0;

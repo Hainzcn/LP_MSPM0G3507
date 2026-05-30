@@ -16,12 +16,11 @@
 #include "bsp_gpio.h"
 
 /* -------------------------------------------------------------------------- */
-/* PORTA 输出：BUZZER / LASER_EN / AIN1 / AIN2 / BIN1 / BIN2                  */
-/*   全部 CLEARED —— 蜂鸣器静音 / 激光关 / 电机方向位低，等待业务按需驱动     */
+/* PORTA 输出：LASER_EN / AIN1 / AIN2 / BIN1 / BIN2                           */
+/*   全部 CLEARED —— 激光关 / 电机方向位低，等待业务按需驱动                   */
 /* -------------------------------------------------------------------------- */
 static void init_outputs_porta(void)
 {
-    DL_GPIO_initDigitalOutput(BSP_BUZZER_IOMUX);
     DL_GPIO_initDigitalOutput(BSP_LASER_EN_IOMUX);
     DL_GPIO_initDigitalOutput(BSP_AIN1_IOMUX);
     DL_GPIO_initDigitalOutput(BSP_AIN2_IOMUX);
@@ -29,17 +28,17 @@ static void init_outputs_porta(void)
     DL_GPIO_initDigitalOutput(BSP_BIN2_IOMUX);
 
     DL_GPIO_clearPins(GPIOA,
-        BSP_BUZZER_PIN | BSP_LASER_EN_PIN |
+        BSP_LASER_EN_PIN |
         BSP_AIN1_PIN | BSP_AIN2_PIN | BSP_BIN1_PIN | BSP_BIN2_PIN);
 
     DL_GPIO_enableOutput(GPIOA,
-        BSP_BUZZER_PIN | BSP_LASER_EN_PIN |
+        BSP_LASER_EN_PIN |
         BSP_AIN1_PIN | BSP_AIN2_PIN | BSP_BIN1_PIN | BSP_BIN2_PIN);
 }
 
 /* -------------------------------------------------------------------------- */
-/* PORTB 输出：STBY / LED_R / LED_G / LED_B                                   */
-/*   STBY/LED_G/LED_B 初值 CLEARED；LED_R 初值 SET（红灯亮，标识 init OK）    */
+/* PORTB 输出：STBY / LED_R / LED_G / LED_B（PB4 蜂鸣器由 bsp_buzzer 初始化） */
+/*   STBY/LED_G/LED_B 初值 CLEARED；LED_R 初值 SET                          */
 /* -------------------------------------------------------------------------- */
 static void init_outputs_portb(void)
 {
@@ -86,8 +85,7 @@ static void init_inputs_porta(void)
         DL_GPIO_HYSTERESIS_ENABLE, DL_GPIO_WAKEUP_DISABLE);
 }
 
-/* PORTB 输入：Stage 1.5 后无业务输入；IMU_INT(PB4) 已随 MS901M 替换下线。
- * 若将来再添加 PORTB 输入，按 init_inputs_porta() 模板新增 init_inputs_portb()。 */
+/* PORTB 输入：Stage 1.5 后无业务输入；PB4 蜂鸣器由 bsp_buzzer 接管。 */
 
 void bsp_gpio_init(void)
 {

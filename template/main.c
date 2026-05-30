@@ -45,6 +45,7 @@
 #include "ti_msp_dl_config.h"
 
 #include "bsp_battery.h"
+#include "bsp_buzzer.h"
 #include "bsp_gpio.h"
 #include "bsp_imu_uart.h"
 #include "bsp_k230_uart.h"
@@ -148,9 +149,7 @@ static void fatal_imu_init_failure(int32_t rc)
 {
     DL_GPIO_setPins(BSP_LED_R_PORT, BSP_LED_R_PIN);
     DL_GPIO_clearPins(BSP_LED_G_PORT, BSP_LED_G_PIN | BSP_LED_B_PIN);
-    DL_GPIO_setPins(BSP_BUZZER_PORT, BSP_BUZZER_PIN);
-    bsp_systick_delay_ms(200u);
-    DL_GPIO_clearPins(BSP_BUZZER_PORT, BSP_BUZZER_PIN);
+    bsp_buzzer_beep_ms(1000u, 200u);
 
     (void)printf("[FATAL] ms901m boot timeout rc=%ld\n", (long)rc);
     for (;;) { __WFI(); }
@@ -186,6 +185,7 @@ int main(void)
 {
     SYSCFG_DL_init();
     bsp_gpio_init();
+    bsp_buzzer_init();
 
     if (bsp_systick_init(1000u) != 0) {
         for (;;) { __WFI(); }

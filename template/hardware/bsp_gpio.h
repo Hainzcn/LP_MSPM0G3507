@@ -37,15 +37,19 @@
 #define BSP_LED_B_IOMUX         IOMUX_PINCM50
 
 /* ========================================================================== */
-/* 输出 —— 蜂鸣器 / 激光使能 (PA, 单 pad)                                       */
+/* 输出 —— 激光使能 (PA1, 仅板底/J20 可达，非 BP 开放排针)                      */
 /* ========================================================================== */
-#define BSP_BUZZER_PORT         GPIOA
-#define BSP_BUZZER_PIN          DL_GPIO_PIN_0
-#define BSP_BUZZER_IOMUX        IOMUX_PINCM1
-
 #define BSP_LASER_EN_PORT       GPIOA
 #define BSP_LASER_EN_PIN        DL_GPIO_PIN_1
 #define BSP_LASER_EN_IOMUX      IOMUX_PINCM2
+
+/* ========================================================================== */
+/* 输出 —— 无源蜂鸣器 (PB4, BoosterPack NO.21 / J3 Right1)                     */
+/*   低电平触发；引脚宏供 bsp_buzzer（TIMA1 CCP0 硬件 PWM）使用。              */
+/* ========================================================================== */
+#define BSP_BUZZER_PORT         GPIOB
+#define BSP_BUZZER_PIN          DL_GPIO_PIN_4
+#define BSP_BUZZER_IOMUX        IOMUX_PINCM17
 
 /* ========================================================================== */
 /* 输出 —— TB6612 电机方向 / STBY                                               */
@@ -82,9 +86,7 @@
 #define BSP_ENC_R_B_PIN         DL_GPIO_PIN_13
 #define BSP_ENC_R_B_IOMUX       IOMUX_PINCM35
 
-/* PB4 已于 Stage 1.5 释放：MPU6050 被 ATK-MS901M 串口姿态传感器替代后，
- * 不再需要 IMU DataReady 中断引脚（MS901M 主动按帧上报）。详见
- * docs/TaskLog/Stage1.5-IMU-Swap-MS901M.md。 */
+/* PB4 已于 Stage 1.5 自 IMU_INT 释放，Stage 3+ 复用为 BUZZER（BP NO.21）。 */
 
 /* ========================================================================== */
 /* API                                                                         */
@@ -93,7 +95,7 @@
  * @brief 初始化所有业务 GPIO（输出 + 输入），由 main.c 在 SYSCFG_DL_init() 之后
  *        立即调用。函数内部：
  *          ① 10 个输出 pin 全部 initDigitalOutput()；
- *          ② STBY/AIN/BIN/BUZZER/LASER_EN/LED_G/LED_B 初值 CLEARED；
+ *          ② STBY/AIN/BIN/LASER_EN/LED_G/LED_B 初值 CLEARED；BUZZER 初值 SET（高=静音，低电平触发）；
  *          ③ LED_R 初值 SET（开机点亮一颗，便于直观判断 init 完成）；
  *          ④ 2 个输入 pin initDigitalInputFeatures()，均启用上拉；
  *          ⑤ **不**调用 NVIC_EnableIRQ —— 中断在阶段 2 各模块按需开启。
