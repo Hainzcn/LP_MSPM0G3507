@@ -140,11 +140,9 @@ typedef enum {
 #define APP_TRACK_SETTLE_MS                 (400u)
 #endif
 
-/* ---- 速度包络（raw cps；K230 target_v 已 ×SCALE 还原为 raw cps） ---- */
-/** 启动加速：每 20 Hz 拍允许的最大速度增量（raw cps）。 */
-#ifndef APP_TRACK_ACCEL_CPS_PER_TICK
-#define APP_TRACK_ACCEL_CPS_PER_TICK        (400)
-#endif
+/* ---- 速度包络（raw cps；K230 target_v 已 ×SCALE 还原为 raw cps） ----
+ * TRACE 阶段速度透传 K230，不在 MCU 二次加速限速（与手动 WiFi trace 对齐）。
+ * 下列 DECEL 仅用于 BRAKE / FINAL_BRAKE 减速停稳。 */
 
 /** 减速刹车：每 20 Hz 拍允许的最大速度减量（raw cps，较陡）。 */
 #ifndef APP_TRACK_DECEL_CPS_PER_TICK

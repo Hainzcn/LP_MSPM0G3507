@@ -332,14 +332,13 @@ void app_track_tick_20hz(const ms901m_snapshot_t *snap,
         break;
     }
 
-    /* ── 循线：采纳 K230 速度（经加速包络），累计偏航 + 里程判圈 ──── */
+    /* ── 循线：速度透传 K230（与手动 WiFi trace 2000 一致），累计判圈 ──
+     * 不在此二次限速：K230 已有 slew，balance 有 speed_target_lpf；
+     * 旧方案 ACCEL=400 raw/拍 使 2000 归一化目标需 ~2.5s 才爬满 → 骑线几乎不走。 */
     case APP_TRACK_TRACE: {
         update_lap_accum(snap, fb);
 
-        int32_t desired = cmd->target_speed_cps;   /* K230 下发 raw cps */
-        s_trk.applied_cps = rate_limit(s_trk.applied_cps, desired,
-                                       APP_TRACK_ACCEL_CPS_PER_TICK);
-        cmd->target_speed_cps = s_trk.applied_cps;
+        s_trk.applied_cps = cmd->target_speed_cps;   /* 诊断用，透传 K230 raw cps */
         /* target_dif_cps 透传 K230 循线转向 */
 
         if (lap_complete(elapsed_ms)) {
