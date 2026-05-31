@@ -105,7 +105,7 @@ typedef enum {
  */
 /** 自立角度环 kp（起摆冲量）。 */
 #ifndef APP_TRACK_RISE_KP
-#define APP_TRACK_RISE_KP                   (50.0f)
+#define APP_TRACK_RISE_KP                   (40.0f)
 #endif
 /** 自立角度环 ki（固定 0，关积分防 windup）。 */
 #ifndef APP_TRACK_RISE_KI
