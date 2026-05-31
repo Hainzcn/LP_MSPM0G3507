@@ -22,7 +22,7 @@
 >
 > **🔧 Stage 3.10 自校零开关 + 栈修复 v2.0 + RPM 量纲化（2026-05-24~26）**：新增 `APP_BALANCE_PITCH_AUTOZERO_ENABLE` 总开关、`PITCH_OFFSET_DEFAULT_DEG` 硬编码回退值。栈从 1 KB 扩至 2 KB + canary 防护（`76d7d30`）。差速环量纲由归一化 cps 切换为 RPM。详见 **§7D**。
 >
-> **🏁 Stage 3.11 赛道模式 + 自立双 PID（2026-05-30）**：新增 `app_track` 主控状态机（自立→循线→判圈→暂停→停车），MCU 为总指挥；自立段专用 rise PID（猛起→阻尼减速→稳定），摆稳后切运动 PID；`VEHICLE_STATUS` 上报 `track_phase/lap` 与 K230 阶段闸门对齐；自检 `ARMED` 后默认等 K230 在线再起立。详见 **§7E**。
+> **🏁 Stage 3.11 赛道模式 + 自立双 PID（2026-05-30 ~ 2026-05-31）**：新增 `app_track` 主控状态机（自立→循线→判圈→暂停→停车），MCU 为总指挥；自立段专用 rise PID（猛起→阻尼减速→稳定），摆稳后切运动 PID；`VEHICLE_STATUS` 上报 `track_phase/lap` 与 K230 阶段闸门对齐；自检 `ARMED` 后默认等 K230 在线再起立。同期补入蜂鸣器驱动与 `app_track_start()` 启动曲谱播放；2026-05-30 晚进一步取消 TRACE 阶段 MCU 侧二次加速限速，改为**直接透传 K230 原始速度**，与手动 WiFi `trace` 行为对齐。详见 **§7E**。
 >
 > 文档定位：阶段 3 自 2026-05-11 起演进；**当前装车控制架构以 Stage 3.11 为准**（含赛道模式）。Stage 3.1~3.6 记录仍保留供对照，其中 §5 四级级联、`rp` 角速度内环、50 Hz 航向调度等描述**已被 Stage 3.7 取代**。
 >
@@ -49,7 +49,7 @@
 | — | **Stage 3.8** 差速闭环 | **完成** —— 航向角环 → `diff_pid` → PWM 三级级联，串口 `dp`，EMA 目标/测量双滤波 |
 | — | **Stage 3.9** 圆弧运动演示 | **完成** —— `app_circle_demo` + `robot_param.h`，串口 `c`/`circle`/`cx` |
 | — | **Stage 3.10** 自校零开关 + 栈修复 | **完成** —— `AUTOZERO_ENABLE` 默认关闭；栈 2 KB + canary |
-| — | **Stage 3.11** 赛道模式 + 自立双 PID | **代码完成，联调中** —— `app_track` 状态机 + rise/motion 双增益 + K230 阶段闸门 |
+| — | **Stage 3.11** 赛道模式 + 自立双 PID | **代码完成，联调中** —— `app_track` 状态机 + rise/motion 双增益 + K230 阶段闸门 + 启动蜂鸣提示 + TRACE 速度透传 |
 
 > **架构演进路线图**（各版本里程碑）：
 >
@@ -65,7 +65,7 @@
 > Stage 3.8 (03dc3a3/412800f)   + 差速闭环 + EMA 目标/测量滤波         航向环→diff_pid 级联
 > Stage 3.9 (e3e7e50)           + 圆弧运动演示（circle demo）          三重判停 + robot_param
 > Stage 3.10 (f527a3d/f8dba1e)  + 自校零开关 + 差速环 RPM 量纲化
-> Stage 3.11 (2026-05-30)       + 赛道模式 app_track + 自立 rise PID      当前架构
+> Stage 3.11 (2026-05-30~31)    + 赛道模式 app_track + 自立 rise PID + 启动蜂鸣提示 + TRACE 速度透传 当前架构
 > ```
 
 ---
@@ -786,13 +786,35 @@ rise 增益设计要点（`app_track.h`）：
 
 默认起点：`RISE_KP=50, RISE_KI=0, RISE_KD=8, RISE_OFS=20`；摆起窗口 `RISE_MS=1000`；稳定判据 `|pitch|<10°` 且 `|gz|<40°/s` 持续 `SETTLE_MS=400`。
 
-### 7E.3 循线加速 / 减速刹车（速度包络）
+### 7E.3 循线速度透传 / 减速刹车（2026-05-30 晚修订）
 
-在 `app_track_tick_20hz` 内对 **下发** `target_speed_cps` 做 `rate_limit`：
+首版 Stage 3.11 在 `app_track_tick_20hz` 内对 TRACE 阶段的 `target_speed_cps`
+额外套了一层 MCU 侧 `rate_limit`，希望用统一包络抑制起步突变。但联调后发现，
+这会与 K230 侧已有的速度调度/`slew` 叠加，导致赛道模式下的实际起步明显慢于
+手动 WiFi `trace`。
 
-- **TRACE 进入/恢复**：`ACCEL_CPS_PER_TICK=400`（20 Hz 下约 0.6 s 爬满）
-- **BRAKE / FINAL_BRAKE**：`DECEL_CPS_PER_TICK=800` 拉到 0；`|avg_cps|<STOP_CPS` 持续 `STOP_SETTLE_MS` 判停稳
+本次修订（`67876e8`, 2026-05-30 22:55 CST）后：
+
+- **TRACE 阶段**：**直接透传 K230 raw cps**，不再在 MCU 二次加速限速
+- **BRAKE / FINAL_BRAKE**：仍使用 `DECEL_CPS_PER_TICK=800` 拉到 0
+- **`s_trk.applied_cps`**：保留，但仅用于诊断/日志，不再作为 TRACE 限速后的真实输出
 - **不用** `app_safety` 的 `brake_pulse`（会掉平衡）
+
+修订原因：
+
+- K230 已有 `slew-rate` 与速度调度，MCU 再做一层加速包络属于重复控制
+- 旧方案 `ACCEL_CPS_PER_TICK=400 raw/拍` 会让 `target_v=2000` 级别目标爬升过慢，
+  表现为“手动 WiFi trace 能走，赛道 TRACE 几乎不走”
+- 直接透传后，赛道模式 TRACE 与手动 `trace` 的纵向速度响应终于一致，更利于
+  K230 侧循线、瞄准和整圈联调对齐
+
+当前速度包络语义：
+
+| 阶段 | 速度处理 |
+|------|---------|
+| `TRACE` | 透传 `cmd->target_speed_cps`（K230 原始速度） |
+| `BRAKE` / `FINAL_BRAKE` | MCU 本地按 `DECEL_CPS_PER_TICK` 减速到 0 |
+| `PAUSE` / `DONE` | 保持 0，等待下一阶段 |
 
 ### 7E.4 判圈（MCU 自主）
 
@@ -816,20 +838,50 @@ APP_TRACK_AUTOSTART_K230_WAIT_MS = 15000u
 
 逻辑：首次观测 `APP_SAFETY_ARMED` 起计时；`s_k230_online==true` **或** 超时后才 `app_track_start()`。等待期间 PID 增益仍为 0、电机不驱动。
 
-### 7E.6 新增 / 改动文件
+### 7E.6 蜂鸣器提示（`3ea42c78`, 2026-05-30 22:15 CST）
+
+为给赛道模式启动提供更直观的人机提示，并顺便验证 `ARMED → app_track_start()`
+链路已经真正触发，本次补入了完整蜂鸣器驱动与应用层曲谱播放：
+
+- **硬件层 `bsp_buzzer`**：新增 TIMA1 CCP0 硬件 PWM 驱动，支持按频率输出方波
+- **应用层 `app_buzzer`**：新增非阻塞曲谱调度器，1 kHz 主循环驱动
+- **赛道模式接入**：`app_track_start()` 自动播放《兰花草》，`app_track_cancel()` 立即停止
+- **fatal 场景复用**：IMU 启动失败提示由“直接拉 GPIO 延时”改为 `bsp_buzzer_beep_ms()`
+
+当前行为：
+
+| 场景 | 行为 |
+|------|------|
+| `app_track_start()` | 进入 `SELF_STAND` 后启动《兰花草》播放 |
+| `app_track_cancel()` | 立即静音，避免退出赛道模式后继续播曲 |
+| `fatal_imu_init_failure()` | 1000 Hz / 200 ms 蜂鸣告警 |
+
+实现要点：
+
+- `app_buzzer_tick_1ms()` 挂在主循环 1 kHz 节拍内，曲谱播放**不阻塞**平衡控制
+- 音符间保留 `NOTE_GAP_MS` 静音间隔，避免连续同音高听感粘连
+- 赛道模式播放只作为提示音，不参与任何状态判定；即使播完或中断，也不影响
+  `app_track` 的 rise / trace / brake 主状态机
+
+### 7E.7 新增 / 改动文件
 
 | 文件 | 变更 |
 |------|------|
+| `template/app/app_buzzer.{c,h}` | **新建** — 《兰花草》曲谱播放、非阻塞 1 kHz 调度、start/stop/is_playing 接口 |
+| `template/hardware/bsp_buzzer.{c,h}` | **新建** — TIMA1 CCP0 蜂鸣器 PWM 驱动，支持设频与阻塞短鸣 |
 | `template/app/app_track.{c,h}` | **新建** — 状态机 + rise/motion 增益 + 包络 + 判圈 |
-| `template/app/app_balance.{c,h}` | `set_rise_override()` / `get_pitch_meas()`；20 Hz 调 `app_track_tick_20hz`；`trk`/`tx` 命令；1 Hz `[hb] track=...` |
+| `template/app/app_balance.{c,h}` | `set_rise_override()` / `get_pitch_meas()`；20 Hz 调 `app_track_tick_20hz`；1 kHz 调 `app_buzzer_tick_1ms()`；`trk`/`tx` 命令；1 Hz `[hb] track=...` |
+| `template/hardware/bsp_gpio.{c,h}` | 蜂鸣器引脚初始化职责移交 `bsp_buzzer`；PB4 复用说明更新 |
+| `template/main.c` | `bsp_buzzer_init()` 启动；fatal IMU 告警改为蜂鸣器接口 |
 | `template/middle/k230_protocol.h` | `k230_vehicle_status_t` +2 字段 |
 | K230 侧 | 见 [K230/docs/TaskLog/phase_G_track_mode.md](../../../K230/docs/TaskLog/phase_G_track_mode.md) |
 
-### 7E.7 验收清单（赛道模式）
+### 7E.8 验收清单（赛道模式）
 
 | 项 | 通过条件 | 状态 |
 |---|---------|------|
 | 冷上电不自立疯冲 | K230 未亮屏前心跳无 `[track] start`；或 `[track] autostart: K230 online` 后再起 | [ ] |
+| 启动蜂鸣提示 | `app_track_start()` 后听到完整启动曲谱；`tx`/取消后立即静音 | [ ] |
 | 自立摆起 | 30~40° 支架姿态 → 1 s 内摆近直立，无持续 ±1000 PWM 饱和 | [ ] |
 | K230 阶段对齐 | 非 TRACE 阶段 K230 OSD `CTRL:idle`；TRACE 时 `CTRL:TRACE` | [ ] |
 | 满圈暂停 | lap1 满圈 → 停稳 → 直立 5 s → lap2 | [ ] |
@@ -887,12 +939,14 @@ lt,<t_ms>,<pitch_deg>,<left_target_rpm>,<right_target_rpm>,<left_actual_rpm>,<ri
 | 文件 | 主要变更 |
 |------|---------|
 | `template/app/app_balance.h` | Stage 3.7：两级 API + `pid2_t` + 航向角环；编译期可配宏（周期、LPF、极性、量纲缩放） |
-| `template/app/app_balance.c` | 状态机 + 三路 `pid2` + 多速率调度 + 串口命令 + lt_stream + K230 帧分发 + **Stage 3.11** `app_track` 集成 / `rise_override` |
-| `template/app/app_track.{c,h}` | **Stage 3.11 新建** — 赛道主控状态机 + rise/motion 双增益 + 判圈 + 速度包络 |
+| `template/app/app_balance.c` | 状态机 + 三路 `pid2` + 多速率调度 + 串口命令 + lt_stream + K230 帧分发 + **Stage 3.11** `app_track` 集成 / `rise_override` / `app_buzzer_tick_1ms` |
+| `template/app/app_track.{c,h}` | **Stage 3.11 新建并迭代** — 赛道主控状态机 + rise/motion 双增益 + 判圈 + TRACE 速度透传 / BRAKE 减速包络 |
+| `template/app/app_buzzer.{c,h}` | **Stage 3.11 新建** — 曲谱播放与蜂鸣控制 |
 | `template/middle/pid.{c,h}` | 保留 `pid_t`；新增 `pid2_t` / `pid2_update()` |
 | `template/app/app_safety.{c,h}` | 保持 Stage 2 不变；200 Hz 角速度环内集成为 `app_safety_tick()` |
 | `template/hardware/bsp_motor.h` | 双门槛死区（静/动摩擦 8 宏）+ sigma-delta dither + 右路正转补偿 + 运行时开关 API |
 | `template/hardware/bsp_motor.c` | 双门槛状态机 + dither 累加发射 + 编码器停转检测 + X2 解码默认 |
+| `template/hardware/bsp_buzzer.{c,h}` | **Stage 3.11 新建** — 蜂鸣器 PWM 驱动 |
 | `template/hardware/bsp_log_uart.{c,h}` | 新增 `try_write_async` 非阻塞 TX |
 | `template/main.c` | 默认装车入口 `app_balance_run()` + MS901M 200 Hz 配置工具 |
 
@@ -946,7 +1000,9 @@ lt,<t_ms>,<pitch_deg>,<left_target_rpm>,<right_target_rpm>,<left_actual_rpm>,<ri
 | 5 | XDS-UART 在 CSV 流 + 1 Hz 日志双开时偶有冲突 | **不阻塞** | CSV 流仅调试期用，装车后关闭 |
 | 6 | K230 `MOTION_CMD.target_omega` → `target_yaw_pm`；非 0 时航向环暂停，主动转向协调层待实现 | **部分完成** | 见 Stage 4 TaskLog |
 | 7 | 赛道模式自立 `RISE_KD` / 判圈 `LAP_LENGTH_MM` 待上车标定 | **整定中** | 见 §7E.2 / §7E.4 |
-| 8 | 冷上电 K230 等待超时（15 s）后仍无 K230 时自立可完成、循线需 K230 | **已知** | `APP_TRACK_AUTOSTART_K230_WAIT_MS` |
+| 8 | 启动曲谱播放依赖 1 kHz 节拍持续运行；若后续主循环重构为分线程/RTOS，需保留等价 tick 驱动 | **已知** | `app_buzzer_tick_1ms()` |
+| 9 | TRACE 速度已改为 K230 原始值透传，K230 / MCU 两侧速度默认值需保持一致 | **联调中** | 若再改 `CTRL_V_NOMINAL` 或 `target_v` 尺度，需同步核对 Stage 4 / K230 文档 |
+| 10 | 冷上电 K230 等待超时（15 s）后仍无 K230 时自立可完成、循线需 K230 | **已知** | `APP_TRACK_AUTOSTART_K230_WAIT_MS` |
 
 ---
 
@@ -963,3 +1019,5 @@ lt,<t_ms>,<pitch_deg>,<left_target_rpm>,<right_target_rpm>,<left_actual_rpm>,<ri
 | v0.7 | 2026-05-21 | + Stage 3.7 两级级联（`pid2`）+ 航向角环收敛；移除 `rp`/`tp`；更新验收清单与 §8.3 |
 | v0.8 | 2026-05-26 | + Stage 3.8 差速闭环（`03dc3a3`/`412800f`/`f8dba1e`）——新增 `diff_pid` + EMA 目标/测量滤波 + RPM 量纲化 + 航向→差速三级级联；+ Stage 3.9 圆弧运动演示（`e3e7e50`）——`app_circle_demo` + `robot_param.h` + 三重判停；+ Stage 3.10 自校零总开关（`f527a3d`）+ 栈修复 v2.0（`76d7d30`）——2 KB + canary + 结构体包装；补写 §7B/§7C/§7D 完整章节 |
 | v0.9 | 2026-05-30 | + Stage 3.11 赛道模式——`app_track` 状态机 + rise/motion 双 PID + 速度包络判圈 + K230 在线等待自启动；`VEHICLE_STATUS` 扩展 `track_phase/lap`；§7E 完整章节 |
+| v0.10 | 2026-05-30 | + `3ea42c78`：蜂鸣器支持与曲谱播放——新增 `bsp_buzzer` / `app_buzzer`；赛道模式 `app_track_start()` 自动播放《兰花草》，cancel 立即停止；fatal IMU 告警改为蜂鸣器接口 |
+| v0.11 | 2026-05-30 | + `67876e8`：Stage 3.11 TRACE 速度逻辑修订——取消 MCU 侧二次加速限速，直接透传 K230 raw cps；保留 BRAKE/FINAL_BRAKE 本地减速包络；文档同步说明“赛道 TRACE 与手动 WiFi trace 对齐” |
