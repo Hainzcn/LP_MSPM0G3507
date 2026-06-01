@@ -25,6 +25,7 @@ void pid2_init(pid2_t *p)
     p->i_min      = -1000.0f;
     p->i_max      =  1000.0f;
     p->out_offset = 0.0f;
+    p->freeze_integral = false;
     p->target     = 0.0f;
     p->actual     = 0.0f;
     p->prev_actual = 0.0f;
@@ -48,10 +49,13 @@ void pid2_update(pid2_t *p)
 
     float error = p->target - p->actual;
 
-    /* 积分项：Ki=0 时自动清零，防"调参积分债务" */
+    /* 积分项：Ki=0 时自动清零，防"调参积分债务"。
+     * freeze_integral 时保留现值不累加（反馈临时不可信场景），仍参与输出。 */
     if (p->ki != 0.0f) {
-        p->i_term += error;
-        p->i_term  = clampf(p->i_term, p->i_min, p->i_max);
+        if (!p->freeze_integral) {
+            p->i_term += error;
+            p->i_term  = clampf(p->i_term, p->i_min, p->i_max);
+        }
     } else {
         p->i_term = 0.0f;
     }

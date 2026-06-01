@@ -396,19 +396,27 @@ static void balance_step_speed(const app_balance_attitude_t *att,
     bool accel_ok = (a_err < (2.0f * accel_thresh));
 
     /* ── 4) 速度环 → target_tilt_deg ──────────────────────────── */
-    if (accel_ok) {
-        float target_norm = (float)cmd->target_speed_cps / (float)APP_BALANCE_SPEED_CPS_SCALE;
+    /* 点头修复 A：指令整形（目标低通）与速度环常驻在线，加速度门控只用于
+     * 冻结积分累加（freeze_integral），而非冻结整条速度环。
+     *
+     * 旧实现把目标低通 + 速度 PID 整体包在 if(accel_ok) 内：启动加速 / 刹车
+     * 减速正是 a_err 最大、且车体俯仰摆动时 IMU 还叠加切向加速度的时刻，
+     * accel_ok 极易瞬间为假 → target_tilt 被冻结在旧值；门控重开后速度 PID
+     * 用累计误差一次性算出新 target_tilt，被 kp=70 的角度环放大成 PWM 阶跃
+     * → "点头"顿挫，并形成"点头→门控触发→释放跳变→再点头"的回路。
+     *
+     * 现在 target_tilt 始终随平滑后的目标 / 实测连续变化，只在 a_err 超限时
+     * 暂停积分累加（避免线加速度伪信号灌入速度积分），消除释放跳变。 */
+    float target_norm = (float)cmd->target_speed_cps / (float)APP_BALANCE_SPEED_CPS_SCALE;
 
-        /* 目标低通：阶跃指令平滑爬升，避免启动瞬间速度 PID 输出过大的
-         * target_tilt_deg 引起"微倾→后仰→再倾"顿挫。 */
-        s_bal.speed_target_lpf += APP_BALANCE_SPEED_TARGET_LPF_ALPHA
-                                  * (target_norm - s_bal.speed_target_lpf);
+    s_bal.speed_target_lpf += APP_BALANCE_SPEED_TARGET_LPF_ALPHA
+                              * (target_norm - s_bal.speed_target_lpf);
 
-        s_bal.speed_pid.target = s_bal.speed_target_lpf;
-        s_bal.speed_pid.actual = s_bal.speed_lpf_cps;
-        pid2_update(&s_bal.speed_pid);
-        s_bal.target_tilt_deg = s_bal.speed_pid.out;
-    }
+    s_bal.speed_pid.target          = s_bal.speed_target_lpf;
+    s_bal.speed_pid.actual          = s_bal.speed_lpf_cps;
+    s_bal.speed_pid.freeze_integral = !accel_ok;
+    pid2_update(&s_bal.speed_pid);
+    s_bal.target_tilt_deg = s_bal.speed_pid.out;
 
     /* ── 5) 航向环 → target_dif_cps ──────────────────────────── */
     (void)yaw_angle_step(att, cmd);

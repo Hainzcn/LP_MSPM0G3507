@@ -239,7 +239,7 @@ extern "C" {
  *   根据实车重心位置预先测量后填入，可消除大部分静态偏角。
  */
 #ifndef APP_BALANCE_PITCH_OFFSET_DEFAULT_DEG
-#define APP_BALANCE_PITCH_OFFSET_DEFAULT_DEG    (0.8f)
+#define APP_BALANCE_PITCH_OFFSET_DEFAULT_DEG    (-1.0f)
 #endif
 
 /**

@@ -53,6 +53,11 @@ typedef struct {
      * 典型值：TB6612 + N20 电机约 60~100 permille；调试期先从 0 开始逐步加。 */
     float out_offset;
 
+    /* 积分冻结：true 时本拍跳过 i_term 累加（保留现值参与输出），仍计算
+     * 比例/微分。用于"反馈临时不可信"场景（如加速度门控）只冻结积分，
+     * 而不冻结整条环路，避免释放时输出跳变。默认 false。 */
+    bool  freeze_integral;
+
     /* 内部状态（业务侧不要直接写） */
     float target;
     float actual;
