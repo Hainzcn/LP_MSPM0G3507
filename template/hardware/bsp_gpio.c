@@ -16,23 +16,20 @@
 #include "bsp_gpio.h"
 
 /* -------------------------------------------------------------------------- */
-/* PORTA 输出：LASER_EN / AIN1 / AIN2 / BIN1 / BIN2                           */
-/*   全部 CLEARED —— 激光关 / 电机方向位低，等待业务按需驱动                   */
+/* PORTA 输出：AIN1 / AIN2 / BIN1 / BIN2（LASER_EN 由 bsp_laser 单独初始化）  */
+/*   全部 CLEARED —— 电机方向位低；激光 PA1 低有效，不可在此清 0 否则上电即亮 */
 /* -------------------------------------------------------------------------- */
 static void init_outputs_porta(void)
 {
-    DL_GPIO_initDigitalOutput(BSP_LASER_EN_IOMUX);
     DL_GPIO_initDigitalOutput(BSP_AIN1_IOMUX);
     DL_GPIO_initDigitalOutput(BSP_AIN2_IOMUX);
     DL_GPIO_initDigitalOutput(BSP_BIN1_IOMUX);
     DL_GPIO_initDigitalOutput(BSP_BIN2_IOMUX);
 
     DL_GPIO_clearPins(GPIOA,
-        BSP_LASER_EN_PIN |
         BSP_AIN1_PIN | BSP_AIN2_PIN | BSP_BIN1_PIN | BSP_BIN2_PIN);
 
     DL_GPIO_enableOutput(GPIOA,
-        BSP_LASER_EN_PIN |
         BSP_AIN1_PIN | BSP_AIN2_PIN | BSP_BIN1_PIN | BSP_BIN2_PIN);
 }
 

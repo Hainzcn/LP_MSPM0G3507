@@ -47,6 +47,7 @@
 #include "bsp_battery.h"
 #include "bsp_buzzer.h"
 #include "bsp_gpio.h"
+#include "bsp_laser.h"
 #include "bsp_imu_uart.h"
 #include "bsp_k230_uart.h"
 #include "bsp_log_uart.h"
@@ -185,6 +186,7 @@ int main(void)
 {
     SYSCFG_DL_init();
     bsp_gpio_init();
+    bsp_laser_init();
     bsp_buzzer_init();
 
     if (bsp_systick_init(1000u) != 0) {

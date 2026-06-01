@@ -7,6 +7,7 @@
 
 #include "app_buzzer.h"
 #include "app_safety.h"
+#include "bsp_laser.h"
 #include "bsp_motor.h"
 #include "bsp_systick.h"
 #include "robot_param.h"
@@ -84,11 +85,46 @@ static const char *phase_name(app_track_phase_t p)
     }
 }
 
+static void track_laser_for_phase(app_track_phase_t phase)
+{
+    bool on = (phase == APP_TRACK_TRACE) ||
+              (phase == APP_TRACK_BRAKE) ||
+              (phase == APP_TRACK_PAUSE) ||
+              (phase == APP_TRACK_FINAL_BRAKE);
+    bsp_laser_set_enable(on);
+}
+
+static void track_phase_enter(app_track_phase_t phase)
+{
+    switch (phase) {
+    case APP_TRACK_STAND_SETTLE:
+        app_buzzer_play_cue(APP_BUZZER_CUE_STOOD_UP);
+        track_laser_for_phase(phase);
+        break;
+    case APP_TRACK_TRACE:
+        app_buzzer_play_cue(APP_BUZZER_CUE_TRACE_START);
+        track_laser_for_phase(phase);
+        break;
+    case APP_TRACK_PAUSE:
+        app_buzzer_play_cue(APP_BUZZER_CUE_LAP_PAUSE);
+        track_laser_for_phase(phase);
+        break;
+    case APP_TRACK_DONE:
+        app_buzzer_play_cue(APP_BUZZER_CUE_ALL_DONE);
+        track_laser_for_phase(phase);
+        break;
+    default:
+        track_laser_for_phase(phase);
+        break;
+    }
+}
+
 static void enter_phase(app_track_phase_t next)
 {
     s_trk.phase          = next;
     s_trk.phase_start_ms = bsp_systick_get_ms();
     (void)printf("[track] -> %s (lap=%u)\r\n", phase_name(next), (unsigned int)s_trk.lap);
+    track_phase_enter(next);
 }
 
 /** 角度环 → 自立专用增益（猛起 kp / ki=0 / kd 阻尼）。 */
@@ -138,18 +174,38 @@ static void reset_lap_accum(const bsp_motor_feedback_t *fb)
     }
 }
 
-/** 判圈：偏航 + 里程双条件，超时兜底。 */
-static bool lap_complete(uint32_t elapsed_ms)
+/** 判圈：① 偏航主判据 → ② 里程收口 → ③ 超时（见 app_track.h 注释）。 */
+static bool lap_complete(uint32_t elapsed_ms, const char **reason_out)
 {
     float yaw_abs = (s_trk.yaw_accum_deg < 0.0f)
                     ? -s_trk.yaw_accum_deg : s_trk.yaw_accum_deg;
     int32_t arc_abs = (s_trk.arc_mm < 0) ? -s_trk.arc_mm : s_trk.arc_mm;
     int32_t arc_min = (APP_TRACK_LAP_LENGTH_MM * APP_TRACK_LAP_ARC_MIN_X100) / 100;
+    int32_t arc_complete =
+        (APP_TRACK_LAP_LENGTH_MM * APP_TRACK_LAP_ARC_COMPLETE_X100) / 100;
 
+    /* ① 偏航主判据 + arc_min 防原地空转 */
     if ((yaw_abs >= APP_TRACK_YAW_PER_LAP_DEG) && (arc_abs >= arc_min)) {
+        if (reason_out != NULL) {
+            *reason_out = "yaw+arc_min";
+        }
         return true;
     }
+
+    /* ② 里程收口：gyro 积分偏小时以弧长先满圈 */
+    if ((arc_abs >= arc_complete) && (arc_abs >= arc_min) &&
+        (yaw_abs >= APP_TRACK_YAW_MIN_FOR_ARC_DEG)) {
+        if (reason_out != NULL) {
+            *reason_out = "arc_complete";
+        }
+        return true;
+    }
+
+    /* ③ 超时兜底 */
     if (elapsed_ms >= APP_TRACK_LAP_TIMEOUT_MS) {
+        if (reason_out != NULL) {
+            *reason_out = "timeout";
+        }
         (void)printf("[track] lap timeout fallback (yaw=%c%ld arc=%ldmm)\r\n",
             TRK_F2_S(s_trk.yaw_accum_deg), (long)TRK_F2_I(s_trk.yaw_accum_deg),
             (long)arc_abs);
@@ -213,6 +269,7 @@ static bool decel_phase_done(uint32_t elapsed_ms)
 
 void app_track_init(void)
 {
+    bsp_laser_init();
     s_trk.phase          = APP_TRACK_IDLE;
     s_trk.lap            = 0u;
     s_trk.phase_start_ms = 0u;
@@ -243,8 +300,6 @@ void app_track_start(void)
     s_trk.stop_ms      = 0u;
     s_trk.rise_pitch0  = app_balance_get_pitch_meas();
     enter_phase(APP_TRACK_SELF_STAND);
-    /* 上电自检已通过（ARMED）；赛道模式启动时播放《兰花草》，播完自动静音。 */
-    app_buzzer_play_lanhua_cao();
     (void)printf("[track] start: rise from pitch0=%c%ld.%02lu deg (rise kp=%d kd=%d)\r\n",
         TRK_F2_S(s_trk.rise_pitch0),
         (long)TRK_F2_I(s_trk.rise_pitch0),
@@ -256,6 +311,7 @@ void app_track_cancel(void)
 {
     if (s_trk.phase == APP_TRACK_IDLE) return;
     app_buzzer_stop();
+    bsp_laser_set_enable(false);
     /* 恢复角度环运动增益，避免取消后仍停留在自立增益。 */
     track_set_angle_motion();
     s_trk.applied_cps = 0;
@@ -366,14 +422,17 @@ void app_track_tick_20hz(const ms901m_snapshot_t *snap,
      * 不在此二次限速：K230 已有 slew，balance 有 speed_target_lpf；
      * 旧方案 ACCEL=400 raw/拍 使 2000 归一化目标需 ~2.5s 才爬满 → 骑线几乎不走。 */
     case APP_TRACK_TRACE: {
+        const char *lap_reason = NULL;
+
         update_lap_accum(snap, fb);
 
         s_trk.applied_cps = cmd->target_speed_cps;   /* 诊断用，透传 K230 raw cps */
         /* target_dif_cps 透传 K230 循线转向 */
 
-        if (lap_complete(elapsed_ms)) {
-            (void)printf("[track] lap %u done (yaw=%c%ld.%02lu arc=%ldmm t=%lums)\r\n",
+        if (lap_complete(elapsed_ms, &lap_reason)) {
+            (void)printf("[track] lap %u done reason=%s (yaw=%c%ld.%02lu arc=%ldmm t=%lums)\r\n",
                 (unsigned int)s_trk.lap,
+                (lap_reason != NULL) ? lap_reason : "?",
                 TRK_F2_S(s_trk.yaw_accum_deg),
                 (long)TRK_F2_I(s_trk.yaw_accum_deg),
                 (unsigned long)TRK_F2_F(s_trk.yaw_accum_deg),

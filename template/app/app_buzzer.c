@@ -164,32 +164,81 @@ static const uint16_t s_lanhua_cao[][2] = {
     {NOTE_REST, 0u},
 };
 
-#define LANHUA_CAO_LEN  (sizeof(s_lanhua_cao) / sizeof(s_lanhua_cao[0]))
-
 /* 每个音符末尾保留的静音间隔(ms)，使相邻（同音高）音符边界可辨 */
 #define NOTE_GAP_MS  20u
 
+/* ── 赛道模式短提示音 ─────────────────────────────────────────────────────── */
+
+#define CUE_DUR_SHORT   120u
+#define CUE_DUR_MED     200u
+#define CUE_DUR_LONG    480u
+#define CUE_GAP         70u
+
+static const uint16_t s_cue_stood_up[][2] = {
+    {NOTE_M4, CUE_DUR_MED},
+    {NOTE_M5, CUE_DUR_MED},
+    {NOTE_REST, 0u},
+};
+
+static const uint16_t s_cue_trace_start[][2] = {
+    {NOTE_M6, CUE_DUR_SHORT},
+    {NOTE_REST, CUE_GAP},
+    {NOTE_M6, CUE_DUR_SHORT},
+    {NOTE_REST, CUE_GAP},
+    {NOTE_M6, CUE_DUR_MED},
+    {NOTE_REST, 0u},
+};
+
+static const uint16_t s_cue_lap_pause[][2] = {
+    {NOTE_M5, CUE_DUR_LONG},
+    {NOTE_REST, 0u},
+};
+
+static const uint16_t s_cue_all_done[][2] = {
+    {NOTE_M5, CUE_DUR_MED},
+    {NOTE_M6, CUE_DUR_MED},
+    {NOTE_M7, CUE_DUR_LONG},
+    {NOTE_REST, 0u},
+};
+
+static const uint16_t (*const s_cue_seqs[APP_BUZZER_CUE_COUNT])[] = {
+    [APP_BUZZER_CUE_STOOD_UP]    = s_cue_stood_up,
+    [APP_BUZZER_CUE_TRACE_START] = s_cue_trace_start,
+    [APP_BUZZER_CUE_LAP_PAUSE]   = s_cue_lap_pause,
+    [APP_BUZZER_CUE_ALL_DONE]    = s_cue_all_done,
+};
+
+static const char *const s_cue_names[APP_BUZZER_CUE_COUNT] = {
+    [APP_BUZZER_CUE_STOOD_UP]    = "stood_up",
+    [APP_BUZZER_CUE_TRACE_START] = "trace_start",
+    [APP_BUZZER_CUE_LAP_PAUSE]   = "lap_pause",
+    [APP_BUZZER_CUE_ALL_DONE]    = "all_done",
+};
+
 /* ── 播放状态 ─────────────────────────────────────────────────────────────── */
 
-static bool     s_playing;
-static uint16_t s_note_idx;
-static uint32_t s_note_start_ms;
-static bool     s_in_gap;       /* true = 正在执行末尾静音间隔 */
+static bool                    s_playing;
+static uint16_t                s_note_idx;
+static uint32_t                s_note_start_ms;
+static bool                    s_in_gap;
+static const uint16_t        (*s_play_seq)[2];
+static const char             *s_play_tag;
 
-static bool is_end_marker(uint16_t idx)
+static bool seq_is_end(const uint16_t (*seq)[2], uint16_t idx)
 {
-    return (idx >= LANHUA_CAO_LEN) ||
-           ((s_lanhua_cao[idx][0] == NOTE_REST) && (s_lanhua_cao[idx][1] == 0u));
+    if (seq == NULL) {
+        return true;
+    }
+    return (seq[idx][0] == NOTE_REST) && (seq[idx][1] == 0u);
 }
 
-static void apply_note(uint16_t idx)
+static void apply_seq_note(const uint16_t (*seq)[2], uint16_t idx)
 {
-    if (is_end_marker(idx)) {
+    if (seq_is_end(seq, idx)) {
         bsp_buzzer_set_tone_hz(0u);
         return;
     }
-
-    bsp_buzzer_set_tone_hz(s_lanhua_cao[idx][0]);
+    bsp_buzzer_set_tone_hz(seq[idx][0]);
 }
 
 static void finish_playback(void)
@@ -197,9 +246,26 @@ static void finish_playback(void)
     if (!s_playing) {
         return;
     }
-    s_playing = false;
+    s_playing  = false;
+    s_play_seq = NULL;
+    s_play_tag = NULL;
     bsp_buzzer_set_tone_hz(0u);
-    (void)printf("[buzzer] lanhua cao done\r\n");
+    (void)printf("[buzzer] done\r\n");
+}
+
+static void start_sequence(const uint16_t (*seq)[2], const char *tag)
+{
+    if (seq == NULL) {
+        return;
+    }
+    s_playing       = true;
+    s_play_seq      = seq;
+    s_play_tag      = (tag != NULL) ? tag : "seq";
+    s_note_idx      = 0u;
+    s_note_start_ms = bsp_systick_get_ms();
+    s_in_gap        = false;
+    apply_seq_note(s_play_seq, 0u);
+    (void)printf("[buzzer] %s start\r\n", s_play_tag);
 }
 
 /* ── 公共 API ─────────────────────────────────────────────────────────────── */
@@ -211,19 +277,21 @@ void app_buzzer_init(void)
     s_note_idx      = 0u;
     s_note_start_ms = 0u;
     s_in_gap        = false;
+    s_play_seq      = NULL;
+    s_play_tag      = NULL;
+}
+
+void app_buzzer_play_cue(app_buzzer_cue_t cue)
+{
+    if ((unsigned)cue >= (unsigned)APP_BUZZER_CUE_COUNT) {
+        return;
+    }
+    start_sequence(s_cue_seqs[cue], s_cue_names[cue]);
 }
 
 void app_buzzer_play_lanhua_cao(void)
 {
-    if (s_playing) {
-        return;
-    }
-    s_playing       = true;
-    s_note_idx      = 0u;
-    s_note_start_ms = bsp_systick_get_ms();
-    s_in_gap        = false;
-    apply_note(0u);
-    (void)printf("[buzzer] lanhua cao start\r\n");
+    start_sequence(s_lanhua_cao, "lanhua_cao");
 }
 
 void app_buzzer_stop(void)
@@ -232,7 +300,9 @@ void app_buzzer_stop(void)
         bsp_buzzer_set_tone_hz(0u);
         return;
     }
-    s_playing = false;
+    s_playing  = false;
+    s_play_seq = NULL;
+    s_play_tag = NULL;
     bsp_buzzer_set_tone_hz(0u);
     (void)printf("[buzzer] stopped\r\n");
 }
@@ -244,16 +314,16 @@ bool app_buzzer_is_playing(void)
 
 void app_buzzer_tick_1ms(void)
 {
-    if (!s_playing) {
+    if (!s_playing || (s_play_seq == NULL)) {
         return;
     }
 
-    if (is_end_marker(s_note_idx)) {
+    if (seq_is_end(s_play_seq, s_note_idx)) {
         finish_playback();
         return;
     }
 
-    uint16_t dur_ms  = s_lanhua_cao[s_note_idx][1];
+    uint16_t dur_ms  = s_play_seq[s_note_idx][1];
     uint32_t elapsed = bsp_systick_get_ms() - s_note_start_ms;
 
     if (elapsed >= (uint32_t)dur_ms) {
@@ -261,17 +331,15 @@ void app_buzzer_tick_1ms(void)
         s_note_start_ms = bsp_systick_get_ms();
         s_in_gap        = false;
 
-        if (is_end_marker(s_note_idx)) {
+        if (seq_is_end(s_play_seq, s_note_idx)) {
             finish_playback();
             return;
         }
 
-        apply_note(s_note_idx);
+        apply_seq_note(s_play_seq, s_note_idx);
         return;
     }
 
-    /* 音符末尾保留 NOTE_GAP_MS 静音，使相邻（同音高）音符边界可辨。
-     * 仅在进入静音区的第一个 tick 触发，后续 tick 直接跳过，避免重复操作 GPIO。 */
     if (!s_in_gap && (elapsed >= (uint32_t)(dur_ms - NOTE_GAP_MS))) {
         s_in_gap = true;
         bsp_buzzer_set_tone_hz(0u);

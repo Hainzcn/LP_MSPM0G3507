@@ -4,23 +4,21 @@
  *
  * 工作流程（上电自检通过、安全态 ARMED 后自动启动，亦可串口/远程触发）：
  *
- *   SELF_STAND   自立：从起始倾角（约 30~40°）"猛起"摆到直立。角度环走
- *                专用 rise 增益（kp 大 / ki=0 / kd 阻尼）把车甩起并减速；
- *                速度环全程在线（target_speed=0）维持原地、防止自立漂移。
- *   STAND_SETTLE 稳定确认：|pitch|、|gz| 持续低于阈值一段时间；确认后角度环
- *                切回运动增益（TRK_GAIN_*），交棒给循线。
- *   TRACE        循线：采纳 K230 下发的 target_v / target_omega，
- *                速度经"启动加速包络"平滑爬升；同时累计偏航 + 里程判圈。
- *   BRAKE        减速刹车：满圈后把下发速度斜坡拉到 0，保持平衡停稳。
- *   PAUSE        暂停 5 s：保持直立静止，到期进入下一圈。
- *   FINAL_BRAKE  末圈刹车：第二圈满圈后减速停稳。
- *   DONE         完成：保持直立静止。
+ *   SELF_STAND   自立：…；蜂鸣器/激光均关闭。
+ *   STAND_SETTLE 稳定确认 5 s（APP_TRACK_SETTLE_MS）；提示音 STOOD_UP。
+ *   TRACE        循线 + 激光开；提示音 TRACE_START。
+ *   BRAKE        满圈减速；激光保持开。
+ *   PAUSE        暂停 5 s；提示音 LAP_PAUSE；激光保持开。
+ *   FINAL_BRAKE  末圈刹车；激光保持开。
+ *   DONE         完成；提示音 ALL_DONE；激光关。
  *
- * 圈数判定（MCU 自主）：累计偏航 |Σ gz·dt| ≥ YAW_PER_LAP_DEG 且
- * 累计里程 ≥ LAP_LENGTH_MM × 下限系数（双条件抗误判），并设超时兜底。
+ * 圈数判定（MCU 自主，优先级见 app_track.h 判圈宏）：
+ *   ① 偏航 ≥ YAW_PER_LAP 且 arc ≥ arc_min（防原地空转）
+ *   ② arc ≥ 周长×ARC_COMPLETE% 且 yaw ≥ YAW_MIN（里程收口，防 gyro 偏小多走）
+ *   ③ 单圈超时兜底
  *
  * 与 K230 对齐：MCU 通过 VEHICLE_STATUS.track_phase 上报当前阶段；
- * K230 仅在 TRACE 阶段下发循线驱动指令，其余阶段输出 (0,0)，防止任务冲突。
+ * K230 仅在 TRACE 阶段下发循线驱动指令；激光使能由 MCU PA1（bsp_laser）控制。
  */
 
 #ifndef APP_TRACK_H
@@ -135,9 +133,9 @@ typedef enum {
 #define APP_TRACK_RISE_DONE_DPS             (40.0f)
 #endif
 
-/** 稳定确认持续时长（ms）。 */
+/** 稳定确认持续时长（ms）：|pitch|/|gz| 连续满足 RISE_DONE 判据的累计时间。 */
 #ifndef APP_TRACK_SETTLE_MS
-#define APP_TRACK_SETTLE_MS                 (3000u)
+#define APP_TRACK_SETTLE_MS                 (5000u)
 #endif
 
 /* ---- 速度包络（raw cps；K230 target_v 已 ×SCALE 还原为 raw cps） ----
@@ -164,8 +162,23 @@ typedef enum {
 #define APP_TRACK_BRAKE_MAX_MS              (5000u)
 #endif
 
-/* ---- 圈数判定 ---- */
-/** 每圈累计偏航阈值（°）。闭环赛道一圈约 360°，可按实际赛道标定。 */
+/* ---- 圈数判定 ----
+ *
+ * 优先级（与 app_circle_demo 一致：主判据 OR 收口，而非 AND 双门槛）：
+ *
+ *   ① 偏航主判据：|Σgz·dt| ≥ YAW_PER_LAP_DEG 且 arc ≥ arc_min
+ *      arc_min 仅作“防早停”下界，避免原地空转仅靠 yaw 误判满圈。
+ *
+ *   ② 里程收口：arc ≥ LAP_LENGTH×ARC_COMPLETE% 且 yaw ≥ YAW_MIN_FOR_ARC
+ *      当陀螺积分系统性偏小（常见多走 ~30°）时，以编码器弧长先收口，
+ *      不必等 yaw 积满 360° 才触发 BRAKE。
+ *
+ *   ③ LAP_TIMEOUT_MS 超时兜底。
+ *
+ * 上车标定：LAP_LENGTH_MM 填实测周长；若仍偏早/偏晚，微调 YAW_PER_LAP 或
+ * ARC_COMPLETE%。
+ */
+/** 每圈累计偏航阈值（°）。闭环赛道一圈约 360°，可按 gyro 偏差下调（如 330）。 */
 #ifndef APP_TRACK_YAW_PER_LAP_DEG
 #define APP_TRACK_YAW_PER_LAP_DEG           (360.0f)
 #endif
@@ -175,9 +188,19 @@ typedef enum {
 #define APP_TRACK_LAP_LENGTH_MM             (2500)
 #endif
 
-/** 里程下限系数（×100）：里程 ≥ 周长 × 此系数/100 才允许判圈，抗早停。 */
+/** 里程下界系数（×100）：arc ≥ 周长×此值/100 才允许 ① 偏航判圈（抗原地空转）。 */
 #ifndef APP_TRACK_LAP_ARC_MIN_X100
-#define APP_TRACK_LAP_ARC_MIN_X100          (53)
+#define APP_TRACK_LAP_ARC_MIN_X100          (60)
+#endif
+
+/** 里程收口系数（×100）：arc ≥ 周长×此值/100 且 yaw 足够时 ② 直接满圈。默认 92≈330°/360°。 */
+#ifndef APP_TRACK_LAP_ARC_COMPLETE_X100
+#define APP_TRACK_LAP_ARC_COMPLETE_X100     (85)
+#endif
+
+/** ② 里程收口要求的最小累计偏航（°），防止长直道仅靠里程误触发。 */
+#ifndef APP_TRACK_YAW_MIN_FOR_ARC_DEG
+#define APP_TRACK_YAW_MIN_FOR_ARC_DEG       (300.0f)
 #endif
 
 /** 单圈超时兜底（ms）：超过则强制判圈，防止视觉异常时卡死。 */

@@ -37,7 +37,7 @@
 #define BSP_LED_B_IOMUX         IOMUX_PINCM50
 
 /* ========================================================================== */
-/* 输出 —— 激光使能 (PA1, 仅板底/J20 可达，非 BP 开放排针)                      */
+/* 输出 —— 激光使能 (PA1；默认高电平开，见 bsp_laser.h BSP_LASER_ACTIVE_LOW)   */
 /* ========================================================================== */
 #define BSP_LASER_EN_PORT       GPIOA
 #define BSP_LASER_EN_PIN        DL_GPIO_PIN_1
@@ -95,7 +95,8 @@
  * @brief 初始化所有业务 GPIO（输出 + 输入），由 main.c 在 SYSCFG_DL_init() 之后
  *        立即调用。函数内部：
  *          ① 10 个输出 pin 全部 initDigitalOutput()；
- *          ② STBY/AIN/BIN/LASER_EN/LED_G/LED_B 初值 CLEARED；BUZZER 初值 SET（高=静音，低电平触发）；
+ *          ② STBY/AIN/BIN/LED_G/LED_B 初值 CLEARED；LASER_EN 由 bsp_laser_init 关断；
+ *             BUZZER 初值 SET（高=静音，低电平触发）；
  *          ③ LED_R 初值 SET（开机点亮一颗，便于直观判断 init 完成）；
  *          ④ 2 个输入 pin initDigitalInputFeatures()，均启用上拉；
  *          ⑤ **不**调用 NVIC_EnableIRQ —— 中断在阶段 2 各模块按需开启。
