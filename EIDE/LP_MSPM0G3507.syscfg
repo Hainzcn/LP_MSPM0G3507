@@ -115,7 +115,11 @@ PWM_MOTOR.PWM_CHANNEL_1.dutyCycle          = 0;
 /*   影响 SysConfig GPIO 模块路径（详见本文 §"GPIO 由 BSP 接管"注释块），      */
 /*   peripheral 模块（QEI/PWM/UART/ADC）走 getDualBondedPadFunction 安全。      */
 /*                                                                              */
-/*   注：MSPM0G3507 上仅 TIMG8 支持硬件 QEI；右编码器只能软件模拟。            */
+/*   注：MSPM0G3507 上仅 TIMG8 支持硬件 QEI；无第二路 QEI，右编码器走           */
+/*       TIMG0_CCP0 (PA12, PINCM34 PF=4) 硬件捕获中断（X1，仅上升沿）+ PA13     */
+/*       ISR 读电平判方向，由 bsp_motor.c 手动配置（不在本 SysConfig 内）。      */
+/*       ⚠️ TIMG0 已被右编码器占用，请勿在 SysConfig 里再分配给其它外设。       */
+/*       详见 template/hardware/bsp_motor.c 顶部 "ENC_RIGHT_TIMER" 注释块。      */
 /*                                                                              */
 /*   随之释放（不可再被 GPIO/外设占用前需更新 Stage0 §3.3 预留表）：           */
 /*     · J12 跳线：保留 OFF / 不再使用                                         */

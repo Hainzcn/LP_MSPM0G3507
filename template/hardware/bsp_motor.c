@@ -31,15 +31,45 @@
 #define RIGHT_DEG_PER_COUNT  (360.0f / (float)BSP_MOTOR_RIGHT_COUNTS_PER_OUTPUT_REV)
 
 /* ========================================================================== */
+/* 右编码器 = TIMG0 捕获中断（Stage 3.x 从 PA12/PA13 GPIO 双沿中断迁移）        */
+/*                                                                              */
+/*   ─ PA12 → TIMG0_CCP0（PINCM34 PF=4，datasheet PINMUX 表），X1 仅捕获上升沿  */
+/*   ─ PA13 仍为普通 GPIO 输入（bsp_gpio 已配上拉+滞回），ISR 内读电平判方向    */
+/*   ─ TIMG0 不在 SysConfig 中，本模块手动上电/复位/配置（与本工程"GPIO/编码器 */
+/*     由 BSP 接管"约定一致），所以无需重生成 ti_msp_dl_config                  */
+/*   ─ 中断向量 TIMG0_IRQHandler（startup 向量表 slot 17）为独立向量，          */
+/*     不再与 GPIOA/GPIOB 共享 GROUP1                                          */
+/* ========================================================================== */
+#define ENC_RIGHT_TIMER_INST    TIMG0
+#define ENC_RIGHT_TIMER_IRQN    TIMG0_INT_IRQn
+#define ENC_RIGHT_CC_INT        DL_TIMER_INTERRUPT_CC0_DN_EVENT
+
+/* PA12 捕获时基：仅用于产生上升沿捕获中断，捕获值本身不参与计数（按次累加）。 */
+static const DL_TimerG_ClockConfig s_enc_right_clk = {
+    .clockSel    = DL_TIMER_CLOCK_BUSCLK,
+    .divideRatio = DL_TIMER_CLOCK_DIVIDE_1,
+    .prescale    = 0U,
+};
+
+static const DL_TimerG_CaptureConfig s_enc_right_cap = {
+    .captureMode  = DL_TIMER_CAPTURE_MODE_EDGE_TIME,
+    .period       = 0xFFFFU,                                      /* 16-bit 自由运行 */
+    .startTimer   = DL_TIMER_STOP,                                /* 下方 startCounter 显式启动 */
+    .edgeCaptMode = DL_TIMER_CAPTURE_EDGE_DETECTION_MODE_RISING,  /* X1：仅 PA12 上升沿 */
+    .inputChan    = DL_TIMER_INPUT_CHAN_0,                        /* CC0 = TIMG0_CCP0 = PA12 */
+    .inputInvMode = DL_TIMER_CC_INPUT_INV_NOINVERT,
+};
+
+/* ========================================================================== */
 /* 模块状态                                                                     */
 /* ========================================================================== */
 
 typedef struct {
     /* --- ISR 共享字段：访问必须 MOTOR_LOCK ----------------------------------- */
     volatile int32_t  left_count;       /* 由 update() 维护（QEI 软扩） */
-    volatile int32_t  right_count;      /* 由 PA12 (X2 时) 或 PA12+PA13 (X4 时) ISR 维护 */
-    volatile uint32_t enc_irq_count;    /* 右编码器 ISR 总进入次数（雪崩诊断） */
-    volatile uint32_t enc_irq_window;   /* 1 ms 窗口内 ISR 进入次数 */
+    volatile int32_t  right_count;      /* 由 TIMG0_CCP0 捕获中断（PA12 上升沿）维护 */
+    volatile uint32_t enc_irq_count;    /* 右编码器捕获中断总进入次数（雪崩诊断） */
+    volatile uint32_t enc_irq_window;   /* 1 ms 窗口内捕获中断进入次数 */
     volatile uint8_t  enc_irq_quench_remain_ms;  /* 雪崩兜底：剩余抑制毫秒数 */
 
     /* --- update() 私有：QEI 16-bit 上一拍原值 -------------------------------- */
@@ -469,35 +499,20 @@ static void update_motion_state_for_channel(bool is_left, int32_t count_now)
 /* ========================================================================== */
 
 /**
- * 右编码器边沿中断触发：X2 时仅 PA12 双沿；X4 时 PA12 + PA13 都双沿。
+ * 右编码器捕获中断（X1）：TIMG0_CCP0 捕获到 PA12 上升沿时触发。
  *
- * 标准正交解码状态机（X4）：
- *   读出 (A, B) 当前电平，根据"哪个相刚刚跳变 + 跳变方向"得到 ±1 步。
- *   实现等价表达式：A == B 则 +1 / != 则 -1（在"PA12 边沿事件"上等价于
- *   X2 经典做法；在 X4 + PA13 边沿时也成立，但符号相反 —— 因为 PA13 跳变
- *   时 A/B 异同关系正好是 PA12 跳变时的反相）。所以本函数把"哪根线触发"
- *   作为参数，PA13 触发时步进取反。这样 X2 / X4 共用同一份解码代码。
- *
- *   X2 (默认 RIGHT_DECODE_X = 2)：only `is_phase_a_edge = true` 路径生效
- *   X4 (RIGHT_DECODE_X = 4)：PA12 与 PA13 各自调用，分别 true / false
+ * 解码：PA12 上升沿（A=1）时读 PA13(B) 电平判方向。等价于旧 X2 解码在"A
+ * 上升沿"子集上的行为：经典式 step=(A!=B)?+1:-1，A=1 时 = (B==0)?+1:-1；
+ * 叠加右轮安装方向符号翻转（step=-step）后 = B?+1:-1。沿用同一符号约定，
+ * 保证左右轮在同向命令下 cps/count 同号，速度/差速环无需重新整定符号。
  */
-static void on_right_encoder_edge(bool is_phase_a_edge)
+static void on_right_encoder_capture(void)
 {
     s_motor.enc_irq_count++;
     s_motor.enc_irq_window++;
 
-    uint32_t pins = DL_GPIO_readPins(GPIOA, BSP_ENC_R_A_PIN | BSP_ENC_R_B_PIN);
-    bool phase_a = ((pins & BSP_ENC_R_A_PIN) != 0u);
-    bool phase_b = ((pins & BSP_ENC_R_B_PIN) != 0u);
-
-    int32_t step = (phase_a != phase_b) ? 1 : -1;
-    if (!is_phase_a_edge) {
-        step = -step;
-    }
-    /* 右轮编码器安装方向与左轮相反：正转命令下物理边沿给出负计数。
-     * 这里翻转反馈符号，让左右轮在同向命令下 cps / count 同号，便于速度环共用。 */
-    step = -step;
-    s_motor.right_count += step;
+    bool phase_b = ((DL_GPIO_readPins(GPIOA, BSP_ENC_R_B_PIN) & BSP_ENC_R_B_PIN) != 0u);
+    s_motor.right_count += phase_b ? 1 : -1;
 }
 
 /* ========================================================================== */
@@ -576,35 +591,42 @@ void bsp_motor_init(void)
     set_pwm_duty(GPIO_PWM_MOTOR_C1_IDX, 0u);
     DL_GPIO_clearPins(BSP_STBY_PORT, BSP_STBY_PIN);
 
-    /* --- 3) PA12 双沿 (+ X4 时 PA13 双沿) 中断 ---------------------------
-     *   双沿：单独用 _EDGE_RISE 与 _EDGE_FALL 按位或；某些 SDK 版本没有
-     *   `_EDGE_RISE_FALL` 这个组合宏，按位或写法在所有 SDK 里都成立。
+    /* --- 3) 右编码器 = TIMG0_CCP0 捕获中断（X1，仅 PA12 上升沿）-------------
+     *   旧方案（PA12/PA13 GPIO 双沿 + GROUP1）在 ≈530 RPM 时边沿率 300 边/ms
+     *   恰好命中雪崩阈值 → 中断被关 50 ms → 右轮速度归零 → 差速环误判自转。
+     *   现迁到 TIMG0 捕获中断：独立向量、X1 减半边沿率、雪崩阈值 6× 余量。
      *
-     *   X4 模式（默认）：A、B 都开双沿，分辨率 1320 cnt/rev，与左轮一致；
-     *   X2 模式（编译期 -DBSP_MOTOR_RIGHT_DECODE_X=2）：只开 PA12 双沿，
-     *   分辨率 660 cnt/rev，CPU ISR 减半。 */
-#if (BSP_MOTOR_RIGHT_DECODE_X == 4)
-    DL_GPIO_setLowerPinsPolarity(GPIOA,
-        DL_GPIO_PIN_12_EDGE_RISE | DL_GPIO_PIN_12_EDGE_FALL |
-        DL_GPIO_PIN_13_EDGE_RISE | DL_GPIO_PIN_13_EDGE_FALL);
-    uint32_t enc_pins = BSP_ENC_R_A_PIN | BSP_ENC_R_B_PIN;
-#else
-    DL_GPIO_setLowerPinsPolarity(GPIOA,
-        DL_GPIO_PIN_12_EDGE_RISE | DL_GPIO_PIN_12_EDGE_FALL);
-    uint32_t enc_pins = BSP_ENC_R_A_PIN;
-#endif
-    DL_GPIO_clearInterruptStatus(GPIOA, enc_pins);
-    DL_GPIO_enableInterrupt    (GPIOA, enc_pins);
+     *   3a) PA12 重映射为 TIMG0_CCP0（PINCM34 PF=4），保留上拉 + 施密特滞回，
+     *       防编码器掉线/线缆浮空噪声。PA13 仍是 GPIO 输入（bsp_gpio 已配），
+     *       仅在捕获 ISR 内读电平判方向。 */
+    DL_GPIO_initPeripheralInputFunctionFeatures(
+        BSP_ENC_R_A_IOMUX, IOMUX_PINCM34_PF_TIMG0_CCP0,
+        DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_PULL_UP,
+        DL_GPIO_HYSTERESIS_ENABLE, DL_GPIO_WAKEUP_DISABLE);
 
-    /* 把 GPIOA 中断设为最低优先级（MSPM0G3507 __NVIC_PRIO_BITS = 2 → 3 = 最低），
-     * 与 `bsp_systick.c` 把 SysTick 提到 0 = 最高 配套使用：
-     *   ─ 任何编码器噪声引发的 GPIOA ISR 雪崩都不能阻断 SysTick；
-     *   ─ 主循环节拍、电池采样、心跳日志即使在 ISR 高频时也能正常推进。
-     * 副作用：编码器边沿与其他外设（UART/ADC）同时到达时，UART/ADC 优先服务，
-     *         编码器最多迟几微秒；对 1 kHz 控制环影响可忽略。 */
-    NVIC_ClearPendingIRQ(GPIOA_INT_IRQn);
-    NVIC_SetPriority    (GPIOA_INT_IRQn, 3u);
-    NVIC_EnableIRQ      (GPIOA_INT_IRQn);
+    /* 3b) TIMG0 不在 SysConfig 内 → 手动上电 / 复位 / 配置捕获模式。 */
+    DL_TimerG_reset(ENC_RIGHT_TIMER_INST);
+    DL_TimerG_enablePower(ENC_RIGHT_TIMER_INST);
+    delay_cycles(POWER_STARTUP_DELAY);
+
+    DL_TimerG_setClockConfig(ENC_RIGHT_TIMER_INST,
+        (DL_TimerG_ClockConfig *)&s_enc_right_clk);
+    DL_TimerG_initCaptureMode(ENC_RIGHT_TIMER_INST,
+        (DL_TimerG_CaptureConfig *)&s_enc_right_cap);
+    DL_TimerG_clearInterruptStatus(ENC_RIGHT_TIMER_INST, ENC_RIGHT_CC_INT);
+    DL_TimerG_enableInterrupt(ENC_RIGHT_TIMER_INST, ENC_RIGHT_CC_INT);
+    DL_TimerG_enableClock(ENC_RIGHT_TIMER_INST);
+    DL_TimerG_startCounter(ENC_RIGHT_TIMER_INST);
+
+    /* 3c) TIMG0 中断设最低优先级（__NVIC_PRIO_BITS = 2 → 3 = 最低），与
+     *     `bsp_systick.c` 把 SysTick 提到 0 = 最高 配套：
+     *       ─ 任何编码器噪声引发的捕获 ISR 雪崩都不能阻断 SysTick；
+     *       ─ IMU/K230 UART RX 与电池 ADC 优先服务，编码器最多迟几微秒，
+     *         高速下偶有个位数计数延迟（非冻结），对差速环影响可忽略。
+     *     根本好处：彻底告别旧 GPIO 雪崩"整段关 50 ms"导致的右轮速度归零。 */
+    NVIC_ClearPendingIRQ(ENC_RIGHT_TIMER_IRQN);
+    NVIC_SetPriority    (ENC_RIGHT_TIMER_IRQN, 3u);
+    NVIC_EnableIRQ      (ENC_RIGHT_TIMER_IRQN);
 }
 
 void bsp_motor_enable(bool enable)
@@ -884,12 +906,13 @@ void bsp_motor_update(void)
         }
     }
 
-    /* --- 0.2) ISR 雪崩兜底：每毫秒检查窗口内 ISR 进入次数 -------------------
-     *   `BSP_MOTOR_ENC_IRQ_QUENCH_PER_MS`（默认 200）= 单毫秒边沿率上限。手动
-     *   转编码器极快也只会到几 kHz/ms，超过该阈值唯一可能是引脚浮空 + 噪声、
-     *   或编码器电源异常引发的中断雪崩；此时关闭 PA12/PA13 中断
-     *   `BSP_MOTOR_ENC_IRQ_QUENCH_DURATION_MS`（默认 50 ms），让 CPU 喘气。
-     *   到期后由 update() 重新打开（边沿丢失但不会饿死主循环）。 */
+    /* --- 0.2) 捕获中断雪崩兜底：每毫秒检查窗口内捕获中断进入次数 -------------
+     *   `BSP_MOTOR_ENC_IRQ_QUENCH_PER_MS`（X1 迁移后默认 1000）= 单毫秒捕获率
+     *   上限。正常高速最多 150 次/ms，超过该阈值唯一可能是 PA12 浮空 + 噪声或
+     *   编码器电源异常引发的中断雪崩；此时关闭 TIMG0 CC0 中断
+     *   `BSP_MOTOR_ENC_IRQ_QUENCH_DURATION_MS`（默认 50 ms），让 CPU 喘气，
+     *   到期后由 update() 重新打开（边沿丢失但不会饿死主循环）。
+     *   ⚠️ 阈值已远高于正常高速边沿率，不会再像旧 GPIO 方案那样误关正常读数。 */
     uint32_t window;
     MOTOR_LOCK();
     window = s_motor.enc_irq_window;
@@ -899,26 +922,11 @@ void bsp_motor_update(void)
     if (s_motor.enc_irq_quench_remain_ms != 0u) {
         s_motor.enc_irq_quench_remain_ms--;
         if (s_motor.enc_irq_quench_remain_ms == 0u) {
-            DL_GPIO_clearInterruptStatus(GPIOA,
-                BSP_ENC_R_A_PIN
-#if (BSP_MOTOR_RIGHT_DECODE_X == 4)
-                | BSP_ENC_R_B_PIN
-#endif
-            );
-            DL_GPIO_enableInterrupt(GPIOA,
-                BSP_ENC_R_A_PIN
-#if (BSP_MOTOR_RIGHT_DECODE_X == 4)
-                | BSP_ENC_R_B_PIN
-#endif
-            );
+            DL_TimerG_clearInterruptStatus(ENC_RIGHT_TIMER_INST, ENC_RIGHT_CC_INT);
+            DL_TimerG_enableInterrupt(ENC_RIGHT_TIMER_INST, ENC_RIGHT_CC_INT);
         }
     } else if (window > BSP_MOTOR_ENC_IRQ_QUENCH_PER_MS) {
-        DL_GPIO_disableInterrupt(GPIOA,
-            BSP_ENC_R_A_PIN
-#if (BSP_MOTOR_RIGHT_DECODE_X == 4)
-            | BSP_ENC_R_B_PIN
-#endif
-        );
+        DL_TimerG_disableInterrupt(ENC_RIGHT_TIMER_INST, ENC_RIGHT_CC_INT);
         s_motor.enc_irq_quench_remain_ms = BSP_MOTOR_ENC_IRQ_QUENCH_DURATION_MS;
     }
 
@@ -927,7 +935,7 @@ void bsp_motor_update(void)
     int16_t  delta   = (int16_t)((uint16_t)(raw_now - s_motor.left_raw_prev));
     s_motor.left_raw_prev = raw_now;
     /* left_count 与 right_count 是 ISR 共享变量，但 update 只在主循环里跑、
-     * 而 PA12/PA13 ISR 只摸 right_count；左路写入这里其实无 race，无需关中断。
+     * 而 TIMG0 捕获 ISR 只摸 right_count；左路写入这里其实无 race，无需关中断。
      * 为了未来可能新增"在 ISR 里读 left_count"的场景，仍然短锁一下保平安。 */
     MOTOR_LOCK();
     s_motor.left_count += (int32_t)delta;
@@ -1069,53 +1077,29 @@ void bsp_motor_reset_encoders(void)
 }
 
 /* ========================================================================== */
-/* GROUP1 中断入口（GPIOA + GPIOB + TRNG + COMP0 共享）                          */
+/* TIMG0 中断入口（右编码器 PA12 上升沿捕获，独立向量）                          */
 /*                                                                              */
-/*   ⚠️ MSPM0G3507 NVIC 架构（极易踩坑）：                                       */
-/*      所有 GPIO 中断（GPIOA / GPIOB）+ TRNG + COMP0 共享 IRQn = 1 = "GROUP1",*/
-/*      vector table 入口名是 `GROUP1_IRQHandler`，**不是**                     */
-/*      `GPIOA_IRQHandler` / `GPIOB_IRQHandler`。                                */
-/*      `NVIC_EnableIRQ(GPIOA_INT_IRQn)` 实际是 `NVIC_EnableIRQ(1)` = 启用      */
-/*      GROUP1 整个组。                                                         */
+/*   Stage 3.x：右编码器从 PA12/PA13 GPIO 双沿（GROUP1 共享入口）迁到           */
+/*   TIMG0_CCP0 硬件捕获。TIMG0 在 MSPM0G3507 上是独立中断向量                  */
+/*   （startup 向量表 slot 17 = `TIMG0_IRQHandler`），不再与 GPIOA/GPIOB/TRNG/  */
+/*   COMP0 共享 GROUP1，因此可单独设优先级、不受其它 GPIO 影响。                */
 /*                                                                              */
-/*   历史踩坑（Stage 2.4 关键修复 / 2026-05-09）：                               */
-/*      本文件早期把 ISR 命名为 `void GPIOA_IRQHandler(void)`，编译链接都不报   */
-/*      错（这只是个普通的全局函数符号），但 vector 槽位 17 仍然指向 startup.s */
-/*      里 weak 默认 `GROUP1_IRQHandler`（`B .` 死循环）。                      */
-/*      症状：转动右轮时 PA12/PA13 沿事件触发 → NVIC 跳 GROUP1 → 死循环 →      */
-/*            MCU 整体卡死，串口 / SysTick / 业务全停（绿灯也不闪），即使把    */
-/*            SysTick 优先级提到最高、ENC 上拉 + 雪崩兜底全部启用都救不了。     */
-/*      正确名字 = `GROUP1_IRQHandler`，参考 SDK 例程                          */
-/*      `examples/nortos/LP_MSPM0G3507/driverlib/gpio_simultaneous_interrupts`. */
+/*   ⚠️ 命名同样致命（参考 Stage 2.4 GROUP1 踩坑）：入口必须叫                  */
+/*      `TIMG0_IRQHandler` 才会被链接进向量表；写错名字编译不报错但永远         */
+/*      不触发。本工程不再使用 `GROUP1_IRQHandler`（已无任何 GPIO 沿中断源），  */
+/*      若将来新增 GPIO 中断，需重新提供 `GROUP1_IRQHandler` 分发函数。         */
 /*                                                                              */
-/*   本工程 GROUP1 上启用的中断源（仅 GPIOA，GPIOB 暂未启用任何沿中断）：       */
-/*     PA12 = 右编码器 A 双沿（X2/X4 都开）                                     */
-/*     PA13 = 右编码器 B 双沿（仅 X4 开）                                       */
-/*   将来若新增 GPIOB 沿中断 / TRNG / COMP0 中断，需要在本函数内追加对应模块的 */
-/*   `getPendingInterrupt` 分支（按 SDK gpio_simultaneous_interrupts 例程       */
-/*   "GPIOA 段 + GPIOB 段并列" 写法）。                                         */
-/*                                                                              */
-/*   分发策略：按 TI `gpio_simultaneous_interrupts` 示例读取 MIS 位图，分别   */
-/*   处理 PA12 / PA13 后逐 pin clear，避免 IIDX 最高优先级选择吞掉低优先事件。 */
+/*   `DL_TimerG_getPendingInterrupt()` 返回当前最高优先 IIDX 并自动清除该标志， */
+/*   故分支内无需再手动 clear。 */
 /* ========================================================================== */
 
-void GROUP1_IRQHandler(void)
+void TIMG0_IRQHandler(void)
 {
-    uint32_t gpioa = DL_GPIO_getEnabledInterruptStatus(GPIOA,
-        BSP_ENC_R_A_PIN
-#if (BSP_MOTOR_RIGHT_DECODE_X == 4)
-        | BSP_ENC_R_B_PIN
-#endif
-    );
-
-    if ((gpioa & BSP_ENC_R_A_PIN) != 0u) {
-        on_right_encoder_edge(true);   /* PA12 (A 相) */
-        DL_GPIO_clearInterruptStatus(GPIOA, BSP_ENC_R_A_PIN);
+    switch (DL_TimerG_getPendingInterrupt(ENC_RIGHT_TIMER_INST)) {
+    case DL_TIMER_IIDX_CC0_DN:          /* CC0 捕获到 PA12 上升沿 */
+        on_right_encoder_capture();
+        break;
+    default:
+        break;
     }
-#if (BSP_MOTOR_RIGHT_DECODE_X == 4)
-    if ((gpioa & BSP_ENC_R_B_PIN) != 0u) {
-        on_right_encoder_edge(false);  /* PA13 (B 相) */
-        DL_GPIO_clearInterruptStatus(GPIOA, BSP_ENC_R_B_PIN);
-    }
-#endif
 }

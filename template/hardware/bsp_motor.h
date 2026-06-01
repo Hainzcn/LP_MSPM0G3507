@@ -10,7 +10,9 @@
  *   ─ 左轮编码器：TIMG8 硬件 QEI（A=PB15 / BP J4.34、B=PB16 / BP J4.40，
  *      Stage 2.3 起从 J12 迁来；2-Pin Mode = X4 解码），16-bit 计数器
  *      （LOAD = 65535）由 `bsp_motor_update()` 软件扩为 32-bit
- *   ─ 右轮编码器：PA12 双边沿中断 + PA13 ISR 内电平判方向（X2 解码）
+ *   ─ 右轮编码器：PA12 → TIMG0_CCP0 硬件捕获中断（X1，仅上升沿）+ PA13 ISR
+ *      内读电平判方向。独立 TIMG0 中断向量、优先级可控，彻底脱离 GROUP1
+ *      共享入口与 GPIO 雪崩关断逻辑（Stage 3.x 迁移，见下方 DECODE_X 注释）
  *
  * 接口约定：
  *   ─ 速度命令使用 permille（千分比），范围 [-1000, 1000]，
@@ -59,18 +61,27 @@ extern "C" {
 #define BSP_MOTOR_LEFT_DECODE_X                    (4)
 
 /**
- * 右轮解码倍率：500 PPR × 34:1 减速电机下，X4 在 180 RPM 出轴侧即产生
- * 204,000 边沿/s（204 边/ms），已超过下方雪崩兜底阈值（200），导致 ISR
- * 被强制关闭 50 ms，右轮速度瞬间归零；且 X4 在 32 MHz CPU 下 ISR 占用约
- * 51%，严重挤占主循环。
+ * 右轮解码倍率（Stage 3.x：GPIO 双沿中断 → TIMG0 捕获中断迁移）。
  *
- * 因此本电机固定使用 X2（仅 PA12 双沿，PA13 ISR 内读电平判向）：
- *   X2 → 34,000 cnt/rev（500 × 34 × 2），180 RPM 下边沿率 = 102 边/ms，
- *         ISR CPU 占用约 26%，雪崩阈值（300）有 3× 余量，安全稳定。
- *   X4 → 68,000 cnt/rev，高速下不可用（ISR 过载 + 雪崩触发，见上）。
+ * 旧方案（GPIO 双沿 + GROUP1 共享入口）的致命问题：
+ *   X2 在 ≈530 RPM 出轴侧产生 300 边/ms，**恰好命中下方雪崩兜底阈值 300**
+ *   → 右编码器中断被强制关闭 50 ms → right_count 冻结 → 右轮速度瞬间读 0。
+ *   大外力推车（高倾角→高速纠偏）时这正是"左轮远快于右轮、整车自转一圈"
+ *   的根因：差速环看到 L≫R 误判，反而加大左右差速 → 正反馈自转。
+ *
+ * 新方案：PA12 → TIMG0_CCP0 硬件捕获，X1（仅上升沿），PA13 在 ISR 内读电平
+ * 判方向。本器件仅 TIMG8 支持硬件 QEI（左轮已占），无第二路 QEI，故右轮迁
+ * 到定时器捕获中断；编码器分辨率足够，X1 即可（17,000 cnt/rev）：
+ *   ─ 独立 TIMG0_IRQHandler 向量，不再与 GPIOA/GPIOB 共享 GROUP1；
+ *   ─ X1 → 530 RPM 下 150 边/ms（X2 的一半），ISR CPU 占用 ≈ 13%；
+ *   ─ 雪崩阈值抬到 1000（见下），正常高速 150 边/ms 有 6× 余量，
+ *     仅在引脚浮空噪声（数万边/ms）时才触发，绝不会误关正常高速读数。
+ *
+ * 注：本宏现仅用于 cnt/rev 与文档表述；解码逻辑在 bsp_motor.c 固定为
+ *     "TIMG0 捕获 PA12 上升沿 + 读 PA13"，不再随本宏分支。
  */
 #ifndef BSP_MOTOR_RIGHT_DECODE_X
-#define BSP_MOTOR_RIGHT_DECODE_X                   (2)
+#define BSP_MOTOR_RIGHT_DECODE_X                   (1)
 #endif
 
 /**
@@ -212,16 +223,14 @@ extern "C" {
  * 左轮（TIMG8 硬件 QEI，X4）：500 PPR × 34:1 × 4 = 68,000 cnt/rev
  *   最低可分辨速度（10ms 窗口）：1000/10 / 68000 × 60 ≈ 0.09 rpm
  *
- * 右轮（GPIO ISR，X2）：500 PPR × 34:1 × 2 = 34,000 cnt/rev
- *   X2 原因：X4 在 180 RPM 出轴侧边沿率 = 204 边/ms，已触发雪崩兜底（阈值 200）
- *   导致速度读数归零；X2 将此降至 102 边/ms，ISR CPU 占用约 26%（32 MHz 下）。
- *   最低可分辨速度（10ms 窗口）：1000/10 / 34000 × 60 ≈ 0.18 rpm
- *
- * 建议后续将右轮迁移至第二路硬件 QEI（TIMG 空闲实例），彻底消除 ISR 负担，
- * 同时恢复与左轮一致的 X4 分辨率（68,000 cnt/rev）。
+ * 右轮（TIMG0 捕获 ISR，X1）：500 PPR × 34:1 × 1 = 17,000 cnt/rev
+ *   仅捕获 PA12 上升沿 + 读 PA13 判向，530 RPM 下边沿率 150 边/ms，
+ *   ISR CPU 占用约 13%；无第二路硬件 QEI（仅 TIMG8 支持，左轮已占），
+ *   故采用 TIMG0 捕获中断方案，详见上方 BSP_MOTOR_RIGHT_DECODE_X 注释。
+ *   最低可分辨速度（10ms 窗口）：1000/10 / 17000 × 60 ≈ 0.35 rpm（足够）
  */
 #define BSP_MOTOR_LEFT_COUNTS_PER_OUTPUT_REV      (68000)
-#define BSP_MOTOR_RIGHT_COUNTS_PER_OUTPUT_REV     (34000)
+#define BSP_MOTOR_RIGHT_COUNTS_PER_OUTPUT_REV     (17000)
 
 /**
  * 速度差分窗口（毫秒）：update() 每次累计 1 ms，达到该值时做一次 count 差分，
@@ -247,24 +256,22 @@ extern "C" {
 #endif
 
 /**
- * 右编码器 ISR 雪崩保护（Stage 2.4 新增）：
- *   ─ `BSP_MOTOR_ENC_IRQ_QUENCH_PER_MS`：单毫秒边沿率上限（边/ms）。
- *     低于此值：正常计数。超过此值：判定为噪声/浮空雪崩，关中断保护 CPU。
+ * 右编码器 ISR 雪崩保护（Stage 2.4 引入，Stage 3.x 迁 TIMG0 捕获后调整）：
+ *   ─ `BSP_MOTOR_ENC_IRQ_QUENCH_PER_MS`：单毫秒捕获中断率上限（次/ms）。
+ *     低于此值：正常计数。超过此值：判定为噪声/浮空雪崩，关 TIMG0 CC0 中断保护 CPU。
  *
- *     500 PPR × 34:1 电机在 X2 解码下：
- *       180 RPM → 102 边/ms，300 RPM → 170 边/ms，最高约 530 RPM → 300 边/ms。
- *     阈值设为 300，可覆盖正常运行范围，同时保留浮空噪声（数万边/ms）保护。
+ *     500 PPR × 34:1 电机在 X1 捕获（仅 PA12 上升沿）下：
+ *       180 RPM → 51 次/ms，最高约 530 RPM → 150 次/ms。
+ *     ⚠️  旧值 300 在 X2 下恰好等于 530 RPM 的边沿率 → 正常高速即触发雪崩
+ *           误关、右轮速度归零（自转根因）。X1 迁移后阈值抬到 1000，对正常
+ *           高速 150 次/ms 有 6× 余量，仅在引脚浮空噪声（数万次/ms）时触发。
  *
- *     ⚠️  旧值 200 对本电机 X2@180 RPM 有 102 边/ms 余量（安全），
- *           但对 X4 模式在 180 RPM 即产生 204 边/ms，触发雪崩误判（根因）。
- *           已将右轮切为 X2，阈值升至 300 双重保险。
- *
- *   ─ `BSP_MOTOR_ENC_IRQ_QUENCH_DURATION_MS`：触发后关闭 PA12/PA13 中断的毫秒数。
+ *   ─ `BSP_MOTOR_ENC_IRQ_QUENCH_DURATION_MS`：触发后关闭 TIMG0 CC0 中断的毫秒数。
  *     期间编码器边沿丢失，但主循环 / SysTick / printf 能正常推进；到期后由
  *     `bsp_motor_update()` 重新打开。
  */
 #ifndef BSP_MOTOR_ENC_IRQ_QUENCH_PER_MS
-#define BSP_MOTOR_ENC_IRQ_QUENCH_PER_MS            (300u)
+#define BSP_MOTOR_ENC_IRQ_QUENCH_PER_MS            (1000u)
 #endif
 
 #ifndef BSP_MOTOR_ENC_IRQ_QUENCH_DURATION_MS
