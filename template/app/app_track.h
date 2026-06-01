@@ -137,7 +137,7 @@ typedef enum {
 
 /** 稳定确认持续时长（ms）。 */
 #ifndef APP_TRACK_SETTLE_MS
-#define APP_TRACK_SETTLE_MS                 (400u)
+#define APP_TRACK_SETTLE_MS                 (3000u)
 #endif
 
 /* ---- 速度包络（raw cps；K230 target_v 已 ×SCALE 还原为 raw cps） ----
@@ -172,7 +172,7 @@ typedef enum {
 
 /** 里程下限系数（×100）：里程 ≥ 周长 × 此系数/100 才允许判圈，抗早停。 */
 #ifndef APP_TRACK_LAP_ARC_MIN_X100
-#define APP_TRACK_LAP_ARC_MIN_X100          (60)
+#define APP_TRACK_LAP_ARC_MIN_X100          (53)
 #endif
 
 /** 单圈超时兜底（ms）：超过则强制判圈，防止视觉异常时卡死。 */
