@@ -18,6 +18,8 @@
 >
 > **🔋 Stage 2.8 电池预热自适应 + 分压实测校准（2026-05-30，本文 v0.10）**：[`bsp_battery.{c,h}`](../../template/hardware/bsp_battery.h) 去掉固定 `t=3s` 单次快照，改为 250 ms 轮询 + 2 s 基线窗口平台检测 + 15 s 兜底；`DIVIDER_RATIO_X10000` 1803→**1503**；`BOOT_OK_MV` 7000→**11000**；新增 `bsp_battery_is_ready()`。解决冷上电半充电压误报与心跳 `batt` 虚低。详见 §9 修订历史 v0.10。
 >
+> **⚙️ Stage 2.9 右编码器迁 TIMG0 捕获中断（2026-06-01，本文 v0.11）**：装车平衡大外力纠偏时出现"左轮远快于右轮、整车自转一周"。根因 = 旧方案右轮 `PA12/PA13` GPIO 双沿中断（X2，34000 cnt/rev）在 ≈530 RPM 出轴侧边沿率 **300 边/ms 恰好命中** `BSP_MOTOR_ENC_IRQ_QUENCH_PER_MS=300` 雪崩阈值 → 中断被关 50 ms → `right_count` 冻结 → 差速环误判。**修复**：本器件仅 TIMG8 支持硬件 QEI（左轮已占），无第二路 QEI；[`bsp_motor.{c,h}`](../../template/hardware/bsp_motor.h) 将右轮迁到 **`PA12 → TIMG0_CCP0` 硬件捕获 + `TIMG0_IRQHandler` 独立向量**（X1 仅上升沿，PA13 ISR 内读电平判向），`RIGHT_COUNTS_PER_OUTPUT_REV` **34000→17000**，雪崩阈值 **300→1000**；删除 `GROUP1_IRQHandler` 右编码器分支。TIMG0 由 BSP 手动 init（不在 SysConfig），[LP_MSPM0G3507.syscfg](../../EIDE/LP_MSPM0G3507.syscfg) 注释标注 TIMG0 已占用。详见 §2.2 / §4.1 / §6.3 / §7.3 / §9 修订历史 v0.11。
+>
 > 文档定位：本轮交付 `TB6612 + GB370` 电机驱动演示固件，覆盖 PWM 输出、速度反馈、双轮同步、校准扫描、编码器角度累计，以及 XDS 调试串口日志 / 命令控制。默认入口为装车模式，电机演示仅作为 UART 触发的测试模式。Stage 2.1 起底层 BSP 升级为"平衡环 / 速度环可直接接入"的完备模块；Stage 2.2 起补齐安全 + 电池 + PID + 平衡骨架，业务层一行 `set_balance_gains` 即可启动整定；Stage 2.3 起左编码器从 J12 迁到 BP，全车不再依赖未焊跳线排针。
 >
 > 关联文件：
@@ -36,13 +38,14 @@
 | # | 需求                                                          | 落地结果                                                                 |
 | - | ----------------------------------------------------------- | -------------------------------------------------------------------- |
 | 1 | 模式切换与电机演示人工控制                                             | 上电默认装车模式；UART `t` / `test` 进入电机演示，UART `l` / `load` 返回装车模式 |
-| 2 | 接收编码器信号并主动更新角度到调试串口                                         | 已完成，左轮硬件 QEI，右轮 GPIO 中断，100 ms 打印一次                                  |
+| 2 | 接收编码器信号并主动更新角度到调试串口                                         | 已完成，左轮 TIMG8 硬件 QEI，右轮 TIMG0 捕获中断（Stage 2.9），100 ms 打印一次          |
 | 3 | 形成任务日志文档并给出接线指导                                             | 已完成，见本文 §7                                                           |
 | 4 | **【Stage 2.1】驱动 API 重写**：把"够 demo 跑"的最小集升级为平衡环 / 速度环可直接接入 | 已完成，新增 13 个 API（单轮 / brake / invert / pwm\_limit / 编码器原始 / 速度反馈），见 §3 |
 | 5 | **【Stage 2.2】上车准备**：补齐右轮 X4 解码 + 脉冲刹车 + 电池保护 + 安全状态机 + 通用 PID + 平衡骨架 | 已完成，新增 4 个模块 8 个文件（`bsp_battery` / `pid` / `app_safety` / `app_balance`），见 §3.5 + §4.3 |
 | 6 | **【Stage 2.5】电机测速调试入口**：装车模式下按需切入 demo，可串口调速 / 急刹 / 启动 / 查看同步诊断 / 返回装车模式 | 已完成，装车模式 UART `t/test` 进入 demo；demo 支持 `+/-`、`<rpm><Enter>`、`b/r/s/p/c/x/l/load/h`，见 §5 |
 | 7 | **【Stage 2.5】双轮同步 + 校准扫描**：解决左右电机绕组差异 / 电源电压不足导致同 PWM 不同速 | 已完成，新增同步 PI 差分补偿、`[cal]` 扫描日志和 `tools/motor_calib` 离线拟合，见 §3.6 / §6.4 |
 | 8 | **【Stage 2.6】右路基础 5% 补偿**：消除 TB6612 B 通道固有 5.22% 正转速度差，避免各应用层重复补偿 | 已完成，`BSP_MOTOR_RIGHT_FORWARD_SCALE_X1000=950` 写入 `bsp_motor`，见 §4.1 |
+| 9 | **【Stage 2.9】右编码器迁 TIMG0 捕获**：消除 GPIO 雪崩误关导致的差速环自转 | 已完成，PA12→TIMG0_CCP0 X1 捕获 + PA13 判向，17000 cnt/rev，见 §2.2 / §9 v0.11 |
 
 ***
 
@@ -53,9 +56,9 @@
 - [`bsp_motor.c`](../../template/hardware/bsp_motor.c) 负责底层硬件访问：
   - `TB6612` 的 `AIN1/AIN2/BIN1/BIN2/STBY`，并显式区分 4 态：Coast / Forward / Reverse / **Brake**（IN1=IN2=H）
   - `TIMA0` 双路 PWM 占空比设置（PWM 频率 ≈ 20 kHz，超出人耳）
-  - 左轮 `TIMG8 QEI` mode 3 (X4) 16-bit 计数扩展为 32-bit
-  - 右轮 `PA12/PA13` 双边沿中断（X4 解码），反馈符号按实车安装翻正
-  - 速度差分窗口（默认 20 ms ⇒ 50 Hz 速度反馈刷新率）
+  - 左轮 `TIMG8 QEI` mode 2 (X4) 16-bit 计数扩展为 32-bit
+  - 右轮 `PA12 → TIMG0_CCP0` 硬件捕获中断（X1 上升沿 + PA13 读电平判向），反馈符号按实车安装翻正
+  - 速度差分窗口（默认 10 ms ⇒ 100 Hz 速度反馈刷新率）
 - [`app_motor_demo.c`](../../template/app/app_motor_demo.c) 负责演示 / 调试逻辑：
   - 上电后默认两轮同向运行，目标转速按 `620 rpm` 满量程换算为 PWM
   - XDS-UART 支持在线调速、急刹 / 启动、同步开关、同步诊断、校准扫描、进入装车模式
@@ -65,16 +68,22 @@
 
 ### 2.2 编码器策略
 
-当前实现沿用阶段 0 的资源结论：
+当前实现（Stage 2.9 更新）：
 
-- **左轮**：继续使用 `TIMG8` 硬件 QEI，分辨率按 `11 PPR * 30:1 * 4 = 1320 count/rev`
-- **右轮**：Stage 2.2 起使用 `PA12/PA13` 双边沿中断做 X4 解码，分辨率按 `11 PPR * 30:1 * 4 = 1320 count/rev`，并在 Stage 2.5 按实车安装方向翻正反馈符号
+- **左轮**：`TIMG8` 硬件 QEI（PB15/PB16），X4 解码，实测定标 **68000 cnt/rev**（500 PPR × 34:1 × 4）
+- **右轮**：`PA12 → TIMG0_CCP0` 硬件捕获中断（Stage 2.9），X1 仅捕获 A 相上升沿，PA13 在 ISR 内读电平判方向，实测定标 **17000 cnt/rev**（500 PPR × 34:1 × 1）；反馈符号在 Stage 2.5 按实车安装翻正
+
+硬件约束与迁移背景：
+
+- MSPM0G3507 **仅 TIMG8 支持硬件 QEI**（左轮已占），无第二路 QEI
+- 旧方案 `PA12/PA13` GPIO 双沿 + `GROUP1_IRQHandler`（X2，34000 cnt/rev）在 ≈530 RPM 下边沿率 300 边/ms **恰好命中**雪崩阈值 300 → 中断关 50 ms → 右轮速度读 0 → 差速环误判自转
+- 新方案迁到 **TIMG0 独立中断向量**：530 RPM 下仅 150 次/ms，雪崩阈值抬到 1000，正常高速不再误触发
 
 这样做的好处：
 
 - 左轮角度统计稳定，不怕高速漏脉冲
-- 左右轮分辨率一致，平衡环 / 同步环可共用 rpm 与 cps 系数
-- 后续若右轮高速丢计数，可再升级为 `CAPTURE` 模式
+- 右轮高速反馈不再被 GPIO 雪崩整段冻结（根治纠偏自转）
+- `rpm` 字段已 CPR 归一化，左右轮可直接比较；`cps` 因分辨率不同仍有 4× 差异，速度/差速环应优先用 `rpm` 或做 CPR 归一化
 
 ### 2.3 内部状态聚合 + ISR 共享保护（Stage 2.1）
 
@@ -108,7 +117,7 @@ Cortex-M0+ 没有 FPU，软浮点单次乘除 ≈ 50~150 cycles。原 `bsp_motor
 
 | 组               | API                                                                                | 调用时机                              | 备注                                  |
 | --------------- | ---------------------------------------------------------------------------------- | --------------------------------- | ----------------------------------- |
-| **初始化 / 使能**    | `bsp_motor_init()`                                                                 | `SYSCFG_DL_init` + `bsp_gpio_init` 之后 | 计数清零、ISR 注册、STBY 强制低位（待机）           |
+| **初始化 / 使能**    | `bsp_motor_init()`                                                                 | `SYSCFG_DL_init` + `bsp_gpio_init` 之后 | 计数清零、TIMG0 捕获 init + NVIC 注册、STBY 强制低位（待机）           |
 |                 | `bsp_motor_enable(bool)`                                                           | 主循环 / 安全态切换                       | 拉高 / 拉低 STBY；上电默认 false             |
 |                 | `bsp_motor_is_enabled()`                                                           | 任意时刻                              | 查询 STBY 当前态                         |
 | **速度命令**        | `bsp_motor_set_output(L, R)`                                                       | 业务节拍                              | 同时设左右两轮，permille ∈ [-1000, 1000]    |
@@ -135,10 +144,10 @@ Cortex-M0+ 没有 FPU，软浮点单次乘除 ≈ 50~150 cycles。原 `bsp_motor
 | `left_speed_dps` / `right_speed_dps`      | float   | 输出轴瞬时角速度，单位 °/s               |
 | `left_speed_rpm` / `right_speed_rpm`      | float   | 输出轴瞬时转速，单位 rpm                |
 
-**速度刷新率**：由 `BSP_MOTOR_SPEED_WINDOW_MS`（默认 20 ms）决定 → 50 Hz；最低可分辨速度
+**速度刷新率**：由 `BSP_MOTOR_SPEED_WINDOW_MS`（默认 10 ms）决定 → 100 Hz；最低可分辨速度
 
-- 左轮：`1000/20 = 50 cps ≈ 50/1320 × 60 ≈ 2.27 rpm`
-- 右轮：`50 cps ≈ 50/660 × 60 ≈ 4.55 rpm`
+- 左轮：`1000/10 = 100 cps ≈ 100/68000 × 60 ≈ 0.09 rpm`
+- 右轮：`100 cps ≈ 100/17000 × 60 ≈ 0.35 rpm`
 
 如调小窗口（如 10 ms）则响应快、低速分辨率粗；调大窗口（如 50 ms）反之。该宏在 `bsp_motor.h` 顶部，且支持外部 `-D` 覆盖，无需改头文件。
 
@@ -282,19 +291,20 @@ right_pm = target_pm − correction_pm
 | 宏                                       | 默认值      | 含义                                                                              |
 | --------------------------------------- | -------- | ------------------------------------------------------------------------------- |
 | `BSP_MOTOR_PWM_MAX_PERMILLE`            | `1000`   | PWM 命令满量程千分比，**不要改**（其它代码假设这是 1000）                                            |
-| `BSP_MOTOR_GB370_GEAR_RATIO`            | `30`     | GB370 减速比                                                                       |
-| `BSP_MOTOR_GB370_HALL_PPR`              | `11`     | 电机霍尔每转脉冲数（A 相单沿）                                                                |
-| `BSP_MOTOR_LEFT_DECODE_X`               | `4`      | 左轮 QEI mode 3 = X4 解码                                                           |
-| `BSP_MOTOR_RIGHT_DECODE_X`              | **`4` (Stage 2.2)** | 右轮 PA12 + PA13 都开双沿中断 = X4 解码，与左轮分辨率一致；可 `-DBSP_MOTOR_RIGHT_DECODE_X=2` 退回 X2 减半 ISR 频次 |
-| `BSP_MOTOR_RIGHT_FORWARD_SCALE_X1000`   | `950`    | 右路正向基础补偿；同一逻辑 PWM 下右路实测约快 5.22%，BSP 层统一按 95% 输出 |
-| `BSP_MOTOR_DEADZONE_COMP_PM`            | `50`     | 电机静摩擦死区补偿；标定显示 ±40‰ 不转、±60‰ 起转，取中点 50‰ 作为非零命令最小物理输出 |
-| `BSP_MOTOR_LEFT_COUNTS_PER_OUTPUT_REV`  | `1320`   | 自动 = `GEAR × PPR × LEFT_DECODE_X`                                               |
-| `BSP_MOTOR_RIGHT_COUNTS_PER_OUTPUT_REV` | **`1320` (Stage 2.2)** | 自动 = `GEAR × PPR × RIGHT_DECODE_X`；X4 后与左轮一致，平衡环左右系数可共用                              |
-| `BSP_MOTOR_SPEED_WINDOW_MS`             | `20`     | 速度差分窗口；50 Hz 速度刷新率，最低分辨速度 ≈ 2.3 rpm（左）/ 4.6 rpm（右）。支持 `-D` 命令行覆盖              |
+| `BSP_MOTOR_GB370_GEAR_RATIO`            | `34`     | GB370 减速比（标称 9.6:1，实测定标以 `COUNTS_PER_OUTPUT_REV` 为准）                          |
+| `BSP_MOTOR_GB370_HALL_PPR`              | `500`    | 电机霍尔每转脉冲数（A 相单沿）                                                                |
+| `BSP_MOTOR_LEFT_DECODE_X`               | `4`      | 左轮 QEI X4 解码                                                                  |
+| `BSP_MOTOR_RIGHT_DECODE_X`              | **`1` (Stage 2.9)** | 右轮 TIMG0 捕获 X1（仅 PA12 上升沿）；宏仅作文档/cnt/rev 表述，解码逻辑固定于 `bsp_motor.c` |
+| `BSP_MOTOR_RIGHT_FORWARD_SCALE_X1000`   | `1000`   | 右路正向基础补偿（1000=不补偿；Stage 2.6 曾用 950，以当前 .h 为准） |
+| `BSP_MOTOR_LEFT_COUNTS_PER_OUTPUT_REV`  | **`68000`** | 实测定标：500 × 34 × 4                                                         |
+| `BSP_MOTOR_RIGHT_COUNTS_PER_OUTPUT_REV` | **`17000` (Stage 2.9)** | 实测定标：500 × 34 × 1；TIMG0 捕获 X1，无第二路 QEI              |
+| `BSP_MOTOR_SPEED_WINDOW_MS`             | **`10`** | 速度差分窗口；100 Hz 速度刷新率，最低分辨速度 ≈ 0.09 rpm（左）/ 0.35 rpm（右）              |
+| `BSP_MOTOR_ENC_IRQ_QUENCH_PER_MS`       | **`1000` (Stage 2.9)** | 右编码器捕获中断雪崩阈值（次/ms）；旧值 300 在 X2@530 RPM 误触发           |
+| `BSP_MOTOR_ENC_IRQ_QUENCH_DURATION_MS`  | `50`     | 雪崩触发后关闭 TIMG0 CC0 中断的毫秒数                                               |
 | `APP_MOTOR_DEMO_MAX_RPM`                | `620`    | Stage 2.5：GB370 空载最大转速，用于目标 rpm → PWM permille 换算（[`app_motor_demo.c`](../../template/app/app_motor_demo.c) 内宏） |
 | `APP_MOTOR_DEMO_DEFAULT_RPM`            | `620`    | Stage 2.5：demo 上电默认目标转速 |
 
-若手头 GB370 减速比 / 霍尔线数不同，只改 `GEAR_RATIO` 与 `HALL_PPR`；右轮 X2/X4 已在 Stage 2.2 由 `BSP_MOTOR_RIGHT_DECODE_X` 一处统管（init 内自动按宏决定是否开 PA13 中断、`GROUP1_IRQHandler` 自动条件分发 DIO13）。
+右编码器 init / ISR 路径（Stage 2.9）：`bsp_motor_init()` 内 PA12 mux 到 `TIMG0_CCP0`、手动 `DL_TimerG_initCaptureMode()`、`TIMG0_IRQHandler` 分发 `DL_TIMER_IIDX_CC0_DN`；**不再**使用 `GROUP1_IRQHandler` / PA12 GPIO 双沿中断。TIMG0 不在 SysConfig 内，由 BSP 独占；[LP_MSPM0G3507.syscfg](../../EIDE/LP_MSPM0G3507.syscfg) 注释已标注占用。
 
 ### 4.2 运行时可调项（Stage 2.1 新增）
 
@@ -474,8 +484,8 @@ right_pm = target_pm − correction_pm
    - 同向运行时 `L/R` 应同号增长；反向拨动时计数应反向变化
 3. **验角度换算**
    - 在轮胎上做一个明显标记
-   - 手动转约 1 圈，观察日志角度是否接近 `360 deg`
-   - 如果明显偏差，优先检查 `减速比` 与 `PPR` 宏是否和实物一致
+   - 手动转约 1 圈，观察日志角度是否接近 `360 deg`（左轮 ≈68000 cnt/rev → 右轮 ≈17000 cnt/rev，右轮角度步进为左轮 1/4，**rpm 仍可直接比较**）
+   - 如果明显偏差，优先检查 `COUNTS_PER_OUTPUT_REV` 实测定标是否和实物一致
 4. **验串口控制**
    - 发送 `b`，两轮应急刹；发送 `r`，两轮恢复运行
    - 发送 `180` 回车，日志 `target` 应变成 `180rpm`
@@ -508,7 +518,7 @@ right_pm = target_pm − correction_pm
 
 | # | 验证项 | 验证步骤 | 通过判据 |
 | --- | --- | --- | --- |
-| 1 | **右轮 X4 解码上线** | 手动拨右轮一圈，对比 `feedback.right_count` 增量 | 一圈应 ≈ 1320 ± 5（与左轮一致）；从 660 升 1320 = X4 已生效 |
+| 1 | **右轮 TIMG0 捕获上线** | 手动拨右轮一圈，对比 `feedback.right_count` 增量 | 一圈应 ≈ **17000** ± 50；同向命令下 `rpmL/rpmR` 同号；大力推车时心跳 `[ISR_QUENCH!]` 不应再误触发 |
 | 2 | **bsp_battery 采样链路** | `bsp_battery_init()` + 100 Hz 调 `bsp_battery_update()`，1 Hz 打印 `get_mv()` / `get_state()` | 12V 满电时显示 ≈ 12000~12700 mV，状态 `NORMAL`；用电源拉到 9.4V 后状态变 `LOW_WARN` |
 | 3 | **app_safety 跌倒触发** | `app_safety_init()` + `arm()`，手动倾斜 IMU > 60° | 状态变 `FALLEN`，电机 STBY 变低；需由上层再次调用 `app_safety_arm()` 才能恢复 |
 | 4 | **app_safety 低压急停** | 把 `BSP_BATTERY_STOP_MV` 临时改 11500（高于现实电压），连续运行 `tick()` | 约 20 个电池采样确认后变 `LOW_BAT_STOP`，低压未恢复时 `app_safety_arm()` 被拒绝 |
@@ -556,7 +566,7 @@ right_pm = target_pm − correction_pm
 
 ### 7.2 左电机编码器
 
-> **Stage 2.3 起从 J12 迁到 BoosterPack（PB15/PB16，2-Pin Mode）**：原方案 PA29/PA30/PB14 三脚走 LaunchPad J12 QEI 接头，但 J12 排针**出厂未焊接**无法直接接线；同时 GB370 编码器无 Z 相，IDX 可省。复核数据手册 PINMUX 表后选用 BP 上空闲的 PB15/PB16，TIMG8 QEI 由 3-Pin Mode 降为 2-Pin Mode，**硬件 X4 解码精度 1320 cnt/rev 不变，无丢脉冲**。
+> **Stage 2.3 起从 J12 迁到 BoosterPack（PB15/PB16，2-Pin Mode）**：原方案 PA29/PA30/PB14 三脚走 LaunchPad J12 QEI 接头，但 J12 排针**出厂未焊接**无法直接接线；同时 GB370 编码器无 Z 相，IDX 可省。复核数据手册 PINMUX 表后选用 BP 上空闲的 PB15/PB16，TIMG8 QEI 由 3-Pin Mode 降为 2-Pin Mode，**硬件 X4 解码，实测定标 68000 cnt/rev，无丢脉冲**。
 
 | 编码器引脚     | MSPM0G3507 引脚 | LQFP pin | 接出方式              | 跳线 / 备注                                                                                  |
 | --------- | ------------- | -------- | ----------------- | ---------------------------------------------------------------------------------------- |
@@ -568,10 +578,12 @@ right_pm = target_pm − correction_pm
 
 ### 7.3 右电机编码器
 
+> **Stage 2.9 起 PA12 改走 TIMG0 硬件捕获（接线物理脚不变）**：A 相仍接 `PA12`（BP J4.40），B 相仍接 `PA13`（BP J4.39 邻位）。`bsp_motor_init()` 将 PA12 mux 到 `TIMG0_CCP0`（PINCM34 PF=4），由 `TIMG0_IRQHandler` 捕获上升沿；PA13 保持普通 GPIO 输入，仅在 ISR 内读电平判方向。**无需改线**，仅固件路径变更。
+
 | 编码器引脚 | MSPM0G3507 引脚 | LQFP pin | 接出方式      | 跳线 / 备注                                                                  |
 | ----- | ------------- | -------- | ----------- | ------------------------------------------------------------------------ |
-| `A`   | `PA12`        | 5        | BP J4.40    | GPIO 双边沿中断输入；BSP 宏 `BSP_ENC_R_A_*`                                       |
-| `B`   | `PA13`        | 6        | BP J4.39 邻位 | **Stage 2.2 起也开双边沿中断（X4 解码，1320 cnt/rev）**；可 `-DBSP_MOTOR_RIGHT_DECODE_X=2` 退回 X2，此时 PA13 仅 ISR 读电平判方向 |
+| `A`   | `PA12`        | 5        | BP J4.40    | **Stage 2.9**：`TIMG0_CCP0` 硬件捕获（X1 上升沿）；BSP 宏 `BSP_ENC_R_A_*`；datasheet `TIMG0_C0 [PF=4]` |
+| `B`   | `PA13`        | 6        | BP J4.39 邻位 | 普通 GPIO 输入（上拉+滞回）；**不在 TIMG0 上**，ISR 内读电平判方向；17000 cnt/rev（X1） |
 | `VCC` | `3V3`         | —        | LaunchPad J28 3V3 | **先确认编码器模块电压等级**（标错烧 GPIO）                                              |
 | `GND` | `GND`         | —        | 共地          | 与主控共地                                                                    |
 
@@ -630,7 +642,8 @@ Stage 2.1 已完成的（不再列入待办）：
 
 Stage 2.2 已完成的（不再列入待办）：
 
-- ~~**右轮升级为 X4 解码**~~ → 默认 `BSP_MOTOR_RIGHT_DECODE_X = 4`，`bsp_motor_init()` 内已条件编译启用 PA13 双沿中断、`GROUP1_IRQHandler` 已条件分发 `DL_GPIO_IIDX_DIO13`，左右轮分辨率统一 1320 cnt/rev；如 CPU 紧张可 `-DBSP_MOTOR_RIGHT_DECODE_X=2` 退回 X2。
+- ~~**右轮升级为 X4 解码**~~ → Stage 2.2 曾用 GPIO X4；Stage 2.9 已整体迁 **TIMG0 捕获 X1**（17000 cnt/rev），根治 GPIO 雪崩误关导致的差速环自转。历史路径：`GROUP1_IRQHandler` + PA12/PA13 双沿 → 已删除。
+- ~~**右轮高速丢计数 → 升级 CAPTURE 模式**~~ → Stage 2.9 已落地：`PA12 → TIMG0_CCP0` + `TIMG0_IRQHandler` 独立向量；TIMG0 由 BSP 手动 init，SysConfig 注释标注占用。
 - ~~**接入平衡环 / 速度环骨架**~~ → 已交付 [middle/pid.{c,h}](../../template/middle/pid.h) 通用 PID + [app\_balance.{c,h}](../../template/app/app_balance.h) 速度外环 + 平衡内环 + 转向叠加，`app_balance_step()` 100 Hz 节拍调一次即跑完全链路。**所有 PID 增益默认 0**（失效安全），业务侧需调 `set_balance_gains` / `set_speed_gains` 注入；详细整定流程见 [app\_balance.h](../../template/app/app_balance.h) 顶部注释。
 - ~~**电池低压保护与 PWM 自动降功率**~~ → 已交付 [bsp\_battery.{c,h}](../../template/hardware/bsp_battery.h) 周期采样 + 阈值状态机；[app\_safety.{c,h}](../../template/app/app_safety.h) 在 `LOW_BAT_WARN` 自动调 `bsp_motor_set_pwm_limit(600)`，在 `LOW_BAT_STOP` 自动 `brake_pulse_ms(120) + enable(false)`。
 - ~~**跌倒检测 → brake**~~ → [app\_safety.{c,h}](../../template/app/app_safety.h) 已实现：`|pitch| > 60°` → `brake_pulse_ms(80) + enable(false)`，恢复由上层显式 `app_safety_arm()` 触发。
@@ -658,4 +671,5 @@ Stage 2.2 已完成的（不再列入待办）：
 | 2026-05-10 | v0.7 | **Stage 2.5 电机测速 / 同步 / 校准服务**。`main.c` 已切入 `app_motor_demo_run()` 作为上电默认入口；`app_motor_demo` 从固定 `350‰` 正反转 demo 升级为可交互电机测试台：① 目标转速按 GB370 `620 rpm` 满量程换算 PWM，XDS-UART 支持 `+/-`、`<rpm><Enter>`、`b/r`、`s/p`、`c/x`、`h/?`；② S1 改为急刹 / 启动，PA18 使用双沿 + 上电空闲电平判定 + 轮询兜底，日志打印 `raw/active/btn_irq/btn_poll` 诊断；③ 右编码器反馈符号按实车安装翻正，同向命令下左右计数 / rpm 同号；④ 新增 `app_motor_demo_set_sync_enabled` / `set_sync_gains` / `reset_sync` / `get_sync_diag`，默认 50 ms 同步周期，误差 `rpmR-rpmL`，PI 输出差分 PWM 补偿，`corr` 限幅 `±350‰`；⑤ 新增 `app_motor_demo_cal_start` / `cal_abort` / `cal_is_active` PWM 扫描校准，正 / 反向从 `100‰` 到 `1000‰`，步进 `50‰`，每档驻留 `1500 ms`，跳过前 `500 ms` 后每 `100 ms` 输出 `[cal]` 样本；⑥ 新增 [tools/motor_calib](../../tools/motor_calib/README.md) 离线分析工具，解析 `[cal]` 日志并生成 PWM→RPM 拟合、误差 vs PWM / 电池电压、残差图。文档同步：顶部 v0.7 提示、§1 目标表、§2 摘要、§3.6 API、§4.4 参数、§5 串口命令 / 日志、§6.4 验收矩阵。 | 主控团队 |
 | 2026-05-10 | v0.8 | **Stage 2.6 右电机基础补偿**。**根因分析**：Stage 2.5 校准扫描数据拟合结果：正转斜率左 `0.2432 rpm/‰`、右 `0.2559 rpm/‰`，斜率比 **1.0522**（右轮固有快 5.22%）；反转方向斜率差仅 0.83%，两路接近对称。问题为 TB6612 两路 H 桥正向导通参数差异（B 通道压降略低 → 相同 PWM 下右轮获得更多有效驱动电压），属硬件固有特性，与绕组和电压无关。**修复方案**：在 `bsp_motor` 的 `commit_right()` 内对右路正向命令统一乘 `BSP_MOTOR_RIGHT_FORWARD_SCALE_X1000=950`，让 demo、装车平衡、K230 控制等所有业务路径共享同一基础补偿。**参数调整**：同步环 Kp `8 → 4`、Ki `1 → 0`、`maxCorr` `350 → 200`，底层基础补偿接管稳态后 PI 专注瞬态不再积分发散。文档同步：顶部 v0.8 提示框、§1 第 8 项、§3.6 同步公式、§4.1 BSP 宏、§4.4 Kp/Ki/maxCorr 默认值更新、§5 Boot Banner / `p` 命令输出 / 控制命令表、§6.4 验收项。 | 主控团队 |
 | 2026-05-30 | v0.10 | **Stage 2.8 电池采样预热自适应 + 分压校准**。问题：固定 `t=3 s` 单次快照在冷上电时旁路电容/电源缓启动未完成，读值严重偏低（实测 ~6.5 V 对应 12 V 满电）→ `boot_ok` 误判 / 心跳 `batt` 虚低 / 偶发误急停。**方案**：① 去掉 `BOOT_SAMPLE_MS` 固定时刻，改为 `BOOT_POLL_MS=250` 连续轮询 + **跨 `BOOT_BASELINE_MS=2000` 窗口总上升量** `< STABLE_DELTA_MV=150` 判平台（拒绝"仍在缓升"假稳）；`WARMUP_MAX_MS=15s` 兜底，超时若仍 LOW_STOP 先降档 WARN 再业务去抖；② 新增 `bsp_battery_is_ready()`；③ `DIVIDER_RATIO_X10000` 标称 1803 → **实测 1503**（万用表 12 V 对齐）；④ `BOOT_OK_MV` 7000 → **11000**（充满后读值才作提前解锁）。API 四函数不变，`app_safety` BOOT_CHECK 仍调 `is_boot_ok()`。详见 [Stage3 §7E.5](Stage3-BalanceControl.md) 时序说明。 | 主控团队 |
+| 2026-06-01 | v0.11 | **Stage 2.9 右编码器迁 TIMG0 捕获中断 ｜ 修复大外力纠偏自转**。**现象**：装车平衡大外力推车后，高倾角速度环纠偏时出现左轮远快于右轮、整车自转一周。**根因**：旧方案右轮 `PA12/PA13` GPIO 双沿中断（X2，34000 cnt/rev）+ `GROUP1_IRQHandler`；500 PPR × 34:1 电机在 ≈530 RPM 出轴侧边沿率 **300 边/ms 恰好等于** `BSP_MOTOR_ENC_IRQ_QUENCH_PER_MS=300` → 雪崩兜底关中断 50 ms → `right_count` 冻结 → 差速环误判 L≫R → 正反馈自转。**约束**：MSPM0G3507 仅 TIMG8 支持硬件 QEI（左轮已占），无第二路 QEI。**修复**（[bsp\_motor.{c,h}](../../template/hardware/bsp_motor.h)）：① PA12 mux 到 `TIMG0_CCP0`（PINCM34 PF=4），`DL_TimerG_initCaptureMode` X1 上升沿捕获；PA13 保持 GPIO，ISR 内读电平判向；② `GROUP1_IRQHandler` 删除，`TIMG0_IRQHandler` 独立向量（startup slot 17）；③ `RIGHT_COUNTS_PER_OUTPUT_REV` 34000→**17000**，`RIGHT_DECODE_X`→**1**，`ENC_IRQ_QUENCH_PER_MS` 300→**1000**；④ 雪崩兜底改为 `DL_TimerG_enable/disableInterrupt(TIMG0, CC0)`；⑤ [LP_MSPM0G3507.syscfg](../../EIDE/LP_MSPM0G3507.syscfg) QEI 注释段标注 TIMG0 已被 BSP 占用。**接线不变**（PA12/PA13 物理脚位同 §7.3）。**文档同步**：顶部 v0.11 提示框；§1 第 2/9 项；§2.1/§2.2 编码器策略；§3.2 速度分辨率；§4.1 宏表（PPR/减速比/cnt/rev/雪崩阈值）；§6.3 验收第 1 项；§7.2/§7.3 接线表；§8 划掉旧 X4/GPIO 路径、补 CAPTURE 已完成。**待上车验证**：手转一圈 ≈17000；大力推车时 `[ISR_QUENCH!]` 不再误触发、自转消失。 | 主控团队 |
 

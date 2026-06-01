@@ -30,7 +30,7 @@
 #define TRK_GAIN_ANGLE_KI   (2.0f)
 #define TRK_GAIN_ANGLE_KD   (0.0f)
 #define TRK_GAIN_ANGLE_OFS  (20.0f)
-#define TRK_GAIN_SPEED_KP   (-0.0015f)
+#define TRK_GAIN_SPEED_KP   (-0.002f)
 #define TRK_GAIN_SPEED_KI   (0.001f)
 #define TRK_GAIN_SPEED_KD   (0.0f)
 #define TRK_GAIN_SPEED_OFS  (0.0f)
