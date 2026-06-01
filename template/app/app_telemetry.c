@@ -49,11 +49,6 @@
 
 void app_telemetry_run(void)
 {
-    /* Stage 1.6 起 VOFA+ JustFloat 推送暂停（蓝牙 UART3 让给 IMU 占用），
-     * vofa.{c,h} 模块接口保留但本阶段不调用 vofa_set_writer / vofa_send；
-     * 姿态可视化主路径切到 1 Hz XDS-UART printf。重启 VOFA 路径后只需在此
-     * 重新注入 writer 即可，不影响下游业务代码。 */
-
     uint32_t tick_count    = 0u;
     uint32_t last_total_rx = bsp_k230_uart_total_rx();
 

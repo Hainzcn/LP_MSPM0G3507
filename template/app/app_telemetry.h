@@ -13,9 +13,7 @@
  *  「drain UART → 喂状态机 → 取最新 snapshot」。
  *
  *  Stage 1.6 变更：蓝牙 UART3 整体下线（PB12/PB13 让给 IMU），原 100 Hz
- *  VOFA+ JustFloat 推送暂停。vofa.{c,h} 接口保留，待未来无线遥测路径
- *  重新上线后（K230 BLE 透传 / USB CDC / 等）可一行 `vofa_set_writer`
- *  恢复，业务层无需改动。
+ *  VOFA+ JustFloat 推送已移除；姿态可视化改走 1 Hz XDS-UART printf。
  */
 
 #ifndef APP_TELEMETRY_H
