@@ -172,11 +172,41 @@ static void update_lap_accum(const ms901m_snapshot_t *snap,
     }
 }
 
-static int32_t avg_cps_abs(const bsp_motor_feedback_t *fb)
+/** 满圈后进入减速段：用当前指令或实测轮速初始化 applied_cps，避免 K230
+ * 已发 0 时 applied_cps=0 且编码器仍显示平衡微动 → 停稳双条件永不满足。 */
+static void begin_decel_phase(app_track_phase_t phase,
+                              const app_balance_motion_cmd_t *cmd,
+                              const bsp_motor_feedback_t *fb)
 {
-    if (fb == NULL) return 0;
-    int32_t avg = (fb->left_speed_cps + fb->right_speed_cps) / 2;
-    return (avg < 0) ? -avg : avg;
+    int32_t seed = (cmd != NULL) ? cmd->target_speed_cps : 0;
+    if (seed == 0 && fb != NULL) {
+        seed = (fb->left_speed_cps + fb->right_speed_cps) / 2;
+    }
+    if (seed != 0) {
+        s_trk.applied_cps = seed;
+    }
+    s_trk.stop_ms = 0u;
+    enter_phase(phase);
+}
+
+/** BRAKE / FINAL_BRAKE 共用：applied_cps 已为 0 持续 STOP_SETTLE_MS 即视为停稳；
+ * 不再要求 avg_cps < STOP_CPS（平衡维持时编码器常高于阈值导致永久卡 BRAKE）。 */
+static bool decel_phase_done(uint32_t elapsed_ms)
+{
+    if (s_trk.applied_cps == 0) {
+        s_trk.stop_ms += (uint32_t)APP_BALANCE_SPEED_PERIOD_MS;
+    } else {
+        s_trk.stop_ms = 0u;
+    }
+    if (s_trk.stop_ms >= APP_TRACK_STOP_SETTLE_MS) {
+        return true;
+    }
+    if (elapsed_ms >= APP_TRACK_BRAKE_MAX_MS) {
+        (void)printf("[track] brake timeout fallback (applied_cps=%ld t=%lums)\r\n",
+            (long)s_trk.applied_cps, (unsigned long)elapsed_ms);
+        return true;
+    }
+    return false;
 }
 
 /* ── 公共 API ─────────────────────────────────────────────────────────────── */
@@ -349,11 +379,10 @@ void app_track_tick_20hz(const ms901m_snapshot_t *snap,
                 (unsigned long)TRK_F2_F(s_trk.yaw_accum_deg),
                 (long)s_trk.arc_mm,
                 (unsigned long)elapsed_ms);
-            s_trk.stop_ms = 0u;
             if (s_trk.lap >= APP_TRACK_N_LAPS) {
-                enter_phase(APP_TRACK_FINAL_BRAKE);
+                begin_decel_phase(APP_TRACK_FINAL_BRAKE, cmd, fb);
             } else {
-                enter_phase(APP_TRACK_BRAKE);
+                begin_decel_phase(APP_TRACK_BRAKE, cmd, fb);
             }
         }
         break;
@@ -366,12 +395,7 @@ void app_track_tick_20hz(const ms901m_snapshot_t *snap,
         cmd->target_speed_cps = s_trk.applied_cps;
         cmd->target_dif_cps   = 0;
 
-        if ((s_trk.applied_cps == 0) && (avg_cps_abs(fb) < APP_TRACK_STOP_CPS)) {
-            s_trk.stop_ms += (uint32_t)APP_BALANCE_SPEED_PERIOD_MS;
-        } else {
-            s_trk.stop_ms = 0u;
-        }
-        if (s_trk.stop_ms >= APP_TRACK_STOP_SETTLE_MS) {
+        if (decel_phase_done(elapsed_ms)) {
             enter_phase(APP_TRACK_PAUSE);
         }
         break;
@@ -399,12 +423,7 @@ void app_track_tick_20hz(const ms901m_snapshot_t *snap,
         cmd->target_speed_cps = s_trk.applied_cps;
         cmd->target_dif_cps   = 0;
 
-        if ((s_trk.applied_cps == 0) && (avg_cps_abs(fb) < APP_TRACK_STOP_CPS)) {
-            s_trk.stop_ms += (uint32_t)APP_BALANCE_SPEED_PERIOD_MS;
-        } else {
-            s_trk.stop_ms = 0u;
-        }
-        if (s_trk.stop_ms >= APP_TRACK_STOP_SETTLE_MS) {
+        if (decel_phase_done(elapsed_ms)) {
             enter_phase(APP_TRACK_DONE);
             (void)printf("[track] all %u laps complete, holding upright\r\n",
                 (unsigned int)APP_TRACK_N_LAPS);

@@ -154,9 +154,14 @@ typedef enum {
 #define APP_TRACK_STOP_CPS                  (300)
 #endif
 
-/** 停稳确认持续时长（ms）。 */
+/** 停稳确认持续时长（ms）：applied_cps 已为 0 后需持续此时长才进入下一阶段。 */
 #ifndef APP_TRACK_STOP_SETTLE_MS
 #define APP_TRACK_STOP_SETTLE_MS            (500u)
+#endif
+
+/** 刹车阶段最长停留（ms）：超时强制进入 PAUSE / DONE，防止停稳判据卡死。 */
+#ifndef APP_TRACK_BRAKE_MAX_MS
+#define APP_TRACK_BRAKE_MAX_MS              (5000u)
 #endif
 
 /* ---- 圈数判定 ---- */
