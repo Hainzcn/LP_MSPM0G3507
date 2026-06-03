@@ -58,6 +58,7 @@ typedef struct {
 
     /* 速度包络 */
     int32_t  applied_cps;
+    int32_t  decel_speed_ref;       /* 进入 BRAKE 时的 |速度| 基准，用于差速同比缩放 */
 
     /* 计时器 */
     uint32_t settle_ms;             /* 自立稳定累计 */
@@ -69,6 +70,8 @@ static track_state_t s_trk;
 static const float s_dt_sec = (float)APP_BALANCE_SPEED_PERIOD_MS / 1000.0f;
 
 /* ── 内部辅助 ─────────────────────────────────────────────────────────────── */
+
+static void track_set_angle_motion(void);
 
 static const char *phase_name(app_track_phase_t p)
 {
@@ -98,6 +101,8 @@ static void track_phase_enter(app_track_phase_t phase)
 {
     switch (phase) {
     case APP_TRACK_STAND_SETTLE:
+        track_set_angle_motion();
+        (void)printf("[track] handover to motion PID\r\n");
         app_buzzer_play_cue(APP_BUZZER_CUE_STOOD_UP);
         track_laser_for_phase(phase);
         break;
@@ -228,6 +233,38 @@ static void update_lap_accum(const ms901m_snapshot_t *snap,
     }
 }
 
+/** 按当前包络速度同比缩放 K230 差速，避免减速时仍用满幅转向。 */
+static int32_t track_scale_diff_by_speed(int32_t dif, int32_t speed_applied, int32_t speed_ref)
+{
+    if (dif == 0 || speed_ref <= 0) {
+        return 0;
+    }
+    int32_t sa = speed_applied;
+    if (sa < 0) sa = -sa;
+    int64_t scaled = (int64_t)dif * (int64_t)sa / (int64_t)speed_ref;
+    if (scaled > (int64_t)INT32_MAX) {
+        return INT32_MAX;
+    }
+    if (scaled < (int64_t)INT32_MIN) {
+        return INT32_MIN;
+    }
+    return (int32_t)scaled;
+}
+
+/** BRAKE / FINAL_BRAKE：速度斜坡到 0；差速透传 K230 并按包络同比缩放。 */
+static void track_decel_tick(app_balance_motion_cmd_t *cmd)
+{
+    int32_t dif_in = (cmd != NULL) ? cmd->target_dif_cps : 0;
+
+    s_trk.applied_cps = rate_limit(s_trk.applied_cps, 0,
+                                   APP_TRACK_DECEL_CPS_PER_TICK);
+    if (cmd != NULL) {
+        cmd->target_speed_cps = s_trk.applied_cps;
+        cmd->target_dif_cps   = track_scale_diff_by_speed(
+            dif_in, s_trk.applied_cps, s_trk.decel_speed_ref);
+    }
+}
+
 /** 满圈后进入减速段：用当前指令或实测轮速初始化 applied_cps，避免 K230
  * 已发 0 时 applied_cps=0 且编码器仍显示平衡微动 → 停稳双条件永不满足。 */
 static void begin_decel_phase(app_track_phase_t phase,
@@ -240,6 +277,19 @@ static void begin_decel_phase(app_track_phase_t phase,
     }
     if (seed != 0) {
         s_trk.applied_cps = seed;
+    }
+    {
+        int32_t ref = s_trk.applied_cps;
+        if (ref == 0 && cmd != NULL) {
+            ref = cmd->target_speed_cps;
+        }
+        if (ref == 0 && fb != NULL) {
+            ref = (fb->left_speed_cps + fb->right_speed_cps) / 2;
+        }
+        if (ref < 0) {
+            ref = -ref;
+        }
+        s_trk.decel_speed_ref = (ref > 0) ? ref : 1;
     }
     s_trk.stop_ms = 0u;
     enter_phase(phase);
@@ -279,6 +329,7 @@ void app_track_init(void)
     s_trk.start_right_count = 0;
     s_trk.arc_mm         = 0;
     s_trk.applied_cps    = 0;
+    s_trk.decel_speed_ref = 0;
     s_trk.settle_ms      = 0u;
     s_trk.stop_ms        = 0u;
 }
@@ -388,8 +439,8 @@ void app_track_tick_20hz(const ms901m_snapshot_t *snap,
         break;
     }
 
-    /* ── 稳定确认：保持 rise 角度增益 + target_speed=0，等 |pitch|/|gz|
-     *   平稳一段时间；确认后切换运动角度增益，交棒给循线。 */
+    /* ── 稳定确认：运动角度增益 + target_speed=0，等 |pitch|/|gz|
+     *   连续平稳 SETTLE_MS；确认后进入第一圈循线。 */
     case APP_TRACK_STAND_SETTLE: {
         cmd->target_speed_cps = 0;
         cmd->target_dif_cps   = 0;
@@ -407,9 +458,6 @@ void app_track_tick_20hz(const ms901m_snapshot_t *snap,
         }
 
         if (s_trk.settle_ms >= APP_TRACK_SETTLE_MS) {
-            /* 交棒：角度环切运动增益，进入第一圈循线 */
-            track_set_angle_motion();
-            (void)printf("[track] stood up, handover to motion PID\r\n");
             s_trk.lap         = 1u;
             s_trk.applied_cps = 0;
             reset_lap_accum(fb);
@@ -447,12 +495,9 @@ void app_track_tick_20hz(const ms901m_snapshot_t *snap,
         break;
     }
 
-    /* ── 减速刹车（满圈→暂停）：速度斜坡到 0 并停稳 ──────────────── */
+    /* ── 减速刹车（满圈→暂停）：速度斜坡到 0，差速随包络同比缩放 ── */
     case APP_TRACK_BRAKE: {
-        s_trk.applied_cps = rate_limit(s_trk.applied_cps, 0,
-                                       APP_TRACK_DECEL_CPS_PER_TICK);
-        cmd->target_speed_cps = s_trk.applied_cps;
-        cmd->target_dif_cps   = 0;
+        track_decel_tick(cmd);
 
         if (decel_phase_done(elapsed_ms)) {
             enter_phase(APP_TRACK_PAUSE);
@@ -475,12 +520,9 @@ void app_track_tick_20hz(const ms901m_snapshot_t *snap,
         break;
     }
 
-    /* ── 末圈刹车：速度斜坡到 0 停稳，进入 DONE ───────────────────── */
+    /* ── 末圈刹车：速度斜坡到 0，差速随包络同比缩放 ───────────────── */
     case APP_TRACK_FINAL_BRAKE: {
-        s_trk.applied_cps = rate_limit(s_trk.applied_cps, 0,
-                                       APP_TRACK_DECEL_CPS_PER_TICK);
-        cmd->target_speed_cps = s_trk.applied_cps;
-        cmd->target_dif_cps   = 0;
+        track_decel_tick(cmd);
 
         if (decel_phase_done(elapsed_ms)) {
             enter_phase(APP_TRACK_DONE);

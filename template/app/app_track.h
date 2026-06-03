@@ -4,12 +4,12 @@
  *
  * 工作流程（上电自检通过、安全态 ARMED 后自动启动，亦可串口/远程触发）：
  *
- *   SELF_STAND   自立：…；蜂鸣器/激光均关闭。
- *   STAND_SETTLE 稳定确认 5 s（APP_TRACK_SETTLE_MS）；提示音 STOOD_UP。
+ *   SELF_STAND   自立：rise 角度环；蜂鸣器/激光均关闭。
+ *   STAND_SETTLE 进入即切运动角度 PID；稳定累计 SETTLE_MS 后 TRACE；提示音 STOOD_UP。
  *   TRACE        循线 + 激光开；提示音 TRACE_START。
- *   BRAKE        满圈减速；激光保持开。
+ *   BRAKE        满圈减速（MCU 速度包络；差速按包络同比缩放 + K230 转向）；激光开。
  *   PAUSE        暂停 5 s；提示音 LAP_PAUSE；激光保持开。
- *   FINAL_BRAKE  末圈刹车；激光保持开。
+ *   FINAL_BRAKE  末圈刹车（同上）；激光保持开。
  *   DONE         完成；提示音 ALL_DONE；激光关。
  *
  * 圈数判定（MCU 自主，优先级见 app_track.h 判圈宏）：
@@ -96,7 +96,7 @@ typedef enum {
  *   - ki = 0：自立段误差大且持续，积分必然 windup，故关掉；
  *   - kd > 0：核心阻尼项，临近直立减速，抑制过冲/震荡（"减速-稳定"）；
  *   - 全输出权限（不额外限幅），保证猛起力度。
- * 摆稳后（STAND_SETTLE 确认）切换到运动 PID（TRK_GAIN_*）接管循线。
+ * 进入 STAND_SETTLE 时切换到运动角度 PID（TRK_GAIN_*）；稳定确认后再进 TRACE 循线。
  *
  * 注意：这几个值需上车实测整定。下面是合理起点，kd 是首要调节对象——
  * 过小→过冲震荡数秒，过大→起摆无力/抖动。命令量换算同 bp：x1000。
@@ -140,7 +140,8 @@ typedef enum {
 
 /* ---- 速度包络（raw cps；K230 target_v 已 ×SCALE 还原为 raw cps） ----
  * TRACE 阶段速度透传 K230，不在 MCU 二次加速限速（与手动 WiFi trace 对齐）。
- * 下列 DECEL 仅用于 BRAKE / FINAL_BRAKE 减速停稳。 */
+ * BRAKE / FINAL_BRAKE：MCU 对 target_speed 做 DECEL 斜坡；target_dif 来自 K230，
+ * 按 applied_cps / decel_speed_ref 同比缩放（与线速度同比例，避免切线直行）。 */
 
 /** 减速刹车：每 20 Hz 拍允许的最大速度减量（raw cps，较陡）。 */
 #ifndef APP_TRACK_DECEL_CPS_PER_TICK
