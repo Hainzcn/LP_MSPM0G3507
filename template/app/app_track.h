@@ -7,9 +7,9 @@
  *   SELF_STAND   自立：rise 角度环；蜂鸣器/激光均关闭。
  *   STAND_SETTLE 进入即切运动角度 PID；稳定累计 SETTLE_MS 后 TRACE；提示音 STOOD_UP。
  *   TRACE        循线 + 激光开；提示音 TRACE_START。
- *   BRAKE        满圈减速（MCU 速度包络；差速按包络同比缩放 + K230 转向）；激光开。
+ *   BRAKE        满圈反速后仰刹停 + K230 转向；激光开。
  *   PAUSE        暂停 5 s；提示音 LAP_PAUSE；激光保持开。
- *   FINAL_BRAKE  末圈刹车（同上）；激光保持开。
+ *   FINAL_BRAKE  末圈反速刹停（同上）；激光保持开。
  *   DONE         完成；提示音 ALL_DONE；激光关。
  *
  * 圈数判定（MCU 自主，优先级见 app_track.h 判圈宏）：
@@ -138,29 +138,35 @@ typedef enum {
 #define APP_TRACK_SETTLE_MS                 (5000u)
 #endif
 
-/* ---- 速度包络（raw cps；K230 target_v 已 ×SCALE 还原为 raw cps） ----
- * TRACE 阶段速度透传 K230，不在 MCU 二次加速限速（与手动 WiFi trace 对齐）。
- * BRAKE / FINAL_BRAKE：MCU 对 target_speed 做 DECEL 斜坡；target_dif 来自 K230，
- * 按 applied_cps / decel_speed_ref 同比缩放（与线速度同比例，避免切线直行）。 */
+/* ---- 反速后仰刹停（raw cps；K230 target_v 已 ×SCALE 还原） ----
+ * TRACE 阶段速度透传 K230，不在 MCU 二次加速限速。
+ * BRAKE / FINAL_BRAKE：先施加与行驶方向相反的目标速度（后仰制动），
+ * 持续 BRAKE_REVERSE_MS 后改 target_speed=0，待实测轮速低于 STOP_CPS 并
+ * 稳定 STOP_SETTLE_MS 后进入下一阶段。反速脉冲期间保留 K230 target_dif。 */
 
-/** 减速刹车：每 20 Hz 拍允许的最大速度减量（raw cps，较陡）。 */
-#ifndef APP_TRACK_DECEL_CPS_PER_TICK
-#define APP_TRACK_DECEL_CPS_PER_TICK        (800)
+/** 反速刹车目标速度幅值（raw cps，符号由进入刹车时的行驶方向决定）。 */
+#ifndef APP_TRACK_BRAKE_REVERSE_CPS
+#define APP_TRACK_BRAKE_REVERSE_CPS           (20000)
 #endif
 
-/** 停稳判据：|avg_cps| 阈值（raw cps）。 */
+/** 反速后仰脉冲持续时间（ms）。 */
+#ifndef APP_TRACK_BRAKE_REVERSE_MS
+#define APP_TRACK_BRAKE_REVERSE_MS            (200u)
+#endif
+
+/** 收束停稳判据：|avg_cps| 阈值（raw cps，反速脉冲结束后生效）。 */
 #ifndef APP_TRACK_STOP_CPS
 #define APP_TRACK_STOP_CPS                  (300)
 #endif
 
-/** 停稳确认持续时长（ms）：applied_cps 已为 0 后需持续此时长才进入下一阶段。 */
+/** 收束停稳确认持续时长（ms）：反速后 |avg| 低于 STOP_CPS 的累计时间。 */
 #ifndef APP_TRACK_STOP_SETTLE_MS
 #define APP_TRACK_STOP_SETTLE_MS            (500u)
 #endif
 
-/** 刹车阶段最长停留（ms）：超时强制进入 PAUSE / DONE，防止停稳判据卡死。 */
+/** 刹车阶段最长停留（ms）：超时强制进入 PAUSE / DONE。 */
 #ifndef APP_TRACK_BRAKE_MAX_MS
-#define APP_TRACK_BRAKE_MAX_MS              (5000u)
+#define APP_TRACK_BRAKE_MAX_MS              (3000u)
 #endif
 
 /* ---- 圈数判定 ----
@@ -196,7 +202,7 @@ typedef enum {
 
 /** 里程收口系数（×100）：arc ≥ 周长×此值/100 且 yaw 足够时 ② 直接满圈。默认 92≈330°/360°。 */
 #ifndef APP_TRACK_LAP_ARC_COMPLETE_X100
-#define APP_TRACK_LAP_ARC_COMPLETE_X100     (85)
+#define APP_TRACK_LAP_ARC_COMPLETE_X100     (90)
 #endif
 
 /** ② 里程收口要求的最小累计偏航（°），防止长直道仅靠里程误触发。 */
@@ -224,7 +230,7 @@ typedef struct {
     uint8_t  lap;               /* 当前圈号（1 起；0=未开始） */
     float    yaw_accum_deg;     /* 本圈累计偏航（°） */
     int32_t  arc_mm;            /* 本圈累计里程（mm） */
-    int32_t  applied_cps;       /* 当前速度包络输出（raw cps） */
+    int32_t  applied_cps;       /* 刹车段当前 target_speed（raw cps，诊断用） */
     uint32_t phase_elapsed_ms;  /* 当前阶段已用时（ms） */
 } app_track_diag_t;
 

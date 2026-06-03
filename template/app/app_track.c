@@ -31,7 +31,7 @@
 #define TRK_GAIN_ANGLE_KI   (2.0f)
 #define TRK_GAIN_ANGLE_KD   (0.0f)
 #define TRK_GAIN_ANGLE_OFS  (20.0f)
-#define TRK_GAIN_SPEED_KP   (-0.0023f)
+#define TRK_GAIN_SPEED_KP   (-0.0025f)
 #define TRK_GAIN_SPEED_KI   (0.000f)
 #define TRK_GAIN_SPEED_KD   (0.0f)
 #define TRK_GAIN_SPEED_OFS  (0.0f)
@@ -56,9 +56,9 @@ typedef struct {
     int32_t  start_right_count;
     int32_t  arc_mm;
 
-    /* 速度包络 */
-    int32_t  applied_cps;
-    int32_t  decel_speed_ref;       /* 进入 BRAKE 时的 |速度| 基准，用于差速同比缩放 */
+    /* 速度 / 刹车 */
+    int32_t  applied_cps;           /* 诊断：当前刹车段下发的 target_speed */
+    int8_t   brake_fwd_sign;        /* 进入刹车时行驶方向符号（±1） */
 
     /* 计时器 */
     uint32_t settle_ms;             /* 自立稳定累计 */
@@ -156,15 +156,6 @@ static void track_apply_outer_gains(void)
     app_balance_set_yaw_gains(0.0f, 0.0f, 0.0f, 0.0f);
 }
 
-/** 速率限制：applied 朝 desired 每拍最多移动 max_step（raw cps）。 */
-static int32_t rate_limit(int32_t applied, int32_t desired, int32_t max_step)
-{
-    int32_t d = desired - applied;
-    if (d >  max_step) d =  max_step;
-    if (d < -max_step) d = -max_step;
-    return applied + d;
-}
-
 /** 复位本圈判圈累计量，记录起始编码器计数。 */
 static void reset_lap_accum(const bsp_motor_feedback_t *fb)
 {
@@ -189,7 +180,6 @@ static bool lap_complete(uint32_t elapsed_ms, const char **reason_out)
     int32_t arc_complete =
         (APP_TRACK_LAP_LENGTH_MM * APP_TRACK_LAP_ARC_COMPLETE_X100) / 100;
 
-    /* ① 偏航主判据 + arc_min 防原地空转 */
     if ((yaw_abs >= APP_TRACK_YAW_PER_LAP_DEG) && (arc_abs >= arc_min)) {
         if (reason_out != NULL) {
             *reason_out = "yaw+arc_min";
@@ -197,7 +187,6 @@ static bool lap_complete(uint32_t elapsed_ms, const char **reason_out)
         return true;
     }
 
-    /* ② 里程收口：gyro 积分偏小时以弧长先满圈 */
     if ((arc_abs >= arc_complete) && (arc_abs >= arc_min) &&
         (yaw_abs >= APP_TRACK_YAW_MIN_FOR_ARC_DEG)) {
         if (reason_out != NULL) {
@@ -206,7 +195,6 @@ static bool lap_complete(uint32_t elapsed_ms, const char **reason_out)
         return true;
     }
 
-    /* ③ 超时兜底 */
     if (elapsed_ms >= APP_TRACK_LAP_TIMEOUT_MS) {
         if (reason_out != NULL) {
             *reason_out = "timeout";
@@ -233,41 +221,26 @@ static void update_lap_accum(const ms901m_snapshot_t *snap,
     }
 }
 
-/** 按当前包络速度同比缩放 K230 差速，避免减速时仍用满幅转向。 */
-static int32_t track_scale_diff_by_speed(int32_t dif, int32_t speed_applied, int32_t speed_ref)
+/** BRAKE / FINAL_BRAKE：反速后仰刹停 + 收束后保持直立。 */
+static void track_brake_tick(uint32_t elapsed_ms, app_balance_motion_cmd_t *cmd)
 {
-    if (dif == 0 || speed_ref <= 0) {
-        return 0;
+    if (cmd == NULL) {
+        return;
     }
-    int32_t sa = speed_applied;
-    if (sa < 0) sa = -sa;
-    int64_t scaled = (int64_t)dif * (int64_t)sa / (int64_t)speed_ref;
-    if (scaled > (int64_t)INT32_MAX) {
-        return INT32_MAX;
+
+    if (elapsed_ms < APP_TRACK_BRAKE_REVERSE_MS) {
+        cmd->target_speed_cps =
+            -(int32_t)s_trk.brake_fwd_sign * (int32_t)APP_TRACK_BRAKE_REVERSE_CPS;
+        /* 反速脉冲期间保留 K230 转向，沿轨迹收弯减速 */
+    } else {
+        cmd->target_speed_cps = 0;
+        cmd->target_dif_cps   = 0;
     }
-    if (scaled < (int64_t)INT32_MIN) {
-        return INT32_MIN;
-    }
-    return (int32_t)scaled;
+    s_trk.applied_cps = cmd->target_speed_cps;
 }
 
-/** BRAKE / FINAL_BRAKE：速度斜坡到 0；差速透传 K230 并按包络同比缩放。 */
-static void track_decel_tick(app_balance_motion_cmd_t *cmd)
-{
-    int32_t dif_in = (cmd != NULL) ? cmd->target_dif_cps : 0;
-
-    s_trk.applied_cps = rate_limit(s_trk.applied_cps, 0,
-                                   APP_TRACK_DECEL_CPS_PER_TICK);
-    if (cmd != NULL) {
-        cmd->target_speed_cps = s_trk.applied_cps;
-        cmd->target_dif_cps   = track_scale_diff_by_speed(
-            dif_in, s_trk.applied_cps, s_trk.decel_speed_ref);
-    }
-}
-
-/** 满圈后进入减速段：用当前指令或实测轮速初始化 applied_cps，避免 K230
- * 已发 0 时 applied_cps=0 且编码器仍显示平衡微动 → 停稳双条件永不满足。 */
-static void begin_decel_phase(app_track_phase_t phase,
+/** 满圈后进入刹车段：记录行驶方向符号，供反速指令使用。 */
+static void begin_brake_phase(app_track_phase_t phase,
                               const app_balance_motion_cmd_t *cmd,
                               const bsp_motor_feedback_t *fb)
 {
@@ -275,31 +248,38 @@ static void begin_decel_phase(app_track_phase_t phase,
     if (seed == 0 && fb != NULL) {
         seed = (fb->left_speed_cps + fb->right_speed_cps) / 2;
     }
-    if (seed != 0) {
-        s_trk.applied_cps = seed;
+    if (seed > 0) {
+        s_trk.brake_fwd_sign = 1;
+    } else if (seed < 0) {
+        s_trk.brake_fwd_sign = -1;
+    } else {
+        s_trk.brake_fwd_sign = 1;
     }
-    {
-        int32_t ref = s_trk.applied_cps;
-        if (ref == 0 && cmd != NULL) {
-            ref = cmd->target_speed_cps;
-        }
-        if (ref == 0 && fb != NULL) {
-            ref = (fb->left_speed_cps + fb->right_speed_cps) / 2;
-        }
-        if (ref < 0) {
-            ref = -ref;
-        }
-        s_trk.decel_speed_ref = (ref > 0) ? ref : 1;
-    }
-    s_trk.stop_ms = 0u;
+    s_trk.applied_cps = 0;
+    s_trk.stop_ms     = 0u;
+    (void)printf("[track] reverse brake sign=%+d cps=%ld ms=%u\r\n",
+        (int)s_trk.brake_fwd_sign,
+        (long)APP_TRACK_BRAKE_REVERSE_CPS,
+        (unsigned int)APP_TRACK_BRAKE_REVERSE_MS);
     enter_phase(phase);
 }
 
-/** BRAKE / FINAL_BRAKE 共用：applied_cps 已为 0 持续 STOP_SETTLE_MS 即视为停稳；
- * 不再要求 avg_cps < STOP_CPS（平衡维持时编码器常高于阈值导致永久卡 BRAKE）。 */
-static bool decel_phase_done(uint32_t elapsed_ms)
+/** 反速脉冲结束后：实测轮速低于阈值且持续 STOP_SETTLE_MS 即停稳。 */
+static bool brake_phase_done(uint32_t elapsed_ms, const bsp_motor_feedback_t *fb)
 {
-    if (s_trk.applied_cps == 0) {
+    if (elapsed_ms < APP_TRACK_BRAKE_REVERSE_MS) {
+        s_trk.stop_ms = 0u;
+        return false;
+    }
+
+    int32_t avg = 0;
+    if (fb != NULL) {
+        avg = (fb->left_speed_cps + fb->right_speed_cps) / 2;
+    }
+    if (avg < 0) {
+        avg = -avg;
+    }
+    if (avg < APP_TRACK_STOP_CPS) {
         s_trk.stop_ms += (uint32_t)APP_BALANCE_SPEED_PERIOD_MS;
     } else {
         s_trk.stop_ms = 0u;
@@ -308,8 +288,8 @@ static bool decel_phase_done(uint32_t elapsed_ms)
         return true;
     }
     if (elapsed_ms >= APP_TRACK_BRAKE_MAX_MS) {
-        (void)printf("[track] brake timeout fallback (applied_cps=%ld t=%lums)\r\n",
-            (long)s_trk.applied_cps, (unsigned long)elapsed_ms);
+        (void)printf("[track] brake timeout fallback (avg_cps=%ld t=%lums)\r\n",
+            (long)avg, (unsigned long)elapsed_ms);
         return true;
     }
     return false;
@@ -328,9 +308,9 @@ void app_track_init(void)
     s_trk.start_left_count  = 0;
     s_trk.start_right_count = 0;
     s_trk.arc_mm         = 0;
-    s_trk.applied_cps    = 0;
-    s_trk.decel_speed_ref = 0;
-    s_trk.settle_ms      = 0u;
+    s_trk.applied_cps     = 0;
+    s_trk.brake_fwd_sign  = 1;
+    s_trk.settle_ms       = 0u;
     s_trk.stop_ms        = 0u;
 }
 
@@ -487,19 +467,19 @@ void app_track_tick_20hz(const ms901m_snapshot_t *snap,
                 (long)s_trk.arc_mm,
                 (unsigned long)elapsed_ms);
             if (s_trk.lap >= APP_TRACK_N_LAPS) {
-                begin_decel_phase(APP_TRACK_FINAL_BRAKE, cmd, fb);
+                begin_brake_phase(APP_TRACK_FINAL_BRAKE, cmd, fb);
             } else {
-                begin_decel_phase(APP_TRACK_BRAKE, cmd, fb);
+                begin_brake_phase(APP_TRACK_BRAKE, cmd, fb);
             }
         }
         break;
     }
 
-    /* ── 减速刹车（满圈→暂停）：速度斜坡到 0，差速随包络同比缩放 ── */
+    /* ── 反速刹车（满圈→暂停）：后仰脉冲 + 零速收束 ─────────────────── */
     case APP_TRACK_BRAKE: {
-        track_decel_tick(cmd);
+        track_brake_tick(elapsed_ms, cmd);
 
-        if (decel_phase_done(elapsed_ms)) {
+        if (brake_phase_done(elapsed_ms, fb)) {
             enter_phase(APP_TRACK_PAUSE);
         }
         break;
@@ -520,11 +500,11 @@ void app_track_tick_20hz(const ms901m_snapshot_t *snap,
         break;
     }
 
-    /* ── 末圈刹车：速度斜坡到 0，差速随包络同比缩放 ───────────────── */
+    /* ── 末圈反速刹车：后仰脉冲 + 零速收束 ─────────────────────────── */
     case APP_TRACK_FINAL_BRAKE: {
-        track_decel_tick(cmd);
+        track_brake_tick(elapsed_ms, cmd);
 
-        if (decel_phase_done(elapsed_ms)) {
+        if (brake_phase_done(elapsed_ms, fb)) {
             enter_phase(APP_TRACK_DONE);
             (void)printf("[track] all %u laps complete, holding upright\r\n",
                 (unsigned int)APP_TRACK_N_LAPS);
