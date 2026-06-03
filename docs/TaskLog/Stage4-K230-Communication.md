@@ -133,9 +133,9 @@ typedef struct __attribute__((packed)) {
 | 1 SELF_STAND | 自立摆起 | idle |
 | 2 STAND_SETTLE | 稳定确认 | idle |
 | **3 TRACE** | **循线** | **trace（下发 v/ω）** |
-| 4 BRAKE | 满圈减速 | idle |
+| 4 BRAKE | 满圈反速刹车 | idle（MCU 后仰制动，忽略 K230 target_v；保留 target_dif） |
 | 5 PAUSE | 暂停 5 s | idle |
-| 6 FINAL_BRAKE | 末圈刹车 | idle |
+| 6 FINAL_BRAKE | 末圈反速刹车 | idle（同上） |
 | 7 DONE | 完成 | idle |
 
 **兼容性**：K230 `parse_vehicle_status()` 按 `len(payload)>=9` 解扩展字段；否则 `track_phase=0, lap=0`。枚举顺序须与 [K230 `comms/protocol.py`](../../../K230/comms/protocol.py) 中 `TRACK_PHASE_*` 一致。
@@ -153,3 +153,4 @@ typedef struct __attribute__((packed)) {
 | 2026-05-24 | v0.7 | TEXT_CMD/TEXT_RESP 远程调试；MAX_PAYLOAD 128；协议真源合并至 Side.md | 主控团队 |
 | 2026-05-24 | v0.8 | K230 UART RX 由 DMA block 模式改为 FIFO 半满中断驱动（`3518414`）；移除 `DMA_CH0` RX 配置，改用 512 B 中断环缓；简化接收逻辑（-94/+53 行） | 主控团队 |
 | 2026-05-30 | v0.9 | **`VEHICLE_STATUS` 扩展 9 B**：追加 `track_phase:u8 + lap:u8`（向后兼容 7 B 旧固件）；MCU `k230_send_vehicle_status` 填充 `app_track_get_phase()` / `get_lap()`；K230 `parse_vehicle_status` 返回 5 元组。详见 §6 | 主控团队 |
+| 2026-05-31 | v0.10 | Stage 3.11a/b 迭代：BRAKE/FINAL_BRAKE 语义从"减速"改为"反速后仰刹停"（MCU 忽略 K230 target_v，保留 target_dif）；新增 `bsp_laser` 激光模块（PA1）；蜂鸣器从曲谱改为阶段提示音 `app_buzzer_play_cue` | 主控团队 |
