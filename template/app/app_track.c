@@ -38,7 +38,7 @@
 #define TRK_GAIN_DIFF_KP    (4.0f)
 #define TRK_GAIN_DIFF_KI    (3.0f)
 #define TRK_GAIN_DIFF_KD    (0.0f)
-#define TRK_GAIN_DIFF_OFS   (30.0f)
+#define TRK_GAIN_DIFF_OFS   (20.0f)
 
 /* ── 内部状态 ─────────────────────────────────────────────────────────────── */
 
