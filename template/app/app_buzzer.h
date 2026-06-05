@@ -3,6 +3,7 @@
  * @brief   蜂鸣器曲谱/提示音播放（非阻塞，1 kHz 主循环驱动）。
  *
  * 音高由 TIMA1 硬件 PWM（bsp_buzzer）在 PB4 产生；本模块负责时序。
+ * 播放时 BSP_LED_B（蓝）与鸣响同拍亮灭，作声光提示；LED_R/G 仍由安全/心跳任务管理。
  *
  * 赛道模式提示音（app_track enter_phase）：
  *   STOOD_UP     自立完成 → 进入稳定确认

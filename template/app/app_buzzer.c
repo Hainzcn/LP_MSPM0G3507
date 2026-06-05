@@ -9,7 +9,9 @@
 #include "app_buzzer.h"
 
 #include "bsp_buzzer.h"
+#include "bsp_gpio.h"
 #include "bsp_systick.h"
+#include "ti_msp_dl_config.h"
 
 #include <stdio.h>
 
@@ -224,6 +226,16 @@ static bool                    s_in_gap;
 static const uint16_t        (*s_play_seq)[2];
 static const char             *s_play_tag;
 
+/** 状态蓝灯（BSP_LED_B）与蜂鸣器同拍：响=亮，静音=灭。 */
+static void status_led_tone(bool on)
+{
+    if (on) {
+        DL_GPIO_setPins(BSP_LED_B_PORT, BSP_LED_B_PIN);
+    } else {
+        DL_GPIO_clearPins(BSP_LED_B_PORT, BSP_LED_B_PIN);
+    }
+}
+
 static bool seq_is_end(const uint16_t (*seq)[2], uint16_t idx)
 {
     if (seq == NULL) {
@@ -236,9 +248,12 @@ static void apply_seq_note(const uint16_t (*seq)[2], uint16_t idx)
 {
     if (seq_is_end(seq, idx)) {
         bsp_buzzer_set_tone_hz(0u);
+        status_led_tone(false);
         return;
     }
-    bsp_buzzer_set_tone_hz(seq[idx][0]);
+    bool sounding = (seq[idx][0] != NOTE_REST);
+    bsp_buzzer_set_tone_hz(sounding ? seq[idx][0] : 0u);
+    status_led_tone(sounding);
 }
 
 static void finish_playback(void)
@@ -250,6 +265,7 @@ static void finish_playback(void)
     s_play_seq = NULL;
     s_play_tag = NULL;
     bsp_buzzer_set_tone_hz(0u);
+    status_led_tone(false);
     (void)printf("[buzzer] done\r\n");
 }
 
@@ -273,6 +289,7 @@ static void start_sequence(const uint16_t (*seq)[2], const char *tag)
 void app_buzzer_init(void)
 {
     bsp_buzzer_init();
+    status_led_tone(false);
     s_playing       = false;
     s_note_idx      = 0u;
     s_note_start_ms = 0u;
@@ -298,12 +315,14 @@ void app_buzzer_stop(void)
 {
     if (!s_playing) {
         bsp_buzzer_set_tone_hz(0u);
+        status_led_tone(false);
         return;
     }
     s_playing  = false;
     s_play_seq = NULL;
     s_play_tag = NULL;
     bsp_buzzer_set_tone_hz(0u);
+    status_led_tone(false);
     (void)printf("[buzzer] stopped\r\n");
 }
 
@@ -343,5 +362,6 @@ void app_buzzer_tick_1ms(void)
     if (!s_in_gap && (elapsed >= (uint32_t)(dur_ms - NOTE_GAP_MS))) {
         s_in_gap = true;
         bsp_buzzer_set_tone_hz(0u);
+        status_led_tone(false);
     }
 }

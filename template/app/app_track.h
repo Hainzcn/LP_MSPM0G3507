@@ -207,7 +207,7 @@ typedef enum {
 
 /** 里程收口系数（×100）：arc ≥ 周长×此值/100 且 yaw 足够时 ② 直接满圈。默认 92≈330°/360°。 */
 #ifndef APP_TRACK_LAP_ARC_COMPLETE_X100
-#define APP_TRACK_LAP_ARC_COMPLETE_X100     (90)
+#define APP_TRACK_LAP_ARC_COMPLETE_X100     (85)
 #endif
 
 /** ② 里程收口要求的最小累计偏航（°），防止长直道仅靠里程误触发。 */
