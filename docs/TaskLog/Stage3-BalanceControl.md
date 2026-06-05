@@ -22,7 +22,7 @@
 >
 > **🔧 Stage 3.10 自校零开关 + 栈修复 v2.0 + RPM 量纲化（2026-05-24~26）**：新增 `APP_BALANCE_PITCH_AUTOZERO_ENABLE` 总开关、`PITCH_OFFSET_DEFAULT_DEG` 硬编码回退值。栈从 1 KB 扩至 2 KB + canary 防护（`76d7d30`）。差速环量纲由归一化 cps 切换为 RPM。详见 **§7D**。
 >
-> **🏁 Stage 3.11 赛道模式 + 自立双 PID（2026-05-30 ~ 2026-05-31）**：新增 `app_track` 主控状态机（自立→循线→判圈→暂停→停车），MCU 为总指挥；自立段专用 rise PID（猛起→阻尼减速→稳定），摆稳后切运动 PID；`VEHICLE_STATUS` 上报 `track_phase/lap` 与 K230 阶段闸门对齐；自检 `ARMED` 后默认等 K230 在线再起立。同期补入蜂鸣器驱动与 `app_track_start()` 启动曲谱播放；2026-05-30 晚进一步取消 TRACE 阶段 MCU 侧二次加速限速，改为**直接透传 K230 原始速度**，与手动 WiFi `trace` 行为对齐。详见 **§7E**。
+> **🏁 Stage 3.11 赛道模式 + 自立双 PID（2026-05-30 ~ 2026-06-02）**：新增 `app_track` 主控状态机（自立→循线→判圈→暂停→停车），MCU 为总指挥；自立段专用 rise PID（猛起→阻尼减速→稳定），摆稳后切运动 PID；`VEHICLE_STATUS` 上报 `track_phase/lap` 与 K230 阶段闸门对齐；自检 `ARMED` 后默认等 K230 在线再起立。同期补入蜂鸣器驱动与 `app_track_start()` 启动曲谱播放；2026-05-30 晚进一步取消 TRACE 阶段 MCU 侧二次加速限速，改为**直接透传 K230 原始速度**，与手动 WiFi `trace` 行为对齐。2026-05-31~06-02 持续迭代：速度环积分冻结（`freeze_integral`）修复点头；激光模块 `bsp_laser` + 蜂鸣器提示音 `app_buzzer_play_cue`；判圈逻辑增强（里程收口②）；减速→反速刹车重构（后仰脉冲 + 零速收束）。详见 **§7E**。
 >
 > 文档定位：阶段 3 自 2026-05-11 起演进；**当前装车控制架构以 Stage 3.11 为准**（含赛道模式）。Stage 3.1~3.6 记录仍保留供对照，其中 §5 四级级联、`rp` 角速度内环、50 Hz 航向调度等描述**已被 Stage 3.7 取代**。
 >
@@ -50,6 +50,8 @@
 | — | **Stage 3.9** 圆弧运动演示 | **完成** —— `app_circle_demo` + `robot_param.h`，串口 `c`/`circle`/`cx` |
 | — | **Stage 3.10** 自校零开关 + 栈修复 | **完成** —— `AUTOZERO_ENABLE` 默认关闭；栈 2 KB + canary |
 | — | **Stage 3.11** 赛道模式 + 自立双 PID | **代码完成，联调中** —— `app_track` 状态机 + rise/motion 双增益 + K230 阶段闸门 + 启动蜂鸣提示 + TRACE 速度透传 |
+| — | **Stage 3.11a** 速度环积分冻结 | **完成** —— `pid2_t.freeze_integral` + 目标低通常驻在线 + `PITCH_OFFSET` 整定 |
+| — | **Stage 3.11b** 激光 + 提示音 + 反速刹车 | **代码完成，联调中** —— `bsp_laser` + `app_buzzer_play_cue` + 判圈增强 + 反速后仰刹停 |
 
 > **架构演进路线图**（各版本里程碑）：
 >
@@ -65,7 +67,9 @@
 > Stage 3.8 (03dc3a3/412800f)   + 差速闭环 + EMA 目标/测量滤波         航向环→diff_pid 级联
 > Stage 3.9 (e3e7e50)           + 圆弧运动演示（circle demo）          三重判停 + robot_param
 > Stage 3.10 (f527a3d/f8dba1e)  + 自校零开关 + 差速环 RPM 量纲化
-> Stage 3.11 (2026-05-30~31)    + 赛道模式 app_track + 自立 rise PID + 启动蜂鸣提示 + TRACE 速度透传 当前架构
+> Stage 3.11 (2026-05-30~31)    + 赛道模式 app_track + 自立 rise PID + 启动蜂鸣提示 + TRACE 速度透传
+Stage 3.11a (2026-05-31)       + 速度环积分冻结（freeze_integral）+ pitch_offset 整定
+Stage 3.11b (2026-05-31~06-02) + 激光模块 bsp_laser + 蜂鸣器提示音 + 判圈增强 + 反速刹车重构 当前架构
 > ```
 
 ---
@@ -784,9 +788,29 @@ rise 增益设计要点（`app_track.h`）：
 - `kd` → 临近直立阻尼（"减速-稳定"），**首要整定对象**
 - 全输出权限，不额外限幅
 
-默认起点：`RISE_KP=50, RISE_KI=0, RISE_KD=8, RISE_OFS=20`；摆起窗口 `RISE_MS=1000`；稳定判据 `|pitch|<10°` 且 `|gz|<40°/s` 持续 `SETTLE_MS=400`。
+默认起点：`RISE_KP=50, RISE_KI=0, RISE_KD=8, RISE_OFS=20`；摆起窗口 `RISE_MS=1000`；稳定判据 `|pitch|<10°` 且 `|gz|<40°/s` 持续 `SETTLE_MS=5000`。
 
-### 7E.3 循线速度透传 / 减速刹车（2026-05-30 晚修订）
+**Stage 3.11a 速度环积分冻结**（`b908a079`, 2026-05-31）：
+
+旧实现把目标低通 + 速度 PID 整体包在 `if(accel_ok)` 内：启动加速 / 刹车减速时 `accel_ok` 极易瞬间为假 → `target_tilt` 被冻结在旧值；门控重开后速度 PID 用累计误差一次性算出新 `target_tilt`，被 `kp=70` 的角度环放大成 PWM 阶跃 → "点头"顿挫，并形成"点头→门控触发→释放跳变→再点头"的回路。
+
+修复：`target_tilt` 始终随平滑后的目标 / 实测连续变化，只在 `a_err` 超限时暂停积分累加（`pid2_t.freeze_integral`），消除释放跳变。
+
+```c
+s_bal.speed_pid.freeze_integral = !accel_ok;   // 仅冻结积分，不冻结整条速度环
+pid2_update(&s_bal.speed_pid);
+s_bal.target_tilt_deg = s_bal.speed_pid.out;
+```
+
+`pid2_t` 新增 `freeze_integral` 字段：`true` 时本拍跳过 `i_term` 累加（保留现值参与输出），仍计算比例/微分。
+
+同期参数调整：
+- `APP_BALANCE_PITCH_OFFSET_DEFAULT_DEG`：0.8 → -1.0 → -0.5（`4286733`）
+- `TRK_GAIN_SPEED_KP`：-0.002 → -0.0023；`TRK_GAIN_SPEED_KI`：0.001 → 0.000（关闭积分，由 `freeze_integral` 机制替代）
+- `APP_TRACK_SETTLE_MS`：400 → 3000 → 5000（`4286733` + `8855622`）
+- `APP_TRACK_LAP_ARC_MIN_X100`：60 → 53（`4286733`）→ 60（`8855622` 回调）
+
+### 7E.3 循线速度透传 / 反速刹车（2026-05-30 ~ 2026-06-02 迭代）
 
 首版 Stage 3.11 在 `app_track_tick_20hz` 内对 TRACE 阶段的 `target_speed_cps`
 额外套了一层 MCU 侧 `rate_limit`，希望用统一包络抑制起步突变。但联调后发现，
@@ -813,16 +837,55 @@ rise 增益设计要点（`app_track.h`）：
 | 阶段 | 速度处理 |
 |------|---------|
 | `TRACE` | 透传 `cmd->target_speed_cps`（K230 原始速度） |
-| `BRAKE` / `FINAL_BRAKE` | MCU 本地按 `DECEL_CPS_PER_TICK` 减速到 0 |
+| `BRAKE` / `FINAL_BRAKE` | 反速后仰脉冲 + 零速收束（MCU 自主），保留 K230 `target_dif` |
 | `PAUSE` / `DONE` | 保持 0，等待下一阶段 |
 
-### 7E.4 判圈（MCU 自主）
+**Stage 3.11b 减速→反速刹车演进**：
+
+1. **减速停稳判定重构**（`8452ed3`, 2026-05-31）：
+
+   旧停稳判据 `applied_cps==0 && avg_cps_abs(fb) < STOP_CPS` 在平衡维持时编码器常高于阈值，导致永久卡 BRAKE。重构为 `decel_phase_done()`：仅看 `applied_cps==0` 持续 `STOP_SETTLE_MS`，不再要求编码器速度低于阈值；新增 `BRAKE_MAX_MS` 超时兜底。`begin_decel_phase()` 用当前指令或实测轮速初始化 `applied_cps`，避免 K230 已发 0 时 `applied_cps=0` 且编码器微动 → 停稳双条件永不满足。
+
+2. **减速逻辑增强**（`467c367`, 2026-06-02）：
+
+   新增 `decel_speed_ref` 字段，减速阶段差速按 `applied_cps / decel_speed_ref` 同比缩放（与线速度同比例，避免减速时过度转向）。`track_decel_tick()` 统一处理 BRAKE / FINAL_BRAKE 速度递减 + 差速缩放。STAND_SETTLE 进入时即切运动角度 PID（不再在确认后才切），消除 rise→motion 切换时的增益跳变。
+
+3. **反速刹车重构**（`19e2454`, 2026-06-02）：
+
+   将 BRAKE / FINAL_BRAKE 从"速度斜坡到 0"改为**反速后仰刹停**：
+
+   ```
+   BRAKE / FINAL_BRAKE:
+     ① 反速脉冲：target_speed = -sign(v_entry) × BRAKE_REVERSE_CPS，持续 BRAKE_REVERSE_MS
+        （后仰制动，保留 K230 target_dif 转向）
+     ② 零速收束：target_speed = 0，等 |avg_cps| < STOP_CPS 持续 STOP_SETTLE_MS
+     ③ 超时兜底：BRAKE_MAX_MS 后强制进入下一阶段
+   ```
+
+   新增参数：
+   - `APP_TRACK_BRAKE_REVERSE_CPS = 20000`：反速脉冲幅值（raw cps）
+   - `APP_TRACK_BRAKE_REVERSE_MS = 200`：反速脉冲持续时间（ms）
+   - `APP_TRACK_BRAKE_MAX_MS = 3000`：刹车阶段最长停留（从 5000 缩短）
+   - `APP_TRACK_LAP_ARC_COMPLETE_X100 = 90`：里程收口系数（从 85 上调）
+
+### 7E.4 判圈（MCU 自主，2026-05-31 增强）
 
 复用 `app_circle_demo` 手法 + `robot_param.h`：
 
 - 每拍 `yaw_accum += gz_dps × dt`
 - `arc_mm = robot_arc_mm_from_avg_counts(Δavg_count)`
-- 满圈：`|yaw|≥360°` **且** `arc≥LAP_LENGTH_MM×60%`（默认 `LAP_LENGTH_MM=2500`）；`LAP_TIMEOUT_MS=60s` 兜底
+
+**判圈优先级**（`8855622`, 2026-05-31 增强，与 `app_circle_demo` 对齐：主判据 OR 收口，而非 AND 双门槛）：
+
+| 优先级 | 判据 | 说明 |
+|--------|------|------|
+| ① 偏航主判据 | `|yaw|≥YAW_PER_LAP_DEG` 且 `arc≥LAP_LENGTH_MM×ARC_MIN%` | `arc_min` 仅作"防早停"下界，避免原地空转仅靠 yaw 误判 |
+| ② 里程收口 | `arc≥LAP_LENGTH_MM×ARC_COMPLETE%` 且 `yaw≥YAW_MIN_FOR_ARC_DEG` | 陀螺积分系统性偏小时，以编码器弧长先收口，不必等 yaw 积满 360° |
+| ③ 超时兜底 | `LAP_TIMEOUT_MS` | 防视觉异常时卡死 |
+
+新增参数（`8855622`）：
+- `APP_TRACK_LAP_ARC_COMPLETE_X100 = 85`（后 `19e2454` 上调至 90）：里程收口系数
+- `APP_TRACK_YAW_MIN_FOR_ARC_DEG = 300.0`：② 要求的最小累计偏航，防长直道仅靠里程误触发
 
 ### 7E.5 冷上电时序：等 K230 再起立
 
@@ -838,7 +901,9 @@ APP_TRACK_AUTOSTART_K230_WAIT_MS = 15000u
 
 逻辑：首次观测 `APP_SAFETY_ARMED` 起计时；`s_k230_online==true` **或** 超时后才 `app_track_start()`。等待期间 PID 增益仍为 0、电机不驱动。
 
-### 7E.6 蜂鸣器提示（`3ea42c78`, 2026-05-30 22:15 CST）
+### 7E.6 蜂鸣器提示 + 激光模块（2026-05-30 ~ 2026-05-31 迭代）
+
+**蜂鸣器**（`3ea42c78`, 2026-05-30 22:15 CST）：
 
 为给赛道模式启动提供更直观的人机提示，并顺便验证 `ARMED → app_track_start()`
 链路已经真正触发，本次补入了完整蜂鸣器驱动与应用层曲谱播放：
@@ -846,14 +911,50 @@ APP_TRACK_AUTOSTART_K230_WAIT_MS = 15000u
 - **硬件层 `bsp_buzzer`**：新增 TIMA1 CCP0 硬件 PWM 驱动，支持按频率输出方波
 - **应用层 `app_buzzer`**：新增非阻塞曲谱调度器，1 kHz 主循环驱动
 - **赛道模式接入**：`app_track_start()` 自动播放《兰花草》，`app_track_cancel()` 立即停止
-- **fatal 场景复用**：IMU 启动失败提示由“直接拉 GPIO 延时”改为 `bsp_buzzer_beep_ms()`
+- **fatal 场景复用**：IMU 启动失败提示由"直接拉 GPIO 延时"改为 `bsp_buzzer_beep_ms()`
+
+**提示音升级**（`8855622`, 2026-05-31）：
+
+将《兰花草》全曲播放改为**阶段短提示音**（`app_buzzer_play_cue`），更精确地反馈当前赛道阶段：
+
+| 提示音枚举 | 触发时机 | 含义 |
+|-----------|---------|------|
+| `APP_BUZZER_CUE_STOOD_UP` | 进入 STAND_SETTLE | 自立完成，开始稳定确认 |
+| `APP_BUZZER_CUE_TRACE_START` | 进入 TRACE | 开始循线 |
+| `APP_BUZZER_CUE_LAP_PAUSE` | 进入 PAUSE | 满圈暂停 |
+| `APP_BUZZER_CUE_ALL_DONE` | 进入 DONE | 全部圈数完成 |
+
+`app_buzzer_play_cue()` 会打断当前播放并切到新提示；《兰花草》保留为调试/演示用（`app_buzzer_play_lanhua_cao()`）。
+
+**激光模块**（`8855622`, 2026-05-31）：
+
+新增 `bsp_laser.{c,h}`，PA1 GPIO 控制：
+
+- `BSP_LASER_ACTIVE_LOW = 0`（默认高电平开），与 Stage0 引脚表「OUT 0 = 关」一致
+- `bsp_laser_init()`：配置 PA1 输出并关断（上电安全态）
+- `bsp_laser_set_enable(bool on)`：开/关激光
+- `bsp_laser_is_enabled()`：查询状态
+- 从 `bsp_gpio_init()` 移除 LASER_EN 初始化，改由 `bsp_laser_init()` 独立管理
+- `main.c` 新增 `bsp_laser_init()` 调用
+
+赛道模式激光联动：
+
+| 阶段 | 激光 |
+|------|------|
+| SELF_STAND / STAND_SETTLE | 关闭 |
+| TRACE / BRAKE / PAUSE / FINAL_BRAKE | 打开 |
+| DONE | 关闭 |
 
 当前行为：
 
 | 场景 | 行为 |
 |------|------|
-| `app_track_start()` | 进入 `SELF_STAND` 后启动《兰花草》播放 |
-| `app_track_cancel()` | 立即静音，避免退出赛道模式后继续播曲 |
+| `app_track_start()` | 进入 `SELF_STAND`（无提示音） |
+| 进入 STAND_SETTLE | 提示音 STOOD_UP |
+| 进入 TRACE | 提示音 TRACE_START + 激光开 |
+| 进入 BRAKE / PAUSE | 提示音 LAP_PAUSE + 激光保持开 |
+| 进入 DONE | 提示音 ALL_DONE + 激光关 |
+| `app_track_cancel()` | 立即静音 + 激光关 |
 | `fatal_imu_init_failure()` | 1000 Hz / 200 ms 蜂鸣告警 |
 
 实现要点：
@@ -867,12 +968,14 @@ APP_TRACK_AUTOSTART_K230_WAIT_MS = 15000u
 
 | 文件 | 变更 |
 |------|------|
-| `template/app/app_buzzer.{c,h}` | **新建** — 《兰花草》曲谱播放、非阻塞 1 kHz 调度、start/stop/is_playing 接口 |
+| `template/app/app_buzzer.{c,h}` | **新建** — 《兰花草》曲谱播放 + 阶段短提示音 `app_buzzer_play_cue`；非阻塞 1 kHz 调度、start/stop/is_playing 接口 |
 | `template/hardware/bsp_buzzer.{c,h}` | **新建** — TIMA1 CCP0 蜂鸣器 PWM 驱动，支持设频与阻塞短鸣 |
-| `template/app/app_track.{c,h}` | **新建** — 状态机 + rise/motion 增益 + 包络 + 判圈 |
-| `template/app/app_balance.{c,h}` | `set_rise_override()` / `get_pitch_meas()`；20 Hz 调 `app_track_tick_20hz`；1 kHz 调 `app_buzzer_tick_1ms()`；`trk`/`tx` 命令；1 Hz `[hb] track=...` |
-| `template/hardware/bsp_gpio.{c,h}` | 蜂鸣器引脚初始化职责移交 `bsp_buzzer`；PB4 复用说明更新 |
-| `template/main.c` | `bsp_buzzer_init()` 启动；fatal IMU 告警改为蜂鸣器接口 |
+| `template/hardware/bsp_laser.{c,h}` | **新建**（`8855622`）— PA1 激光使能 GPIO，`BSP_LASER_ACTIVE_LOW=0` 高电平开 |
+| `template/app/app_track.{c,h}` | **新建并迭代** — 状态机 + rise/motion 增益 + 包络 + 判圈 + 反速刹车 + 激光联动 + 提示音触发 |
+| `template/app/app_balance.{c,h}` | `set_rise_override()` / `get_pitch_meas()` / `freeze_integral`；20 Hz 调 `app_track_tick_20hz`；1 kHz 调 `app_buzzer_tick_1ms()`；`trk`/`tx` 命令；1 Hz `[hb] track=...` |
+| `template/middle/pid.{c,h}` | `pid2_t` 新增 `freeze_integral` 字段 + 冻结逻辑 |
+| `template/hardware/bsp_gpio.{c,h}` | 蜂鸣器引脚初始化职责移交 `bsp_buzzer`；LASER_EN 初始化移交 `bsp_laser`；PB4 复用说明更新 |
+| `template/main.c` | `bsp_buzzer_init()` + `bsp_laser_init()` 启动；fatal IMU 告警改为蜂鸣器接口 |
 | `template/middle/k230_protocol.h` | `k230_vehicle_status_t` +2 字段 |
 | K230 侧 | 见 [K230/docs/TaskLog/phase_G_track_mode.md](../../../K230/docs/TaskLog/phase_G_track_mode.md) |
 
@@ -881,11 +984,14 @@ APP_TRACK_AUTOSTART_K230_WAIT_MS = 15000u
 | 项 | 通过条件 | 状态 |
 |---|---------|------|
 | 冷上电不自立疯冲 | K230 未亮屏前心跳无 `[track] start`；或 `[track] autostart: K230 online` 后再起 | [ ] |
-| 启动蜂鸣提示 | `app_track_start()` 后听到完整启动曲谱；`tx`/取消后立即静音 | [ ] |
 | 自立摆起 | 30~40° 支架姿态 → 1 s 内摆近直立，无持续 ±1000 PWM 饱和 | [ ] |
+| 稳定确认提示音 | 进入 STAND_SETTLE 时听到 STOOD_UP 提示音 | [ ] |
+| 循线提示音 + 激光 | 进入 TRACE 时听到 TRACE_START + 激光开（PA1=H） | [ ] |
 | K230 阶段对齐 | 非 TRACE 阶段 K230 OSD `CTRL:idle`；TRACE 时 `CTRL:TRACE` | [ ] |
+| 反速刹车 | 满圈后后仰脉冲 → 零速收束 → 停稳 | [ ] |
 | 满圈暂停 | lap1 满圈 → 停稳 → 直立 5 s → lap2 | [ ] |
-| 第二圈结束 | `track_phase=DONE`，保持直立 | [ ] |
+| 激光联动 | TRACE/BRAKE/PAUSE 激光开；DONE/SELF_STAND 激光关 | [ ] |
+| 第二圈结束 | `track_phase=DONE`，提示音 ALL_DONE，激光关，保持直立 | [ ] |
 | 远程调试 | TEXT_CMD `trk` / `tx` 可启停 | [ ] |
 
 ---
@@ -939,14 +1045,15 @@ lt,<t_ms>,<pitch_deg>,<left_target_rpm>,<right_target_rpm>,<left_actual_rpm>,<ri
 | 文件 | 主要变更 |
 |------|---------|
 | `template/app/app_balance.h` | Stage 3.7：两级 API + `pid2_t` + 航向角环；编译期可配宏（周期、LPF、极性、量纲缩放） |
-| `template/app/app_balance.c` | 状态机 + 三路 `pid2` + 多速率调度 + 串口命令 + lt_stream + K230 帧分发 + **Stage 3.11** `app_track` 集成 / `rise_override` / `app_buzzer_tick_1ms` |
-| `template/app/app_track.{c,h}` | **Stage 3.11 新建并迭代** — 赛道主控状态机 + rise/motion 双增益 + 判圈 + TRACE 速度透传 / BRAKE 减速包络 |
-| `template/app/app_buzzer.{c,h}` | **Stage 3.11 新建** — 曲谱播放与蜂鸣控制 |
+| `template/app/app_balance.c` | 状态机 + 三路 `pid2` + 多速率调度 + 串口命令 + lt_stream + K230 帧分发 + **Stage 3.11** `app_track` 集成 / `rise_override` / `app_buzzer_tick_1ms` / **3.11a** `freeze_integral` |
+| `template/app/app_track.{c,h}` | **Stage 3.11 新建并迭代** — 赛道主控状态机 + rise/motion 双增益 + 判圈 + TRACE 速度透传 / **3.11b** 反速刹车 + 激光联动 + 提示音触发 |
+| `template/app/app_buzzer.{c,h}` | **Stage 3.11 新建** — 曲谱播放 + 阶段短提示音 `app_buzzer_play_cue` |
 | `template/middle/pid.{c,h}` | 保留 `pid_t`；新增 `pid2_t` / `pid2_update()` |
 | `template/app/app_safety.{c,h}` | 保持 Stage 2 不变；200 Hz 角速度环内集成为 `app_safety_tick()` |
 | `template/hardware/bsp_motor.h` | 双门槛死区（静/动摩擦 8 宏）+ sigma-delta dither + 右路正转补偿 + 运行时开关 API |
 | `template/hardware/bsp_motor.c` | 双门槛状态机 + dither 累加发射 + 编码器停转检测 + X2 解码默认 |
 | `template/hardware/bsp_buzzer.{c,h}` | **Stage 3.11 新建** — 蜂鸣器 PWM 驱动 |
+| `template/hardware/bsp_laser.{c,h}` | **Stage 3.11b 新建** — 激光使能 GPIO（PA1） |
 | `template/hardware/bsp_log_uart.{c,h}` | 新增 `try_write_async` 非阻塞 TX |
 | `template/main.c` | 默认装车入口 `app_balance_run()` + MS901M 200 Hz 配置工具 |
 
@@ -1020,4 +1127,7 @@ lt,<t_ms>,<pitch_deg>,<left_target_rpm>,<right_target_rpm>,<left_actual_rpm>,<ri
 | v0.8 | 2026-05-26 | + Stage 3.8 差速闭环（`03dc3a3`/`412800f`/`f8dba1e`）——新增 `diff_pid` + EMA 目标/测量滤波 + RPM 量纲化 + 航向→差速三级级联；+ Stage 3.9 圆弧运动演示（`e3e7e50`）——`app_circle_demo` + `robot_param.h` + 三重判停；+ Stage 3.10 自校零总开关（`f527a3d`）+ 栈修复 v2.0（`76d7d30`）——2 KB + canary + 结构体包装；补写 §7B/§7C/§7D 完整章节 |
 | v0.9 | 2026-05-30 | + Stage 3.11 赛道模式——`app_track` 状态机 + rise/motion 双 PID + 速度包络判圈 + K230 在线等待自启动；`VEHICLE_STATUS` 扩展 `track_phase/lap`；§7E 完整章节 |
 | v0.10 | 2026-05-30 | + `3ea42c78`：蜂鸣器支持与曲谱播放——新增 `bsp_buzzer` / `app_buzzer`；赛道模式 `app_track_start()` 自动播放《兰花草》，cancel 立即停止；fatal IMU 告警改为蜂鸣器接口 |
-| v0.11 | 2026-05-30 | + `67876e8`：Stage 3.11 TRACE 速度逻辑修订——取消 MCU 侧二次加速限速，直接透传 K230 raw cps；保留 BRAKE/FINAL_BRAKE 本地减速包络；文档同步说明“赛道 TRACE 与手动 WiFi trace 对齐” |
+| v0.11 | 2026-05-30 | + `67876e8`：Stage 3.11 TRACE 速度逻辑修订——取消 MCU 侧二次加速限速，直接透传 K230 raw cps；保留 BRAKE/FINAL_BRAKE 本地减速包络；文档同步说明"赛道 TRACE 与手动 WiFi trace 对齐" |
+| v0.12 | 2026-05-31 | + Stage 3.11a：速度环积分冻结（`b908a079`）——`pid2_t.freeze_integral` + 目标低通常驻在线，修复点头顿挫；`PITCH_OFFSET` 0.8→-1.0；`TRK_GAIN_SPEED_KP/KI` 调整；`SETTLE_MS` 400→3000（`4286733`）；`PITCH_OFFSET` -1.0→-0.5 |
+| v0.13 | 2026-05-31 | + Stage 3.11b（上）：减速停稳判定重构（`8452ed3`）——`begin_decel_phase` + `decel_phase_done` + `BRAKE_MAX_MS` 超时兜底；激光模块 `bsp_laser`（`8855622`）+ 蜂鸣器提示音 `app_buzzer_play_cue`（`8855622`）+ 判圈增强（里程收口②）；`SETTLE_MS` 3000→5000 |
+| v0.14 | 2026-06-02 | + Stage 3.11b（下）：减速逻辑增强（`467c367`）——`decel_speed_ref` + `track_decel_tick` + 差速同比缩放 + STAND_SETTLE 即切运动 PID；反速刹车重构（`19e2454`）——`track_brake_tick` + `BRAKE_REVERSE_CPS/MS` + `brake_phase_done`；`LAP_ARC_COMPLETE_X100` 85→90 |
