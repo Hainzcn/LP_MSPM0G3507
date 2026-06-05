@@ -82,6 +82,11 @@ typedef enum {
 #define APP_TRACK_AUTOSTART_K230_WAIT_MS    (15000u)
 #endif
 
+/** K230 首次在线后，再等待多久才触发自立（ms）。规避 K230 上电瞬间 EMI/编码器噪声。 */
+#ifndef APP_TRACK_K230_ONLINE_DELAY_MS
+#define APP_TRACK_K230_ONLINE_DELAY_MS      (1000u)
+#endif
+
 /** 完成圈数。 */
 #ifndef APP_TRACK_N_LAPS
 #define APP_TRACK_N_LAPS                    (2u)

@@ -1295,6 +1295,7 @@ bool app_balance_run(void)
     app_track_init();
     bool     track_autostarted = false;
     uint32_t armed_at_ms       = 0u;   /* 首次观测到 ARMED 的时刻（等待 K230 起算） */
+    uint32_t k230_online_at_ms = 0u;   /* K230 首次在线时刻（在线后再延迟自立） */
 
     for (;;) {
         if (!bsp_systick_consume_tick()) {
@@ -1320,10 +1321,17 @@ bool app_balance_run(void)
 #if APP_TRACK_AUTOSTART_WAIT_K230
             bool k230_ready   = s_k230_online;
             bool wait_expired = (tick_count - armed_at_ms) >= APP_TRACK_AUTOSTART_K230_WAIT_MS;
-            if (k230_ready || wait_expired) {
+            if (k230_ready && (k230_online_at_ms == 0u)) {
+                k230_online_at_ms = tick_count;
+            }
+            bool k230_settled = k230_ready &&
+                (k230_online_at_ms != 0u) &&
+                ((tick_count - k230_online_at_ms) >= APP_TRACK_K230_ONLINE_DELAY_MS);
+            if (wait_expired || k230_settled) {
                 track_autostarted = true;
                 (void)printf("[track] autostart: %s\r\n",
-                    k230_ready ? "K230 online" : "K230 wait timeout");
+                    wait_expired ? "K230 wait timeout"
+                                 : "K230 online + delay");
                 app_track_start();
             }
 #else
